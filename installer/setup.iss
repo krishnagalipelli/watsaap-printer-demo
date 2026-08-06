@@ -121,8 +121,8 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    if MsgBox('Also delete the job history and captured documents in {#DataDir}?'#13#10#13#10
-              'This is the record of every message that was sent. Keep it unless '
+    if MsgBox('Also delete the job history and captured documents in {#DataDir}?' + #13#10 + #13#10 +
+              'This is the record of every message that was sent. Keep it unless ' +
               'you are sure you no longer need it.',
               mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
       DelTree(ExpandConstant('{#DataDir}'), True, True, True);
