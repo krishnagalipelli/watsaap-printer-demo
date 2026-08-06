@@ -107,8 +107,8 @@ try {
     Push-Location 'src\baileys_service'
     try {
         Invoke-Step "npm install --no-fund --no-audit"
-        # Using npx pkg to avoid needing a global pkg installation
-        Invoke-Step "npx --yes pkg . --targets node18-win-x64 --output ..\..\dist\baileys-service.exe"
+        # Using @yao-pkg/pkg (maintained fork of pkg) that supports Node 20+
+        Invoke-Step "npx --yes @yao-pkg/pkg . --targets node20-win-x64 --output ..\..\dist\baileys-service.exe"
     } finally {
         Pop-Location
     }
