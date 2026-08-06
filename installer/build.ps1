@@ -102,9 +102,9 @@ try {
     Write-Host '== Building Baileys Service (Node.js) ==' -ForegroundColor Cyan
     Push-Location 'src\baileys_service'
     try {
-        Invoke-Step "npm install"
+        Invoke-Step "npm install --no-fund --no-audit"
         # Using npx pkg to avoid needing a global pkg installation
-        Invoke-Step "npx pkg . --targets node18-win-x64 --output ..\..\dist\baileys-service.exe"
+        Invoke-Step "npx --yes pkg . --targets node18-win-x64 --output ..\..\dist\baileys-service.exe"
     } finally {
         Pop-Location
     }
