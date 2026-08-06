@@ -1,0 +1,106 @@
+name: Build Windows installer
+
+# Produces the installer .exe on a Windows runner, so no Windows machine is
+# needed to build one. Download it from the run's Artifacts section, or from the
+# Releases page when a tag is pushed.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_ocr:
+        description: "Build without OCR (smaller, cannot read scanned invoices)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # needed to attach the installer to a release
+
+jobs:
+  test:
+    # Cheap gate: catch a broken build on Linux before paying for a Windows
+    # runner. The Tk dialog tests skip themselves where there is no display.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  build:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install Tesseract
+        if: ${{ !inputs.skip_ocr }}
+        run: choco install tesseract --no-progress -y
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Locate Tesseract
+        if: ${{ !inputs.skip_ocr }}
+        id: tess
+        shell: pwsh
+        run: |
+          # Chocolatey's package location has moved between versions, so find it
+          # rather than hardcoding a path that silently produces an OCR-less build.
+          $candidates = @(
+            'C:\Program Files\Tesseract-OCR',
+            'C:\Program Files (x86)\Tesseract-OCR',
+            'C:\tools\tesseract'
+          )
+          $found = $candidates | Where-Object { Test-Path (Join-Path $_ 'tesseract.exe') } | Select-Object -First 1
+          if (-not $found) { throw "Tesseract not found in: $($candidates -join ', ')" }
+          Write-Host "Found Tesseract at $found"
+          "dir=$found" >> $env:GITHUB_OUTPUT
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $args = @{ Python = 'python'; ISCC = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' }
+          if ('${{ inputs.skip_ocr }}' -eq 'true') {
+            .\installer\build.ps1 @args -SkipOcr
+          } else {
+            .\installer\build.ps1 @args -TesseractDir '${{ steps.tess.outputs.dir }}'
+          }
+
+      - name: Check the installer exists
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem 'installer\Output\*.exe' -ErrorAction SilentlyContinue
+          if (-not $exe) { throw 'No installer was produced.' }
+          $exe | ForEach-Object { Write-Host ("{0} ({1:N1} MB)" -f $_.Name, ($_.Length / 1MB)) }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WhatsAppPrinter-Setup
+          path: installer/Output/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/Output/*.exe
+          generate_release_notes: true

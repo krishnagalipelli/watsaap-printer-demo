@@ -1,0 +1,49 @@
+[project]
+name = "waprinter"
+version = "0.1.0"
+description = "Virtual Windows printer that sends printed invoices to customers over WhatsApp"
+requires-python = ">=3.11"
+
+dependencies = [
+    "pymupdf>=1.24",
+    "httpx>=0.27",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "jinja2>=3.1",
+    "pydantic>=2.7",
+    "watchdog>=4.0",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+# Windows-only, and optional even there: pywin32 is used only to read document
+# titles out of the print spooler's event log. Capture works without it.
+windows = [
+    "pywin32>=306",
+]
+dev = [
+    "pytest>=8.0",
+    "respx>=0.21",
+]
+
+[project.scripts]
+waprinter = "waprinter.cli:main"
+
+[project.gui-scripts]
+# gui-scripts, not scripts: on Windows this builds a launcher with no console
+# window, which is what you want for something that starts at logon.
+waprinter-agent = "waprinter.agent:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+# Do not promote DeprecationWarning to an error here: PyMuPDF emits one during
+# native module init, and raising inside the C extension's init segfaults the
+# interpreter rather than failing a test.
