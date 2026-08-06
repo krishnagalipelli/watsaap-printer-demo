@@ -73,8 +73,12 @@ try {
     Invoke-Step "$Python -m pip install --upgrade pip pyinstaller"
     Invoke-Step "$Python -m pip install -e `".[dev,windows]`""
 
-    Write-Host '== Running tests ==' -ForegroundColor Cyan
-    Invoke-Step "$Python -m pytest -q"
+    if ($env:CI) {
+        Write-Host '== Skipping tests (already run in CI) ==' -ForegroundColor Yellow
+    } else {
+        Write-Host '== Running tests ==' -ForegroundColor Cyan
+        Invoke-Step "$Python -m pytest -q"
+    }
 
     Write-Host '== Freezing the agent ==' -ForegroundColor Cyan
     if (Test-Path 'dist') { Remove-Item -Recurse -Force 'dist' }

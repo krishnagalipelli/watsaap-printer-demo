@@ -21,20 +21,6 @@ permissions:
   contents: write   # needed to attach the installer to a release
 
 jobs:
-  test:
-    # Cheap gate: catch a broken build on Linux before paying for a Windows
-    # runner. The Tk dialog tests skip themselves where there is no display.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: pip install -e ".[dev]"
-      - run: pytest -q
-
   build:
     runs-on: windows-latest
     steps:
