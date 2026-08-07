@@ -101,6 +101,42 @@ BASE = """
 """
 
 DASHBOARD = """
+<div id="wa-status" style="border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:20px; background:var(--card); text-align:center; display:none;">
+  <h2 style="margin:0 0 8px; color:var(--bad);">⚠ WhatsApp Not Connected</h2>
+  <p style="color:var(--muted); margin:0 0 12px;">Scan this QR code with your WhatsApp to link this device</p>
+  <img id="wa-qr" style="max-width:280px; border-radius:8px; border:1px solid var(--line);" />
+  <p id="wa-waiting" style="color:var(--muted); margin:12px 0 0; display:none;">Waiting for QR code...</p>
+</div>
+<div id="wa-connected" style="border:1px solid var(--accent); border-radius:8px; padding:12px 16px; margin-bottom:20px; background:var(--card); display:none;">
+  <span style="color:var(--accent); font-weight:600;">✓ WhatsApp Connected</span>
+</div>
+<script>
+(function() {
+  var box = document.getElementById('wa-status');
+  var ok  = document.getElementById('wa-connected');
+  var img = document.getElementById('wa-qr');
+  var wait = document.getElementById('wa-waiting');
+  function poll() {
+    fetch('/wa-status').then(function(r){ return r.json(); }).then(function(d) {
+      if (d.state === 'open') {
+        box.style.display = 'none';
+        ok.style.display = 'block';
+      } else {
+        ok.style.display = 'none';
+        box.style.display = 'block';
+        if (d.qr) { img.src = d.qr; img.style.display = 'block'; wait.style.display = 'none'; }
+        else { img.style.display = 'none'; wait.style.display = 'block'; }
+      }
+    }).catch(function() {
+      box.style.display = 'none';
+      ok.style.display = 'none';
+    });
+  }
+  poll();
+  setInterval(poll, 3000);
+})();
+</script>
+
 <h2>Today</h2>
 <div class="tiles">
   <div class="tile good">

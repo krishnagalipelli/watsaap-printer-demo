@@ -102,6 +102,16 @@ def create_app(pipeline: Pipeline) -> FastAPI:
             delivery_available=False,
         )
 
+    @app.get("/wa-status")
+    def wa_status():
+        from fastapi.responses import JSONResponse
+        try:
+            if hasattr(pipeline, "sender") and hasattr(pipeline.sender, "get_status"):
+                return JSONResponse(pipeline.sender.get_status())
+            return JSONResponse({"state": "unknown", "error": "no baileys sender"})
+        except Exception as exc:
+            return JSONResponse({"state": "error", "error": str(exc)})
+
     @app.get("/queue", response_class=HTMLResponse)
     def queue(request: Request):
         jobs = store.pending()
