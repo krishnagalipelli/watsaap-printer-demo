@@ -1,7 +1,7 @@
 const express = require('express');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const qrcode = require('qrcode-terminal');
+const qrcode = require('qrcode');
 const fs = require('fs');
 
 const app = express();
@@ -9,6 +9,8 @@ app.use(express.json());
 
 const PORT = 8732;
 let sock = null;
+let currentConnectionState = 'connecting';
+let currentQrDataUrl = null;
 
 async function connectToWhatsApp() {
     const dataDir = process.env.PROGRAMDATA ? `${process.env.PROGRAMDATA}\\WAPrinter\\baileys_auth_info` : 'baileys_auth_info';
@@ -22,24 +24,33 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
         
         if (qr) {
-            console.log('\n--- SCAN THIS QR CODE WITH WHATSAPP TO LOG IN ---');
-            qrcode.generate(qr, { small: true });
+            console.log('\n--- NEW QR CODE GENERATED ---');
+            try {
+                currentQrDataUrl = await qrcode.toDataURL(qr);
+            } catch (err) {
+                console.error('Failed to generate QR data URL', err);
+            }
         }
         
         if (connection === 'close') {
+            currentConnectionState = 'close';
+            currentQrDataUrl = null;
             const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('connection closed due to ', lastDisconnect.error, ', reconnecting ', shouldReconnect);
             
             if (shouldReconnect) {
+                currentConnectionState = 'connecting';
                 connectToWhatsApp();
             } else {
                 console.log('You are logged out. Please delete the baileys_auth_info folder and restart.');
             }
         } else if (connection === 'open') {
+            currentConnectionState = 'open';
+            currentQrDataUrl = null;
             console.log('Opened connection to WhatsApp');
         }
     });
@@ -47,6 +58,13 @@ async function connectToWhatsApp() {
 
 // Ensure WhatsApp connection starts
 connectToWhatsApp();
+
+app.get('/status', (req, res) => {
+    res.json({
+        state: currentConnectionState,
+        qr: currentQrDataUrl
+    });
+});
 
 app.post('/send', async (req, res) => {
     if (!sock) {

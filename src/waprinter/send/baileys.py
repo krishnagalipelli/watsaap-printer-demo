@@ -64,3 +64,13 @@ class BaileysSender:
 
         wamid = payload.get("wamid", "unknown")
         return SendResult(ok=True, wamid=wamid)
+
+    def get_status(self) -> dict:
+        try:
+            url = self.url.replace("/send", "/status")
+            response = self._client.get(url)
+            if response.is_success:
+                return response.json()
+            return {"state": "error", "error": f"HTTP {response.status_code}"}
+        except Exception as exc:
+            return {"state": "error", "error": str(exc)}

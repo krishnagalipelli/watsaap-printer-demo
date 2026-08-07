@@ -56,13 +56,16 @@ class SendDialog:
         dry_run: bool,
         on_send: Callable[[str, str], None],
         on_skip: Callable[[], None],
+        fetch_status: Callable[[], dict | None] = lambda: None,
     ):
         self.job = job
         self.country_code = country_code
         self.on_send = on_send
         self.on_skip = on_skip
+        self.fetch_status = fetch_status
         self._sent = False
         self._thumbnail: tk.PhotoImage | None = None  # must outlive the call
+        self._qr_image: tk.PhotoImage | None = None
 
         self.win = tk.Toplevel(master)
         self.win.title("Send on WhatsApp")
@@ -105,6 +108,7 @@ class SendDialog:
         # cannot run while the form is still being constructed.
         self._refresh_preview()
         self._validate()
+        self._poll_status()
 
     def _build_preview(self, parent: tk.Frame) -> None:
         left = tk.Frame(parent, bg=BG)
@@ -149,8 +153,15 @@ class SendDialog:
             return None
 
     def _build_form(self, parent: tk.Frame) -> None:
-        right = tk.Frame(parent, bg=BG)
-        right.pack(side="left", fill="both", expand=True)
+        self.right_frame = tk.Frame(parent, bg=BG)
+        self.right_frame.pack(side="left", fill="both", expand=True)
+
+        self.form_frame = tk.Frame(self.right_frame, bg=BG)
+        self.form_frame.pack(fill="both", expand=True)
+        
+        # We also prepare the QR labels but don't pack them yet
+        self.qr_msg = tk.Label(self.right_frame, text="Scan to link WhatsApp", bg=BG, fg=DANGER, font=("Segoe UI", 11, "bold"))
+        self.qr_label = tk.Label(self.right_frame, bg=BG)
 
         heading = tkfont.Font(family="Segoe UI", size=13, weight="bold")
         title = (
@@ -158,7 +169,7 @@ class SendDialog:
             or self.job.doc_title
             or "Printed document"
         )
-        tk.Label(right, text=title, bg=BG, font=heading, anchor="w").pack(
+        tk.Label(self.form_frame, text=title, bg=BG, font=heading, anchor="w").pack(
             fill="x"
         )
 
@@ -174,39 +185,39 @@ class SendDialog:
         ]
         if detail_bits:
             tk.Label(
-                right, text="  ·  ".join(detail_bits), bg=BG, fg=MUTED, anchor="w"
+                self.form_frame, text="  ·  ".join(detail_bits), bg=BG, fg=MUTED, anchor="w"
             ).pack(fill="x", pady=(0, 10))
 
         # --- customer name (feeds a template variable) --------------------
-        tk.Label(right, text="Customer name", bg=BG, anchor="w").pack(fill="x")
+        tk.Label(self.form_frame, text="Customer name", bg=BG, anchor="w").pack(fill="x")
         self.name_var = tk.StringVar(value=self.job.fields.customer_name or "")
         self.name_var.trace_add("write", lambda *_: self._refresh_preview())
-        ttk.Entry(right, textvariable=self.name_var, width=34).pack(
+        ttk.Entry(self.form_frame, textvariable=self.name_var, width=34).pack(
             fill="x", pady=(2, 10)
         )
 
         # --- the number ---------------------------------------------------
         tk.Label(
-            right, text="WhatsApp number", bg=BG, anchor="w"
+            self.form_frame, text="WhatsApp number", bg=BG, anchor="w"
         ).pack(fill="x")
         self.number_var = tk.StringVar(value=self._initial_number())
         self.number_var.trace_add("write", lambda *_: self._validate())
-        self.entry = ttk.Entry(right, textvariable=self.number_var, width=34)
+        self.entry = ttk.Entry(self.form_frame, textvariable=self.number_var, width=34)
         self.entry.pack(fill="x", pady=(2, 2))
         self.entry.bind("<Return>", lambda _e: self._send())
 
-        self.status = tk.Label(right, text="", bg=BG, fg=MUTED, anchor="w")
+        self.status = tk.Label(self.form_frame, text="", bg=BG, fg=MUTED, anchor="w")
         self.status.pack(fill="x", pady=(0, 10))
 
         # --- message ------------------------------------------------------
-        tk.Label(right, text="Message", bg=BG, anchor="w").pack(fill="x")
+        tk.Label(self.form_frame, text="Message", bg=BG, anchor="w").pack(fill="x")
         self.preview = tk.Text(
-            right, height=7, width=34, wrap="word", bg="white", relief="solid",
+            self.form_frame, height=7, width=34, wrap="word", bg="white", relief="solid",
             borderwidth=1, padx=8, pady=6,
         )
         self.preview.pack(fill="both", expand=True, pady=(2, 2))
         tk.Label(
-            right,
+            self.form_frame,
             text="Wording is fixed by the approved template — change it in Settings.",
             bg=BG,
             fg=MUTED,
@@ -251,6 +262,31 @@ class SendDialog:
         x = (self.win.winfo_screenwidth() - width) // 2
         y = (self.win.winfo_screenheight() - height) // 3
         self.win.geometry(f"+{x}+{y}")
+
+    def _poll_status(self) -> None:
+        if not self.win.winfo_exists():
+            return
+            
+        status = self.fetch_status()
+        if status and status.get("state") != "open":
+            self.form_frame.pack_forget()
+            self.qr_msg.pack(pady=(10, 5))
+            self.qr_label.pack(pady=10)
+            self.send_button.configure(state="disabled")
+            
+            qr_data = status.get("qr")
+            if qr_data and qr_data.startswith("data:image/png;base64,"):
+                import base64
+                b64 = qr_data.split(",")[1]
+                self._qr_image = tk.PhotoImage(data=base64.b64decode(b64))
+                self.qr_label.configure(image=self._qr_image)
+        else:
+            self.qr_msg.pack_forget()
+            self.qr_label.pack_forget()
+            self.form_frame.pack(fill="both", expand=True)
+            self._validate()
+            
+        self.win.after(2000, self._poll_status)
 
     # -- behaviour ---------------------------------------------------------
 
@@ -367,6 +403,11 @@ class DialogHost:
             finally:
                 finish()
 
+        def fetch_status() -> dict | None:
+            if hasattr(self.pipeline.sender, "get_status"):
+                return self.pipeline.sender.get_status()
+            return None
+
         SendDialog(
             self.root,
             job,
@@ -374,6 +415,7 @@ class DialogHost:
             dry_run=self.pipeline.settings.dry_run,
             on_send=send,
             on_skip=skip,
+            fetch_status=fetch_status,
         )
 
     def run(self) -> None:
