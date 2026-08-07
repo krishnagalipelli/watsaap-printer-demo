@@ -79,16 +79,25 @@ class Agent:
 
     def _serve_web(self) -> None:
         try:
+            import io
             import uvicorn
 
             from .ui.app import create_app
+
+            # PyInstaller --windowed sets sys.stderr and sys.stdout to None
+            # because there is no console. Uvicorn's log formatter calls
+            # sys.stderr.isatty() which crashes with AttributeError.
+            if sys.stderr is None:
+                sys.stderr = io.StringIO()
+            if sys.stdout is None:
+                sys.stdout = io.StringIO()
 
             log.info("starting dashboard on http://127.0.0.1:%s", self.settings.ui_port)
             uvicorn.run(
                 create_app(self.pipeline),
                 host="127.0.0.1",
                 port=self.settings.ui_port,
-                log_level="warning",
+                log_config=None,
             )
         except Exception:
             log.exception("web server thread crashed")
