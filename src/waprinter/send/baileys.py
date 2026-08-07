@@ -37,7 +37,7 @@ class BaileysSender:
             response = self._client.post(
                 self.url,
                 json={
-                    "recipient": recipient,
+                    "recipient": recipient.lstrip("+"),
                     "pdf_path": str(pdf_path.absolute()),
                     "message": text
                 }
