@@ -80,26 +80,55 @@ try {
         Invoke-Step "$Python -m pytest -q"
     }
 
+    # NOTE: the entry points are the shims in packaging\, never the modules in
+    # src\waprinter\. PyInstaller runs its entry script as __main__, and those
+    # modules use relative imports, which fail instantly when run that way.
+    # Frozen --windowed that failure is invisible: the exe just does nothing.
     Write-Host '== Freezing the agent ==' -ForegroundColor Cyan
     if (Test-Path 'dist') { Remove-Item -Recurse -Force 'dist' }
     Invoke-Step (
         "$Python -m PyInstaller --noconfirm --clean --windowed " +
         "--name waprinter-agent " +
+        "--paths src " +
         "--hidden-import win32timezone " +
         "--hidden-import uvicorn.logging " +
         "--hidden-import uvicorn.loops.auto " +
         "--hidden-import uvicorn.protocols.http.auto " +
         "--hidden-import uvicorn.protocols.websockets.auto " +
         "--hidden-import uvicorn.lifespan.on " +
-        "src\waprinter\agent.py"
+        "packaging\waprinter_agent.py"
     )
 
     Write-Host '== Freezing the CLI ==' -ForegroundColor Cyan
     Invoke-Step (
         "$Python -m PyInstaller --noconfirm --clean --console " +
-        "--name waprinter --distpath dist\cli " +
-        "src\waprinter\cli.py"
+        "--name waprinter --distpath dist\cli --paths src " +
+        "packaging\waprinter_cli.py"
     )
+
+    # Run what was just built. A frozen app can fail on imports that work fine
+    # from source, and --windowed hides it completely, so the build must not be
+    # allowed to call that a success. This exact check would have caught the
+    # broken installer that shipped before.
+    Write-Host '== Smoke testing the frozen executables ==' -ForegroundColor Cyan
+    $cliExe   = 'dist\cli\waprinter\waprinter.exe'
+    $agentExe = 'dist\waprinter-agent\waprinter-agent.exe'
+    foreach ($exe in @($cliExe, $agentExe)) {
+        if (-not (Test-Path $exe)) { throw "PyInstaller produced no $exe" }
+    }
+
+    & $cliExe --help | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Smoke test failed: $cliExe --help returned $LASTEXITCODE" }
+    Write-Host '  ok    waprinter.exe --help'
+
+    # --windowed means no console output, so the exit code is the signal.
+    $agent = Start-Process -FilePath $agentExe -ArgumentList '--selftest' -Wait -PassThru
+    if ($agent.ExitCode -ne 0) {
+        $crash = Join-Path $env:PROGRAMDATA 'WAPrinter\logs\crash.txt'
+        if (Test-Path $crash) { Write-Host (Get-Content $crash -Raw) -ForegroundColor Red }
+        throw "Smoke test failed: waprinter-agent.exe --selftest returned $($agent.ExitCode)"
+    }
+    Write-Host '  ok    waprinter-agent.exe --selftest'
 
     Copy-Tesseract
 

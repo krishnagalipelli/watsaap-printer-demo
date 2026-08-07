@@ -18,7 +18,11 @@ and the main thread picks it up.
 from __future__ import annotations
 
 import logging
+import sys
 import threading
+import traceback
+from datetime import datetime
+from pathlib import Path
 
 from .capture.spooler import latest_job
 from .capture.watcher import SpoolWatcher
@@ -104,14 +108,88 @@ class Agent:
         log.info("WhatsApp Printer agent stopped")
 
 
-def main() -> None:
-    configure_logging(paths().logs)
+def _write_crash_report(exc: BaseException) -> Path | None:
+    """Record a startup failure somewhere a person can find it.
+
+    Frozen with --windowed there is no console and no stderr, so an exception
+    here is otherwise completely invisible — the exe just appears not to run.
+    Uses plain file IO rather than logging, because logging may be the thing
+    that failed.
+    """
     try:
-        Agent().run()
+        target = paths().logs
+        target.mkdir(parents=True, exist_ok=True)
+        report = target / "crash.txt"
+        with report.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n{'=' * 60}\n{datetime.now():%Y-%m-%d %H:%M:%S}\n")
+            fh.write(f"frozen={getattr(sys, 'frozen', False)} exe={sys.executable}\n\n")
+            traceback.print_exception(exc, file=fh)
+        return report
     except Exception:
+        return None
+
+
+def _show_crash(exc: BaseException, report: Path | None) -> None:
+    where = f"\n\nDetails were written to:\n{report}" if report else ""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "WhatsApp Printer could not start",
+            f"{type(exc).__name__}: {exc}{where}",
+        )
+        root.destroy()
+    except Exception:
+        pass  # no display; the crash file is the fallback
+
+
+def selftest() -> int:
+    """Build everything and exit, without opening a window.
+
+    The build runs this against the frozen executable. It catches the failure
+    mode that shipped a broken installer once already: an import that only
+    breaks when packaged, which --windowed then hides completely.
+    """
+    agent = Agent()
+    checks = {
+        "settings": agent.settings is not None,
+        "pipeline": agent.pipeline is not None,
+        "templates": agent.pipeline.templates.get(
+            agent.settings.default_template
+        ) is not None,
+        "spool dir": agent.paths.spool.is_dir(),
+        "dialog host": agent.host is not None,
+    }
+    for name, ok in checks.items():
+        print(f"  {'ok  ' if ok else 'FAIL'}  {name}")
+    failed = [name for name, ok in checks.items() if not ok]
+    if failed:
+        print(f"selftest FAILED: {', '.join(failed)}")
+        return 1
+    print("selftest passed")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    try:
+        configure_logging(paths().logs)
+        if "--selftest" in argv:
+            return selftest()
+        Agent().run()
+        return 0
+    except Exception as exc:
         log.exception("agent crashed")
-        raise
+        report = _write_crash_report(exc)
+        if "--selftest" in argv:
+            traceback.print_exception(exc)
+            return 1
+        _show_crash(exc, report)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

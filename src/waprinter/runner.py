@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import sys
 import threading
 from pathlib import Path
 
@@ -26,7 +27,11 @@ def configure_logging(log_dir: Path, level: int = logging.INFO) -> None:
     root = logging.getLogger()
     root.setLevel(level)
     root.addHandler(handler)
-    root.addHandler(logging.StreamHandler())
+
+    # Frozen with --windowed there is no console, and sys.stderr is None. A
+    # StreamHandler on it fails on every single log record.
+    if sys.stderr is not None:
+        root.addHandler(logging.StreamHandler())
 
 
 class Runner:

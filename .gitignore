@@ -8,3 +8,9 @@ dist/
 installer/Output/
 *.egg-info/
 node_modules/
+
+# WhatsApp session credentials. Anyone holding these files can send messages as
+# the linked account, so they must never reach the repository.
+baileys_auth_info/
+whatsapp_token.*
+settings.json
