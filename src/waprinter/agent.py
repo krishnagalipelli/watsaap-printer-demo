@@ -78,16 +78,20 @@ class Agent:
     # -- lifecycle ---------------------------------------------------------
 
     def _serve_web(self) -> None:
-        import uvicorn
+        try:
+            import uvicorn
 
-        from .ui.app import create_app
+            from .ui.app import create_app
 
-        uvicorn.run(
-            create_app(self.pipeline),
-            host="127.0.0.1",
-            port=self.settings.ui_port,
-            log_level="warning",
-        )
+            log.info("starting dashboard on http://127.0.0.1:%s", self.settings.ui_port)
+            uvicorn.run(
+                create_app(self.pipeline),
+                host="127.0.0.1",
+                port=self.settings.ui_port,
+                log_level="warning",
+            )
+        except Exception:
+            log.exception("web server thread crashed")
 
     def run(self) -> None:
         for target, name in ((self.watcher.run, "watcher"), (self._serve_web, "web")):
