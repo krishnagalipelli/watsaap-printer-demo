@@ -1,7 +1,6 @@
 const express = require('express');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const qrcode = require('qrcode');
 const fs = require('fs');
 
 const app = express();
@@ -10,7 +9,7 @@ app.use(express.json());
 const PORT = 8732;
 let sock = null;
 let currentConnectionState = 'connecting';
-let currentQrDataUrl = null;
+let currentQrText = null;
 
 async function connectToWhatsApp() {
     const dataDir = process.env.PROGRAMDATA ? `${process.env.PROGRAMDATA}\\WAPrinter\\baileys_auth_info` : 'baileys_auth_info';
@@ -29,16 +28,12 @@ async function connectToWhatsApp() {
         
         if (qr) {
             console.log('\n--- NEW QR CODE GENERATED ---');
-            try {
-                currentQrDataUrl = await qrcode.toDataURL(qr);
-            } catch (err) {
-                console.error('Failed to generate QR data URL', err);
-            }
+            currentQrText = qr;
         }
         
         if (connection === 'close') {
             currentConnectionState = 'close';
-            currentQrDataUrl = null;
+            currentQrText = null;
             const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('connection closed due to ', lastDisconnect.error, ', reconnecting ', shouldReconnect);
             
@@ -50,7 +45,7 @@ async function connectToWhatsApp() {
             }
         } else if (connection === 'open') {
             currentConnectionState = 'open';
-            currentQrDataUrl = null;
+            currentQrText = null;
             console.log('Opened connection to WhatsApp');
         }
     });
@@ -62,7 +57,7 @@ connectToWhatsApp();
 app.get('/status', (req, res) => {
     res.json({
         state: currentConnectionState,
-        qr: currentQrDataUrl
+        qr: currentQrText
     });
 });
 

@@ -110,6 +110,7 @@ DASHBOARD = """
 <div id="wa-connected" style="border:1px solid var(--accent); border-radius:8px; padding:12px 16px; margin-bottom:20px; background:var(--card); display:none;">
   <span style="color:var(--accent); font-weight:600;">✓ WhatsApp Connected</span>
 </div>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
 <script>
 (function() {
   var box = document.getElementById('wa-status');
@@ -124,7 +125,15 @@ DASHBOARD = """
       } else {
         ok.style.display = 'none';
         box.style.display = 'block';
-        if (d.qr) { img.src = d.qr; img.style.display = 'block'; wait.style.display = 'none'; }
+        if (d.qr) {
+          QRCode.toDataURL(d.qr, { width: 280, margin: 2 }, function (err, url) {
+            if (!err) {
+              img.src = url;
+              img.style.display = 'inline-block';
+              wait.style.display = 'none';
+            }
+          });
+        }
         else { img.style.display = 'none'; wait.style.display = 'block'; }
       }
     }).catch(function() {
