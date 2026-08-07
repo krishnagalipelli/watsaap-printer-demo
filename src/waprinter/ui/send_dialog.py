@@ -270,19 +270,11 @@ class SendDialog:
         status = self.fetch_status()
         if status and status.get("state") != "open":
             self.form_frame.pack_forget()
-            self.qr_msg.pack(pady=(10, 5))
-            self.qr_label.pack(pady=10)
+            self.qr_msg.configure(text="⚠ WhatsApp Not Connected\n\nPlease open the Dashboard from your Start Menu\nto scan the QR code and link your device.")
+            self.qr_msg.pack(pady=(20, 20))
             self.send_button.configure(state="disabled")
-            
-            qr_data = status.get("qr")
-            if qr_data and qr_data.startswith("data:image/png;base64,"):
-                import base64
-                b64 = qr_data.split(",")[1]
-                self._qr_image = tk.PhotoImage(data=base64.b64decode(b64))
-                self.qr_label.configure(image=self._qr_image)
         else:
             self.qr_msg.pack_forget()
-            self.qr_label.pack_forget()
             self.form_frame.pack(fill="both", expand=True)
             self._validate()
             
