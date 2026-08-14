@@ -24,14 +24,15 @@ class BaileysSender:
         message: RenderedMessage,
     ) -> SendResult:
         
-        # Build the message text from the template parts (like the Cloud API does)
-        # We can just send the text alongside the PDF caption.
-        # Alternatively, we could send two messages (document, then text), but 
-        # the Node server expects `message` as caption for simplicity.
-        
-        text = ""
-        if message.parameters:
-            text = "\n".join(message.parameters)
+        # The rendered message, not the raw variable values. Joining
+        # message.parameters sent the customer a caption reading
+        #     ANITHA RAMESH
+        #     CR1747/26
+        # instead of the sentence they were shown in the send dialog.
+        #
+        # Unlike the official API there is no template restriction here, so the
+        # full wording goes out exactly as previewed.
+        text = message.preview
 
         try:
             response = self._client.post(
@@ -64,6 +65,15 @@ class BaileysSender:
 
         wamid = payload.get("wamid", "unknown")
         return SendResult(ok=True, wamid=wamid)
+
+    def is_connected(self) -> bool:
+        """True when the service is up and linked to a WhatsApp account."""
+        return self.get_status().get("state") == "open"
+
+    def qr_code(self) -> str | None:
+        """The pairing QR, when the service is waiting to be linked."""
+        status = self.get_status()
+        return status.get("qr") if status.get("state") != "open" else None
 
     def get_status(self) -> dict:
         try:

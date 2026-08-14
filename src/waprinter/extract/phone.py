@@ -24,6 +24,7 @@ import re
 
 from ..models import Confidence, PhoneCandidate
 from .pdf_text import Document, Page
+from .profile import DocumentProfile
 
 # --- scoring weights (tunable against the real-invoice corpus) --------------
 
@@ -48,32 +49,19 @@ CUSTOMER_BLOCK_WIDTH = 300.0
 
 # --- labels -----------------------------------------------------------------
 
-# A label that means "the digits after me are a phone number".
-PHONE_LABEL = re.compile(
-    r"\b(?:mobile|mob|movil|phone|ph|contact|cell|whats\s*app|whatsapp|"
-    r"tel|telephone|mo)\b\.?\s*(?:no\.?|nos\.?|number|#)?\s*[:\-–]?\s*$",
-    re.IGNORECASE,
-)
+# Which words count as labels is per-client configuration; see profile.py. The
+# regex structure around them lives here and does not vary.
 
-# A label that means "the digits after me are definitely NOT a phone number".
-# Anything anchored to one of these is rejected outright, whatever it scores.
-NOT_PHONE_LABEL = re.compile(
-    r"\b(?:gstin|gst|pan|hsn|sac|ifsc|a\s*/\s*c|acc?ount|invoice|bill|"
-    r"challan|e[\s\-]?way|eway|vehicle|lr|po|order|purchase|pin|pincode|"
-    r"cin|tin|udyam|msme|dated?|amount|qty|quantity|rate|cheque|check|"
-    r"utr|ref(?:erence)?|voucher|docu?m?e?n?t?|irn|ack|state\s*code|"
-    r"licen[cs]e|dl|fssai|serial|s\.?\s*no)\b\.?\s*"
-    r"(?:no\.?|nos\.?|number|code|#)?\s*[:\-–]?\s*$",
-    re.IGNORECASE,
-)
 
-# Headings that introduce the customer's details.
-CUSTOMER_ANCHOR = re.compile(
-    r"\b(?:bill(?:ed)?\s*[-–]?\s*to|buyer|consignee|customer|"
-    r"ship(?:ped)?\s*[-–]?\s*to|party\s*name|party|details\s*of\s*receiver|"
-    r"receiver)\b",
-    re.IGNORECASE,
-)
+def default_profile() -> DocumentProfile:
+    """The profile used when a caller does not supply one."""
+    global _DEFAULT
+    if _DEFAULT is None:
+        _DEFAULT = DocumentProfile()
+    return _DEFAULT
+
+
+_DEFAULT: DocumentProfile | None = None
 
 # Separators allowed *inside* a phone number. A "/" or "." or "," between digit
 # groups means we are looking at a date or an amount, not a number to dial.
@@ -194,18 +182,21 @@ def _find_raw_numbers(text: str) -> list[tuple[int, int, str]]:
     return found
 
 
-def _nearest_label(prefix: str) -> tuple[str | None, bool]:
+def _nearest_label(
+    prefix: str, profile: DocumentProfile | None = None
+) -> tuple[str | None, bool]:
     """Classify the closest label to the left of a number.
 
     Returns (label_text, is_phone_label). The *nearest* label wins, so a line
     reading "Invoice No: 4471   Mobile: 9876543210" resolves correctly for both
     numbers on it.
     """
+    profile = profile or default_profile()
     phone_hit = None
-    for m in re.finditer(PHONE_LABEL, prefix):
+    for m in re.finditer(profile.phone_label_re, prefix):
         phone_hit = m
     not_phone_hit = None
-    for m in re.finditer(NOT_PHONE_LABEL, prefix):
+    for m in re.finditer(profile.not_phone_label_re, prefix):
         not_phone_hit = m
 
     if phone_hit and not_phone_hit:
@@ -219,7 +210,9 @@ def _nearest_label(prefix: str) -> tuple[str | None, bool]:
     return None, False
 
 
-def _customer_blocks(page: Page) -> list[tuple[float, float, float, float]]:
+def _customer_blocks(
+    page: Page, profile: DocumentProfile
+) -> list[tuple[float, float, float, float]]:
     """Rectangles covering the Bill To / Consignee areas of a page.
 
     Anchored on lines rather than rows so the rectangle starts at the "Bill To"
@@ -227,7 +220,7 @@ def _customer_blocks(page: Page) -> list[tuple[float, float, float, float]]:
     """
     blocks = []
     for line in page.lines:
-        m = CUSTOMER_ANCHOR.search(line.text)
+        m = profile.customer_anchor_re.search(line.text)
         if not m:
             continue
         # Anchor horizontally on the heading itself, so a right-hand column at
@@ -257,13 +250,15 @@ def find_candidates(
     doc: Document,
     excluded: set[str] | None = None,
     country_code: str = "91",
+    profile: DocumentProfile | None = None,
 ) -> list[PhoneCandidate]:
     """All plausible customer numbers on the document, best first."""
     excluded = excluded or set()
+    profile = profile or default_profile()
     best: dict[str, PhoneCandidate] = {}
 
     for page in doc.pages:
-        blocks = _customer_blocks(page)
+        blocks = _customer_blocks(page, profile)
         footer_y = page.height * FOOTER_BAND
         letterhead_y = page.height * LETTERHEAD_BAND
 
@@ -276,7 +271,7 @@ def find_candidates(
                 if e164 is None or e164 in excluded:
                     continue
 
-                label, is_phone_label = _nearest_label(text[:start])
+                label, is_phone_label = _nearest_label(text[:start], profile)
                 if label and not is_phone_label:
                     continue  # anchored to GSTIN / Invoice No / A/c No / ...
 

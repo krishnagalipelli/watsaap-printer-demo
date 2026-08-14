@@ -73,8 +73,13 @@ Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{commondesktop}\{#AppName} Dashboard"; Filename: "{#DashboardUrl}"; \
     Tasks: desktopicon
 ; The agent must be running for a print to be noticed, so it starts at logon.
-Name: "{userstartup}\{#AppName}"; Filename: "{app}\waprinter-agent.exe"
-Name: "{userstartup}\{#AppName} Baileys Service"; Filename: "{app}\baileys-service.exe"
+; {commonstartup}, not {userstartup}: this installer requires admin, so it runs
+; as whoever supplied the admin password. At a client that is rarely the clerk
+; who will use the machine, and a per-user Startup entry would land in the
+; administrator's profile — the agent would then never start for the person
+; actually printing, and printing would appear to do nothing.
+Name: "{commonstartup}\{#AppName}"; Filename: "{app}\waprinter-agent.exe"
+Name: "{commonstartup}\{#AppName} Baileys Service"; Filename: "{app}\baileys-service.exe"
 
 [Tasks]
 Name: "desktopicon"; Description: "Put a Dashboard shortcut on the desktop"; \

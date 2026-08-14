@@ -14,3 +14,7 @@ node_modules/
 baileys_auth_info/
 whatsapp_token.*
 settings.json
+
+# Downloaded build artifacts and stray archives in the repo root.
+*.zip
+*.crdownload

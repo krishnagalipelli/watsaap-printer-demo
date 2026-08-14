@@ -263,10 +263,31 @@ SETTINGS = """
   <div class="hint">Comma separated. These are never treated as a customer, so
   the number in your invoice footer can't receive its own invoice.</div>
 
+  <h3>How messages are sent</h3>
+  {% for s in senders %}
+    <label>
+      <input type="radio" name="sender_type" value="{{ s.key }}"
+             {{ 'checked' if settings.sender_type == s.key }}>
+      {{ s.label }}
+    </label>
+    <div class="hint">{{ s.summary }}
+      {% if s.caution %}<br><strong>{{ s.caution }}</strong>{% endif %}
+    </div>
+  {% endfor %}
+
+  {% if problems %}
+    <div class="flash err" style="margin-top:12px">
+      Not ready to send:
+      <ul style="margin:6px 0 0 18px">
+        {% for p in problems %}<li>{{ p }}</li>{% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
   <label>WhatsApp phone number ID</label>
   <input type="text" name="phone_number_id" style="width:100%"
          value="{{ settings.phone_number_id }}">
-  <div class="hint">From Meta Business — WhatsApp → API Setup.</div>
+  <div class="hint">Official API only. From Meta Business — WhatsApp → API Setup.</div>
 
   <label>Message template</label>
   <input type="text" name="default_template" style="width:100%"

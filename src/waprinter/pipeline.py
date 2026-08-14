@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .config import Settings, paths
 from .extract import extract_fields
+from .extract.profile import DocumentProfile
 from .models import JobStatus, PrintJob
 from .rules import Decision, evaluate
 from .rules.gate import _excluded_numbers, dedupe_key
@@ -31,11 +32,15 @@ class Pipeline:
         store: Store,
         sender: Sender,
         templates: TemplateStore,
+        profile: DocumentProfile | None = None,
     ):
         self.settings = settings
         self.store = store
         self.sender = sender
         self.templates = templates
+        # What this client's paperwork calls things. Defaults cover every layout
+        # seen so far; a profile.json overrides key by key.
+        self.profile = profile or DocumentProfile()
 
     def process(
         self,
@@ -65,6 +70,7 @@ class Pipeline:
                 excluded_numbers=_excluded_numbers(self.settings),
                 country_code=self.settings.default_country_code,
                 ocr=self.settings.ocr(),
+                profile=self.profile,
             )
         except Exception as exc:  # a malformed PDF must not stop the service
             log.exception("extraction failed for %s", pdf_path)
@@ -265,7 +271,8 @@ def build_default(settings: Settings | None = None) -> Pipeline:
     p = paths()
     p.ensure()
     store = Store(p.db)
-    templates = TemplateStore(p.root / "templates.json")
+    templates = TemplateStore(p.templates)
+    profile = DocumentProfile.load(p.profile)
 
     sender: Sender
     if settings.dry_run:
@@ -292,4 +299,4 @@ def build_default(settings: Settings | None = None) -> Pipeline:
             api_version=settings.graph_api_version,
         )
 
-    return Pipeline(settings, store, sender, templates)
+    return Pipeline(settings, store, sender, templates, profile)

@@ -49,6 +49,92 @@ class InvoiceSpec:
     raster_dpi: int = 110
 
 
+@dataclass
+class ChitReceiptSpec:
+    """A chit fund subscription receipt.
+
+    Mirrors the layout of a real Srinidhi Chits receipt: no "Bill To", the
+    member's name and mobile share one line behind a "Sri/Smt/M/s" anchor, the
+    receipt number is unlabelled, the date uses an alphabetic month, and there
+    is no "Total" label anywhere.
+
+    The data is invented. The client's real receipts carry a member's name and
+    personal mobile number, which has no business being committed to a repo.
+    """
+
+    company: str = "SRINIDHI CHITS (HYDERABAD) PVT. LTD."
+    # Kept because "2-7-384" once parsed as a date and reached the message.
+    address_1: str = "H.No. 2-7-384,2ND FLOOR, OPP: POLICE PARADE GROUND, BUS STAND"
+    address_2: str = "ROAD,KARIMNAGAR,Telangana,505001. PH : 08782251999"
+
+    receipt_number: str = "CR1747/26"
+    receipt_date: str = "13-Aug-26"
+    chit_group: str = "SKT35J-50"
+    status: str = "Non-Prized"
+
+    member_name: str = "ANITHA RAMESH"
+    member_label: str = "Sri/Smt/M/s ."
+    member_phone: str | None = "9000012345"
+    phone_label: str = "Mobile :"
+
+    amount: str = "100.00"
+    amount_words: str = "One Hundred Only"
+    payment_mode: str = "Cash"
+    instalment: str = "8"
+
+
+def build_chit_receipt(spec: ChitReceiptSpec, out_path: Path) -> Path:
+    doc = fitz.open()
+    page = doc.new_page(width=A4.width, height=A4.height)
+
+    def text(x: float, y: float, s: str, size: int = 9, bold: bool = False) -> None:
+        page.insert_text(
+            (x, y), s, fontsize=size, fontname="hebo" if bold else "helv"
+        )
+
+    text(LEFT, 45, spec.company, size=13, bold=True)
+    text(LEFT, 68, spec.address_1)
+    text(LEFT, 80, spec.address_2)
+
+    text(240, 110, "DUPLICATE", size=11, bold=True)
+
+    # Receipt number, date and chit group on one row, none of them labelled.
+    text(LEFT, 128, spec.receipt_number, bold=True)
+    text(LEFT + 110, 128, spec.receipt_date)
+    text(LEFT + 210, 128, spec.chit_group)
+    text(LEFT, 146, spec.status)
+
+    # Name and phone share a line, which is why the name has to be trimmed at
+    # the next label rather than run to the end of the row.
+    text(LEFT, 170, f"{spec.member_label} {spec.member_name}")
+    if spec.member_phone:
+        text(LEFT + 240, 170, f"{spec.phone_label}   {spec.member_phone}")
+
+    text(LEFT, 188, spec.amount_words)
+
+    y = 230
+    for left, right in (
+        (spec.amount, spec.amount),
+        ("0.00", "0.00"),
+        ("0.00", "0.00"),
+        (spec.amount, "0.00"),
+    ):
+        text(LEFT + 200, y, left)
+        text(LEFT + 320, y, right)
+        y += 18
+
+    text(LEFT, y + 10, spec.payment_mode)
+    text(LEFT + 200, y + 28, spec.amount)
+    text(LEFT, y + 46, spec.instalment)
+
+    text(LEFT, A4.height - 60, f"For {spec.company}")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(out_path)
+    doc.close()
+    return out_path
+
+
 def build(spec: InvoiceSpec, out_path: Path) -> Path:
     doc = fitz.open()
     page = doc.new_page(width=A4.width, height=A4.height)

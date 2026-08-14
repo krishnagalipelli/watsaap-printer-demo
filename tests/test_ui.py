@@ -5,11 +5,9 @@ from __future__ import annotations
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from fastapi.testclient import TestClient
 from invoice_factory import InvoiceSpec
 
 from waprinter.models import JobStatus
-from waprinter.ui.app import create_app
 
 
 def flash_of(response) -> str:
@@ -21,11 +19,6 @@ def flash_of(response) -> str:
 def is_error(response) -> bool:
     query = parse_qs(urlparse(response.headers["location"]).query)
     return query.get("kind") == ["err"]
-
-
-@pytest.fixture
-def client(pipeline):
-    return TestClient(create_app(pipeline), follow_redirects=False)
 
 
 @pytest.fixture

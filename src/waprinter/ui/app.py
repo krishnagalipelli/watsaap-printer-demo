@@ -164,6 +164,7 @@ def create_app(pipeline: Pipeline) -> FastAPI:
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request):
         from ..extract.ocr import available as ocr_available
+        from ..send.readiness import SENDERS, problems
 
         return _render(
             "settings",
@@ -174,6 +175,8 @@ def create_app(pipeline: Pipeline) -> FastAPI:
             flash_kind=request.query_params.get("kind", ""),
             template=pipeline.templates.get(pipeline.settings.default_template),
             ocr_available=ocr_available(pipeline.settings.ocr()),
+            senders=SENDERS,
+            problems=problems(pipeline.settings),
         )
 
     @app.post("/settings")
@@ -186,8 +189,15 @@ def create_app(pipeline: Pipeline) -> FastAPI:
         dry_run: str | None = Form(None),
         ocr_enabled: str | None = Form(None),
         ocr_silent_send: str | None = Form(None),
+        sender_type: str = Form(""),
     ):
+        from ..send.readiness import get as get_sender
+
         s = pipeline.settings
+        if sender_type:
+            if get_sender(sender_type) is None:
+                return _back("/settings", f"Unknown sender '{sender_type}'.", error=True)
+            s.sender_type = sender_type
         s.own_numbers = [n.strip() for n in own_numbers.split(",") if n.strip()]
         s.phone_number_id = phone_number_id.strip()
         s.default_template = default_template.strip() or s.default_template

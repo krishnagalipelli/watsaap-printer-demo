@@ -57,6 +57,15 @@ class Paths:
         return self.root / "settings.json"
 
     @property
+    def profile(self) -> Path:
+        """Per-client document vocabulary. See extract/profile.py."""
+        return self.root / "profile.json"
+
+    @property
+    def templates(self) -> Path:
+        return self.root / "templates.json"
+
+    @property
     def logs(self) -> Path:
         return self.root / "logs"
 
