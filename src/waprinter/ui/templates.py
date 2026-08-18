@@ -340,3 +340,60 @@ SETTINGS = """
   {% endif %}
 </fieldset>
 """
+
+
+# The after-print notification. A window of its own, so it carries its own
+# styles rather than the panel's chrome.
+NOTE = """
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WhatsApp Printer</title>
+<style>
+  :root { color-scheme: light dark;
+          --bg:#fff; --fg:#1a1a1a; --muted:#5c5c5c; --line:#dcdcdc; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#232529; --fg:#e9e9ea; --muted:#a0a3a8; --line:#3a3d43; }
+  }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--fg); display:flex;
+         font:13px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif;
+         border:1px solid var(--line); border-radius:6px; overflow:hidden;
+         user-select:none; }
+  .bar { width:5px; flex:0 0 5px; background:var(--accent); }
+  .body { flex:1; padding:13px 15px; display:flex; flex-direction:column; }
+  .head { display:flex; align-items:center; gap:9px; }
+  .glyph { width:19px; height:19px; border-radius:50%; background:var(--accent);
+           color:#fff; font-size:12px; font-weight:700; line-height:19px;
+           text-align:center; flex:0 0 19px; }
+  h1 { margin:0; font-size:13.5px; font-weight:600; }
+  p { margin:7px 0 0; color:var(--muted); font-size:12.5px;
+      overflow:hidden; text-overflow:ellipsis; }
+  .actions { margin-top:auto; padding-top:11px; display:flex; gap:8px;
+             justify-content:flex-end; }
+  button { font:inherit; font-size:12.5px; padding:4px 14px; border-radius:3px;
+           border:1px solid var(--line); background:transparent;
+           color:var(--muted); cursor:pointer; }
+  button.primary { border-color:var(--accent); color:var(--accent);
+                   font-weight:600; }
+</style>
+</head>
+<body style="--accent: {{ accent }}">
+  <div class="bar"></div>
+  <div class="body">
+    <div class="head">
+      <div class="glyph">{{ glyph }}</div>
+      <h1>{{ headline }}</h1>
+    </div>
+    <p>{{ detail }}</p>
+    {% if actionable %}
+    <div class="actions">
+      <button onclick="window.pywebview.api.dismiss()">Dismiss</button>
+      <button class="primary" onclick="window.pywebview.api.open_panel()">Open</button>
+    </div>
+    {% endif %}
+  </div>
+</body>
+</html>
+"""

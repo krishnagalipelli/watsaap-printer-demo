@@ -23,9 +23,11 @@ inbox *Microsoft Print To PDF* driver bound to a Local Port whose name is a file
 path. Windows writes each job straight to disk as a PDF, silently. No signing
 certificate, no WHQL, nothing for WPP to remove.
 
-**2. No Windows service.** A service runs in session 0 and has no desktop, so it
-cannot show the result popup. Everything runs in one agent that starts at logon
-in the user's own session.
+**2. One application, no browser, no Windows service.** A service runs in session
+0 and has no desktop, so it cannot show a window at all. Everything is a single
+`waprinter-agent.exe` that starts at logon in the user's own session. Its windows
+are drawn by WebView2 — the engine already built into Windows 10 and 11 — so the
+panel is an application window, not a browser tab pointed at localhost.
 
 **3. The official WhatsApp Business API, and only that.** An earlier build also
 supported WhatsApp Web through Baileys — free, no template approval, fully
@@ -41,15 +43,17 @@ instantly; changing the sentence itself means submitting a new template.
 
 ## What the operator sees
 
-**On a normal print: a popup, and that is all.** Green if it went, with the
-document and who received it. It closes itself after a few seconds.
+**On a normal print: a small notification in the corner, and that is all.** Green
+if it went, naming the document and who received it. It closes itself after a few
+seconds.
 
 Failures and anything needing a decision do **not** auto-close — a receipt that
 did not arrive has to be noticed. Those offer "Open queue" and stay until
 dismissed.
 
-**The control panel** (`http://127.0.0.1:8731`, loopback only) is laid out like a
-printer's properties window rather than a dashboard:
+**The control panel** is an application window laid out like a printer's
+properties page rather than a dashboard. (It is served over loopback behind the
+scenes, which is an implementation detail: nothing shows a URL.)
 
 - A **device status line** across the top — Ready / Not ready / Test mode — plus
   a **Test send** button, the equivalent of "Print Test Page"
@@ -134,7 +138,8 @@ to `logs/dry_run.jsonl`, but nothing is sent.
 
 | Path | What it does |
 |---|---|
-| [`agent.py`](src/waprinter/agent.py) | The one process: Tk on the main thread, watcher and panel on their own |
+| [`agent.py`](src/waprinter/agent.py) | The one process: GUI loop on the main thread, watcher and server on their own |
+| [`ui/window.py`](src/waprinter/ui/window.py) | Every window in the application |
 | [`capture/watcher.py`](src/waprinter/capture/watcher.py) | Drains the spool folder; waits for `%%EOF` before claiming a file |
 | [`extract/profile.py`](src/waprinter/extract/profile.py) | Per-client document vocabulary |
 | [`extract/phone.py`](src/waprinter/extract/phone.py) | Number parsing and scoring, shared by the page reader and typed input |
@@ -142,7 +147,7 @@ to `logs/dry_run.jsonl`, but nothing is sent.
 | [`rules/gate.py`](src/waprinter/rules/gate.py) | Send / confirm / hold / duplicate |
 | [`send/whatsapp.py`](src/waprinter/send/whatsapp.py) | Meta Cloud API: upload media, send template |
 | [`send/readiness.py`](src/waprinter/send/readiness.py) | One definition of "ready to send" |
-| [`ui/result_popup.py`](src/waprinter/ui/result_popup.py) | The popup after a print |
+| [`ui/result.py`](src/waprinter/ui/result.py) | What the after-print notification says |
 | [`ui/app.py`](src/waprinter/ui/app.py) | The control panel |
 | [`installer/provision.ps1`](installer/provision.ps1) | Creates the printer and its ports |
 

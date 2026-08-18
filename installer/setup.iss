@@ -17,7 +17,6 @@
 #define AppVersion     "0.1.0"
 #define AppPublisher   "Sunrise Software"
 #define DataDir        "C:\ProgramData\WAPrinter"
-#define DashboardUrl   "http://127.0.0.1:8731/"
 
 [Setup]
 AppId={{8E3B4C21-9A7D-4F62-B1E5-7C9D2A6F4B83}
@@ -67,9 +66,8 @@ Name: "{#DataDir}\logs";  Permissions: users-modify
 
 [Icons]
 Name: "{group}\{#AppName}";           Filename: "{app}\waprinter-agent.exe"
-Name: "{group}\Dashboard";            Filename: "{#DashboardUrl}"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
-Name: "{commondesktop}\{#AppName} Dashboard"; Filename: "{#DashboardUrl}"; \
+Name: "{commondesktop}\{#AppName}"; Filename: "{app}\waprinter-agent.exe"; \
     Tasks: desktopicon
 ; The agent must be running for a print to be noticed, so it starts at logon.
 ; {commonstartup}, not {userstartup}: this installer requires admin, so it runs
@@ -77,10 +75,11 @@ Name: "{commondesktop}\{#AppName} Dashboard"; Filename: "{#DashboardUrl}"; \
 ; who will use the machine, and a per-user Startup entry would land in the
 ; administrator's profile — the agent would then never start for the person
 ; actually printing, and printing would appear to do nothing.
-Name: "{commonstartup}\{#AppName}"; Filename: "{app}\waprinter-agent.exe"
+Name: "{commonstartup}\{#AppName}"; Filename: "{app}\waprinter-agent.exe"; \
+    Parameters: "--hidden"
 
 [Tasks]
-Name: "desktopicon"; Description: "Put a Dashboard shortcut on the desktop"; \
+Name: "desktopicon"; Description: "Put a shortcut on the desktop"; \
     GroupDescription: "Shortcuts"
 
 [Registry]
@@ -102,8 +101,6 @@ Filename: "powershell.exe"; \
 Filename: "{app}\waprinter-agent.exe"; Description: "Start {#AppName}"; \
     Flags: postinstall nowait skipifsilent
 
-Filename: "{#DashboardUrl}"; Description: "Open the dashboard"; \
-    Flags: postinstall nowait shellexec skipifsilent unchecked
 
 [UninstallRun]
 ; Stop the agent before pulling the printer out from under it.

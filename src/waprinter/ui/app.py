@@ -190,6 +190,30 @@ def create_app(pipeline: Pipeline) -> FastAPI:
             "/", "Configuration looks complete. Print a document to send one."
         )
 
+    @app.get("/note/{job_id}", response_class=HTMLResponse)
+    def note(job_id: str):
+        """The after-print notification, rendered into its own small window."""
+        from .result import describe, needs_action
+
+        job = store.get(job_id)
+        if job is None:
+            return HTMLResponse("", status_code=404)
+        tone, headline, detail = describe(job)
+        accent, glyph = {
+            "ok": ("#0f7b43", "\u2713"),
+            "bad": ("#b3261e", "!"),
+            "wait": ("#a35a00", "i"),
+        }[tone]
+        return HTMLResponse(
+            env.from_string(tpl.NOTE).render(
+                accent=accent,
+                glyph=glyph,
+                headline=headline,
+                detail=detail,
+                actionable=needs_action(job),
+            )
+        )
+
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request):
         from ..extract.ocr import available as ocr_available

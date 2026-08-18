@@ -13,6 +13,9 @@ dependencies = [
     "pydantic>=2.7",
     "watchdog>=4.0",
     "python-multipart>=0.0.9",
+    # The application window. Uses WebView2 on Windows (built into Windows 10
+    # and 11) and WebKit on macOS, so no browser is involved.
+    "pywebview>=5.0",
 ]
 
 [project.optional-dependencies]
