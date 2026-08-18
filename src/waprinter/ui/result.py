@@ -1,6 +1,6 @@
 """What the after-print notification says.
 
-Wording only — the window itself is a webview page (ui/window.py, ui/app.py).
+Wording only — the panel itself is a Tk window (ui/notification.py).
 Kept separate because this is the text an operator reads a hundred times a day
 and it is worth testing on its own.
 """

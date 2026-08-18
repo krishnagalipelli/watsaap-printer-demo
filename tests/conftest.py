@@ -75,16 +75,6 @@ def pipeline(settings, store, templates, tmp_path):
 
 
 @pytest.fixture
-def client(pipeline):
-    """The local dashboard, driven without a browser."""
-    from fastapi.testclient import TestClient
-
-    from waprinter.ui.app import create_app
-
-    return TestClient(create_app(pipeline), follow_redirects=False)
-
-
-@pytest.fixture
 def confirm_pipeline(pipeline):
     """Confirmation mode — every print waits for a person.
 

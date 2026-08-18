@@ -23,11 +23,15 @@ inbox *Microsoft Print To PDF* driver bound to a Local Port whose name is a file
 path. Windows writes each job straight to disk as a PDF, silently. No signing
 certificate, no WHQL, nothing for WPP to remove.
 
-**2. One application, no browser, no Windows service.** A service runs in session
-0 and has no desktop, so it cannot show a window at all. Everything is a single
-`waprinter-agent.exe` that starts at logon in the user's own session. Its windows
-are drawn by WebView2 — the engine already built into Windows 10 and 11 — so the
-panel is an application window, not a browser tab pointed at localhost.
+**2. One application, native widgets, no service.** A service runs in session 0
+and has no desktop, so it cannot show a window at all. Everything is a single
+`waprinter-agent.exe` that starts at logon in the user's own session.
+
+The interface is Tk, which ships with Python. No web server, no template engine,
+no browser runtime — the whole dependency list is PyMuPDF, httpx and watchdog.
+An earlier build rendered the panel in WebView2; native widgets removed a runtime
+dependency, four packages and about 36 MB, and look more like the printer
+properties sheet they are modelled on.
 
 **3. The official WhatsApp Business API, and only that.** An earlier build also
 supported WhatsApp Web through Baileys — free, no template approval, fully
@@ -52,8 +56,7 @@ did not arrive has to be noticed. Those offer "Open queue" and stay until
 dismissed.
 
 **The control panel** is an application window laid out like a printer's
-properties page rather than a dashboard. (It is served over loopback behind the
-scenes, which is an implementation detail: nothing shows a URL.)
+properties sheet rather than a dashboard.
 
 - A **device status line** across the top — Ready / Not ready / Test mode — plus
   a **Test send** button, the equivalent of "Print Test Page"
@@ -100,6 +103,33 @@ for a person.
 
 ---
 
+## Updating 20+ machines
+
+Each installation checks a small JSON file over HTTPS — hosted on GitHub
+Releases or any static host — and installs a newer build silently. There is no
+server of ours involved; if the file is unreachable, printing and sending carry
+on untouched.
+
+Two triggers:
+
+- **Daily**, in the background, for the routine version bump.
+- **Check for updates**, on the Status tab. A fix released at eleven in the
+  morning should not wait for a timer, and this is how it reaches a branch the
+  moment it exists — including over AnyDesk.
+
+Guard rails: the download is SHA-256 verified against the manifest before it is
+executed, and an update never installs while a document is being processed.
+
+```json
+{ "version": "1.1.0",
+  "url": "https://.../WhatsAppPrinter-Setup-1.1.0.exe",
+  "sha256": "…",
+  "notes": "Fixes the receipt-number pattern for branch 4." }
+```
+
+Publishing a release is what makes it visible — pushing code does not. That tag
+is the switch, and rolling back means publishing the older version number.
+
 ## Building the installer
 
 **Via GitHub Actions** — push, and
@@ -139,7 +169,10 @@ to `logs/dry_run.jsonl`, but nothing is sent.
 | Path | What it does |
 |---|---|
 | [`agent.py`](src/waprinter/agent.py) | The one process: GUI loop on the main thread, watcher and server on their own |
-| [`ui/window.py`](src/waprinter/ui/window.py) | Every window in the application |
+| [`ui/desktop.py`](src/waprinter/ui/desktop.py) | The application window |
+| [`ui/viewmodel.py`](src/waprinter/ui/viewmodel.py) | What it says, testable without a display |
+| [`ui/notification.py`](src/waprinter/ui/notification.py) | The corner panel after a print |
+| [`update.py`](src/waprinter/update.py) | Version check, verified download, silent install |
 | [`capture/watcher.py`](src/waprinter/capture/watcher.py) | Drains the spool folder; waits for `%%EOF` before claiming a file |
 | [`extract/profile.py`](src/waprinter/extract/profile.py) | Per-client document vocabulary |
 | [`extract/phone.py`](src/waprinter/extract/phone.py) | Number parsing and scoring, shared by the page reader and typed input |
@@ -148,7 +181,6 @@ to `logs/dry_run.jsonl`, but nothing is sent.
 | [`send/whatsapp.py`](src/waprinter/send/whatsapp.py) | Meta Cloud API: upload media, send template |
 | [`send/readiness.py`](src/waprinter/send/readiness.py) | One definition of "ready to send" |
 | [`ui/result.py`](src/waprinter/ui/result.py) | What the after-print notification says |
-| [`ui/app.py`](src/waprinter/ui/app.py) | The control panel |
 | [`installer/provision.ps1`](installer/provision.ps1) | Creates the printer and its ports |
 
 ---
@@ -162,5 +194,7 @@ to `logs/dry_run.jsonl`, but nothing is sent.
   retries are manual from the queue.
 - **Code signing** — every client install currently shows "Windows protected
   your PC".
+- **A provisioning file** — so 20+ installs are configured from one file rather
+  than typed in per machine.
 - **Amount extraction for chit receipts** — several competing figures on the page
   and no "Total" label, so it is deliberately left blank rather than guessed.

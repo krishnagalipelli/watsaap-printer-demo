@@ -51,7 +51,7 @@ class TestEntryShims:
 
     def test_agent_shim_checks_the_real_moving_parts(self, tmp_path):
         result = run(PACKAGING / "waprinter_agent.py", "--selftest", home=tmp_path)
-        for part in ("settings", "pipeline", "message", "spool dir", "window shell", "gui toolkit"):
+        for part in ("settings", "pipeline", "message", "spool dir", "gui toolkit", "updater"):
             assert part in result.stdout
 
     def test_cli_shim_runs(self, tmp_path):
@@ -93,10 +93,10 @@ class TestCrashReporting:
         monkeypatch.setenv("WAPRINTER_HOME", str(tmp_path))
         from waprinter import agent
 
-        def explode():
+        def explode(*_a, **_k):
             raise RuntimeError("no provider configured")
 
-        monkeypatch.setattr(agent, "Agent", lambda *a, **k: explode())
+        monkeypatch.setattr(agent, "build_default", explode)
         assert agent.main(["--selftest"]) == 1
         assert (tmp_path / "logs" / "crash.txt").exists()
 

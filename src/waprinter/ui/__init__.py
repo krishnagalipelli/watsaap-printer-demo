@@ -1,5 +1,5 @@
-"""Local operator UI, served on 127.0.0.1 only."""
+"""The desktop user interface."""
 
-from .app import create_app
+from .desktop import DesktopWindow
 
-__all__ = ["create_app"]
+__all__ = ["DesktopWindow"]

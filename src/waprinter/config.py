@@ -132,8 +132,18 @@ class Settings:
         }
     )
 
-    # --- Local UI ----------------------------------------------------------
-    ui_port: int = 8731
+    # --- Updates -----------------------------------------------------------
+    # A static JSON file: {"version", "url", "sha256", "notes"}. No server of
+    # ours is involved; if it is unreachable, everything else carries on.
+    update_url: str = ""
+    update_check_enabled: bool = True
+    last_update_check: str = ""
+
+    # --- This installation -------------------------------------------------
+    # Shown in the window and written on every job, so logs can answer "which
+    # counter sent this" without a central service.
+    device_name: str = ""
+    branch_name: str = ""
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":

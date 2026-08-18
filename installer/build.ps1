@@ -84,10 +84,6 @@ try {
     # src\waprinter\. PyInstaller runs its entry script as __main__, and those
     # modules use relative imports, which fail instantly when run that way.
     # Frozen --windowed that failure is invisible: the exe just does nothing.
-    # pywebview loads its GUI backend by name at runtime, so PyInstaller cannot
-    # see it from the imports; --collect-all also brings in the JS bridge files
-    # it injects into each window. Without these the frozen app starts and then
-    # fails the moment it tries to open a window.
     Write-Host '== Freezing the agent ==' -ForegroundColor Cyan
     if (Test-Path 'dist') { Remove-Item -Recurse -Force 'dist' }
     Invoke-Step (
@@ -95,15 +91,6 @@ try {
         "--name waprinter-agent " +
         "--paths src " +
         "--hidden-import win32timezone " +
-        "--hidden-import uvicorn.logging " +
-        "--hidden-import uvicorn.loops.auto " +
-        "--hidden-import uvicorn.protocols.http.auto " +
-        "--hidden-import uvicorn.protocols.websockets.auto " +
-        "--hidden-import uvicorn.lifespan.on " +
-        "--collect-all webview " +
-        "--hidden-import webview.platforms.edgechromium " +
-        "--hidden-import webview.platforms.winforms " +
-        "--hidden-import clr " +
         "packaging\waprinter_agent.py"
     )
 

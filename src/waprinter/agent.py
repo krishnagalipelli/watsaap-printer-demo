@@ -1,17 +1,16 @@
-"""The desktop agent: one process, everything the operator needs.
+"""The desktop application: one process, one window, no server.
 
 There is no Windows service, for a concrete reason: a service runs in session 0
 with no desktop and cannot show a window. The flow ends in a notification, so the
 code that watches the spool folder has to live in the signed-in user's session.
 
-Three parts, and the thread each runs on matters:
+Two threads, and which one owns what matters:
 
-    main thread    the webview GUI loop — owns every window, and blocks
-    watcher        polls the spool folder, runs the pipeline
-    web            serves the panel to those windows on 127.0.0.1
+    main thread    the Tk loop — owns every window, and blocks until quit
+    watcher        polls the spool folder and runs the pipeline
 
-The watcher never touches a window. It hands a job id to the shell's queue and
-the notifier thread turns it into one.
+The watcher never touches a widget. It hands a job id to the window's queue and
+the main thread turns it into a notification.
 """
 
 from __future__ import annotations
@@ -23,18 +22,17 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+from . import update
 from .capture.spooler import latest_job
 from .capture.watcher import SpoolWatcher
 from .config import Settings, paths
-from .models import JobStatus
 from .pipeline import Pipeline, build_default
 from .runner import configure_logging
-from .ui.window import AppShell
+from .ui.desktop import DesktopWindow
 
 log = logging.getLogger(__name__)
 
-# Statuses that mean a person still has to do something.
-NEEDS_ATTENTION = {JobStatus.AWAITING, JobStatus.HELD, JobStatus.FAILED}
+DAILY_CHECK_SECONDS = 60 * 60  # how often to wonder whether a day has passed
 
 
 class Agent:
@@ -46,63 +44,107 @@ class Agent:
         self.paths = paths()
         self.paths.ensure()
 
-        self.shell = AppShell(self.pipeline, self.settings.ui_port)
+        # Set while a document is being processed, so an update never lands
+        # halfway through a send.
+        self._busy = threading.Event()
+
+        self.window = DesktopWindow(self.pipeline, on_check_updates=self.check_updates)
         self.watcher = SpoolWatcher(
             spool=self.paths.spool,
             inbox=self.paths.inbox,
             on_job=self._handle,
         )
-        self._threads: list[threading.Thread] = []
 
-    # -- callbacks ---------------------------------------------------------
+    # -- capture -----------------------------------------------------------
 
     def _handle(self, pdf_path: Path) -> None:
-        """Runs on the watcher thread. Must not create windows directly.
+        """Runs on the watcher thread. Must not create widgets."""
+        self._busy.set()
+        try:
+            info = latest_job()
+            job = self.pipeline.process(
+                pdf_path,
+                doc_title=info.document,
+                windows_user=info.user,
+            )
+            log.info(
+                "job %s -> %s (%s)",
+                job.id,
+                job.status,
+                job.recipient or job.hold_reason or job.error or "",
+            )
+            self.window.submit(job.id)
+        finally:
+            self._busy.clear()
 
-        Print, read the page, send — then hand the outcome to the shell,
-        whatever it was. Even a failure produces a notification, because the operator
-        walking back to their desk needs to know a receipt did not go out.
+    # -- updates -----------------------------------------------------------
+
+    def check_updates(self, install: bool = True) -> str:
+        """Look for a newer build. Returns a line for the window to show.
+
+        Called both by the daily timer and by the Check for updates button. The
+        button matters: a fix released at eleven in the morning should not wait
+        for a timer, which is the whole reason a manual check exists.
+
+        Never raises — an unreachable update server must not affect printing.
         """
-        info = latest_job()
-        job = self.pipeline.process(
-            pdf_path,
-            doc_title=info.document,
-            windows_user=info.user,
-        )
-        log.info(
-            "job %s -> %s (%s)",
-            job.id,
-            job.status,
-            job.recipient or job.hold_reason or job.error or "",
-        )
-        self.shell.submit(job.id)
+        result = update.check(self.settings.update_url)
+        self.settings.last_update_check = datetime.now().isoformat()
+        try:
+            self.settings.save()
+        except Exception:
+            log.exception("could not record the update check")
+
+        if result.failed or not result.available or not install:
+            return result.message
+
+        if self._busy.is_set():
+            return (
+                f"Version {result.release.version} is ready, but a document is "
+                f"being sent. It will install shortly."
+            )
+
+        try:
+            installer = update.download(result.release)
+        except Exception as exc:
+            log.exception("update download failed")
+            return f"Could not download the update: {exc}"
+
+        try:
+            update.install(installer)
+        except Exception as exc:
+            log.exception("update install failed")
+            return f"Could not start the installer: {exc}"
+
+        return f"Installing version {result.release.version}. The app will restart."
+
+    def _update_loop(self) -> None:
+        while True:
+            try:
+                if (
+                    self.settings.update_check_enabled
+                    and self.settings.update_url
+                    and update.due(self.settings.last_update_check)
+                ):
+                    log.info("daily update check: %s", self.check_updates())
+            except Exception:
+                log.exception("the daily update check failed")
+            if self._stop.wait(DAILY_CHECK_SECONDS):
+                return
 
     # -- lifecycle ---------------------------------------------------------
 
-    def _serve_web(self) -> None:
-        import uvicorn
-
-        from .ui.app import create_app
-
-        uvicorn.run(
-            create_app(self.pipeline),
-            host="127.0.0.1",
-            port=self.settings.ui_port,
-            log_level="warning",
-        )
-
-    def run(self, show_panel: bool = True) -> None:
-        for target, name in ((self.watcher.run, "watcher"), (self._serve_web, "web")):
-            thread = threading.Thread(target=target, name=name, daemon=True)
-            thread.start()
-            self._threads.append(thread)
+    def run(self, visible: bool = True) -> None:
+        self._stop = threading.Event()
+        threading.Thread(target=self.watcher.run, name="watcher", daemon=True).start()
+        threading.Thread(target=self._update_loop, name="updates", daemon=True).start()
 
         mode = "TEST MODE — nothing will be sent" if self.settings.dry_run else "LIVE"
         log.info("WhatsApp Printer started (%s)", mode)
 
-        # Blocks on the GUI loop. Started at logon the panel stays closed until
-        # the operator opens it or a notification asks them to.
-        self.shell.run(show_panel=show_panel)
+        self.window.run(visible=visible)  # blocks on the Tk loop
+
+        self._stop.set()
         self.watcher.stop()
         log.info("WhatsApp Printer stopped")
 
@@ -128,46 +170,21 @@ def _write_crash_report(exc: BaseException) -> Path | None:
 
 
 def _show_crash(exc: BaseException, report: Path | None) -> None:
-    """Report a startup failure without needing the GUI that just failed.
-
-    Uses the Win32 message box directly rather than a toolkit: whatever went
-    wrong may well be the toolkit, and this path has to work when nothing else
-    does.
-    """
+    """Report a startup failure without needing the GUI that just failed."""
     where = f"\n\nDetails were written to:\n{report}" if report else ""
     text = f"{type(exc).__name__}: {exc}{where}"
     if sys.platform == "win32":
         try:
             import ctypes
 
-            MB_ICONERROR = 0x10
             ctypes.windll.user32.MessageBoxW(
-                None, text, "WhatsApp Printer could not start", MB_ICONERROR
+                None, text, "WhatsApp Printer could not start", 0x10
             )
             return
         except Exception:
             pass
-    print(text, file=sys.stderr) if sys.stderr else None
-
-
-def _gui_toolkit_ok() -> bool:
-    """Can a window actually be created in this build?
-
-    Checked by name rather than by opening one: a frozen build can lose the
-    platform backend (on Windows that is WebView2 through pythonnet) while every
-    other import still succeeds, and the failure would only show at the client.
-    """
-    try:
-        import webview  # noqa: F401
-
-        if sys.platform == "win32":
-            import webview.platforms.edgechromium  # noqa: F401
-        elif sys.platform == "darwin":
-            import webview.platforms.cocoa  # noqa: F401
-        return True
-    except Exception:
-        log.exception("the window toolkit is not usable in this build")
-        return False
+    if sys.stderr:
+        print(text, file=sys.stderr)
 
 
 def selftest() -> int:
@@ -177,16 +194,19 @@ def selftest() -> int:
     mode that shipped a broken installer once already: an import that only
     breaks when packaged, which --windowed then hides completely.
     """
-    agent = Agent()
+    import tkinter  # noqa: F401  — proves the GUI toolkit survived freezing
+
+    settings = Settings.load()
+    pipeline = build_default(settings)
+    p = paths()
+    p.ensure()
     checks = {
-        "settings": agent.settings is not None,
-        "pipeline": agent.pipeline is not None,
-        "message": agent.pipeline.templates.get(
-            agent.settings.default_template
-        ) is not None,
-        "spool dir": agent.paths.spool.is_dir(),
-        "window shell": agent.shell is not None,
-        "gui toolkit": _gui_toolkit_ok(),
+        "settings": settings is not None,
+        "pipeline": pipeline is not None,
+        "message": pipeline.templates.get(settings.default_template) is not None,
+        "spool dir": p.spool.is_dir(),
+        "gui toolkit": tkinter.TkVersion > 0,
+        "updater": update.parse_version("1.2.10") > update.parse_version("1.2.9"),
     }
     for name, ok in checks.items():
         print(f"  {'ok  ' if ok else 'FAIL'}  {name}")
@@ -204,8 +224,8 @@ def main(argv: list[str] | None = None) -> int:
         configure_logging(paths().logs)
         if "--selftest" in argv:
             return selftest()
-        # --hidden: started at logon, so do not steal focus with the panel.
-        Agent().run(show_panel="--hidden" not in argv)
+        # --hidden: started at logon, so do not steal focus with the window.
+        Agent().run(visible="--hidden" not in argv)
         return 0
     except Exception as exc:
         log.exception("agent crashed")
