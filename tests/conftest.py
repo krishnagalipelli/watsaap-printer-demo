@@ -62,7 +62,7 @@ def make_invoice(tmp_path):
 
 @pytest.fixture
 def pipeline(settings, store, templates, tmp_path):
-    """The production flow: every print raises a confirmation dialog."""
+    """The production flow: print, read the page, send."""
     from waprinter.pipeline import Pipeline
     from waprinter.send.dryrun import DryRunSender
 
@@ -85,11 +85,11 @@ def client(pipeline):
 
 
 @pytest.fixture
-def auto_pipeline(pipeline):
-    """Automatic mode — no confirmation, recipient detected from the page.
+def confirm_pipeline(pipeline):
+    """Confirmation mode — every print waits for a person.
 
-    Still supported for a client whose documents *do* print the customer's
-    number, and the reason the confidence gate and OCR verification exist.
+    Not the default any more: these documents do print the customer's number.
+    Kept for a client whose paperwork does not, and while tuning a new layout.
     """
-    pipeline.settings.confirm_before_send = False
+    pipeline.settings.confirm_before_send = True
     return pipeline

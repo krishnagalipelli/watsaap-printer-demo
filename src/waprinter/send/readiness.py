@@ -1,71 +1,40 @@
-"""Which sender an install uses, and whether it is actually ready.
+"""Whether this install is actually ready to send.
 
-One build serves every client, so the choice is configuration. The two paths
-have genuinely different trade-offs and different prerequisites, and the
-operator should see both stated plainly rather than discovering them when a
-send fails.
+One definition, shared by the settings page, the agent and `waprinter go-live`,
+so they can never disagree about what "ready" means. The operator should be able
+to see what is missing before a customer's receipt fails to arrive, not after.
 
-Shared by the settings page and `waprinter go-live` so they can never disagree
-about what "ready" means.
+Messages go out through the official WhatsApp Business Cloud API. That is the
+only route: an earlier build also supported WhatsApp Web via Baileys, which was
+free but unofficial, and Meta bans numbers for using it. Risking the client's
+main business line to save a few hundred rupees a month was not a trade worth
+offering.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..config import Settings
 
-BAILEYS = "baileys"
-CLOUD = "cloud"
+if TYPE_CHECKING:
+    from .templates import TemplateStore
 
 
-@dataclass(frozen=True)
-class SenderInfo:
-    key: str
-    label: str
-    summary: str
-    caution: str = ""
-
-
-SENDERS = [
-    SenderInfo(
-        key=BAILEYS,
-        label="WhatsApp Web (Baileys)",
-        summary=(
-            "Links to a WhatsApp account by QR code. No per-message cost and "
-            "the message wording is fully editable."
-        ),
-        caution=(
-            "Unofficial. Meta can ban a number for using it, and automated "
-            "daily sending is the pattern they look for. Do not point this at "
-            "a business's main WhatsApp number without telling the client."
-        ),
-    ),
-    SenderInfo(
-        key=CLOUD,
-        label="Official WhatsApp Business API",
-        summary=(
-            "Supported by Meta, with delivery receipts and no risk to the "
-            "client's number."
-        ),
-        caution=(
-            "Costs per message, and messages must use a pre-approved template, "
-            "so the wording can only be changed by submitting it for review."
-        ),
-    ),
-]
-
-
-def get(key: str) -> SenderInfo | None:
-    return next((s for s in SENDERS if s.key == key), None)
-
-
-def problems(settings: Settings) -> list[str]:
+def problems(settings: Settings, templates: "TemplateStore | None" = None) -> list[str]:
     """What still has to be done before this install can send for real.
 
-    Empty means ready. Dry run is not treated as a problem — it is a valid
+    Empty means ready. Dry run is not counted as a problem — it is a valid
     state, just not a sending one.
+
+    `templates` must be the store the pipeline is actually using. Loading a
+    fresh one from the default path looked equivalent but was not: it reported
+    a configured message as missing whenever the two disagreed.
     """
+    from ..config import paths
+    from ..secrets import load_token
+    from .templates import TemplateStore
+
     found: list[str] = []
 
     if not settings.own_numbers:
@@ -73,38 +42,26 @@ def problems(settings: Settings) -> list[str]:
             "Your own numbers are not listed, so a number printed in your "
             "letterhead could be treated as a customer."
         )
+    if not settings.phone_number_id:
+        found.append(
+            "The WhatsApp phone number ID is not set (Meta Business → WhatsApp "
+            "→ API Setup)."
+        )
+    if not load_token():
+        found.append("No access token is stored.")
 
-    sender = getattr(settings, "sender_type", CLOUD)
-    if sender == BAILEYS:
-        from .baileys import BaileysSender
-
-        if not BaileysSender().is_connected():
-            found.append(
-                "The WhatsApp Web service is not connected. Start it and scan "
-                "the QR code with WhatsApp on the phone that will send."
-            )
-    elif sender == CLOUD:
-        from ..secrets import load_token
-        from .templates import TemplateStore
-        from ..config import paths
-
-        if not settings.phone_number_id:
-            found.append("The WhatsApp phone number ID is not set.")
-        if not load_token():
-            found.append("No access token is stored (run: waprinter set-token).")
-
-        templates = TemplateStore(paths().root / "templates.json")
-        template = templates.get(settings.default_template)
-        if template is None:
-            found.append(
-                f"Template '{settings.default_template}' is not configured."
-            )
-        elif not template.usable:
-            found.append(
-                f"Template '{template.name}' is {template.status}, not approved "
-                f"for sending."
-            )
-    else:
-        found.append(f"Unknown sender '{sender}'.")
+    templates = templates or TemplateStore(paths().templates)
+    template = templates.get(settings.default_template)
+    if template is None:
+        found.append(f"Message '{settings.default_template}' is not configured.")
+    elif not template.usable:
+        found.append(
+            f"Message '{template.name}' is {template.status}, not yet approved "
+            f"by Meta."
+        )
 
     return found
+
+
+def is_ready(settings: Settings, templates: "TemplateStore | None" = None) -> bool:
+    return not problems(settings, templates)

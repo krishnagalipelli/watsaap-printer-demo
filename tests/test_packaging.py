@@ -51,7 +51,7 @@ class TestEntryShims:
 
     def test_agent_shim_checks_the_real_moving_parts(self, tmp_path):
         result = run(PACKAGING / "waprinter_agent.py", "--selftest", home=tmp_path)
-        for part in ("settings", "pipeline", "templates", "spool dir", "dialog host"):
+        for part in ("settings", "pipeline", "message", "spool dir", "popup host"):
             assert part in result.stdout
 
     def test_cli_shim_runs(self, tmp_path):

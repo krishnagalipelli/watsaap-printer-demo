@@ -1,17 +1,16 @@
 """The desktop agent: one process, everything the operator needs.
 
-Replaces the Windows service for v1, for a concrete reason: a service runs in
-session 0 with no desktop and *cannot* show a window. The whole flow now hinges
-on a dialog appearing when someone prints, so the code that watches the spool
-folder has to live in the signed-in user's session.
+There is no Windows service, for a concrete reason: a service runs in session 0
+with no desktop and cannot show a window. The flow ends in a popup, so the code
+that watches the spool folder has to live in the signed-in user's session.
 
 Three parts, and the thread each runs on matters:
 
     main thread    Tk main loop — owns every window (Tk requires this)
     watcher        polls the spool folder, runs the pipeline
-    web            the dashboard on 127.0.0.1
+    web            the control panel on 127.0.0.1
 
-The watcher never touches a widget. It hands a job id to the DialogHost queue
+The watcher never touches a widget. It hands a job id to the popup host's queue
 and the main thread picks it up.
 """
 
@@ -21,6 +20,7 @@ import logging
 import sys
 import threading
 import traceback
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
@@ -30,19 +30,24 @@ from .config import Settings, paths
 from .models import JobStatus
 from .pipeline import Pipeline, build_default
 from .runner import configure_logging
-from .ui.send_dialog import DialogHost
+from .ui.result_popup import PopupHost
 
 log = logging.getLogger(__name__)
 
+# Statuses that mean a person still has to do something.
+NEEDS_ATTENTION = {JobStatus.AWAITING, JobStatus.HELD, JobStatus.FAILED}
+
 
 class Agent:
-    def __init__(self, pipeline: Pipeline | None = None, settings: Settings | None = None):
+    def __init__(
+        self, pipeline: Pipeline | None = None, settings: Settings | None = None
+    ):
         self.settings = settings or Settings.load()
         self.pipeline = pipeline or build_default(self.settings)
         self.paths = paths()
         self.paths.ensure()
 
-        self.host = DialogHost(self.pipeline, on_error=self._notify)
+        self.host = PopupHost(self.pipeline, open_queue=self.open_control_panel)
         self.watcher = SpoolWatcher(
             spool=self.paths.spool,
             inbox=self.paths.inbox,
@@ -50,57 +55,49 @@ class Agent:
         )
         self._threads: list[threading.Thread] = []
 
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.settings.ui_port}/"
+
+    def open_control_panel(self) -> None:
+        webbrowser.open(self.url)
+
     # -- callbacks ---------------------------------------------------------
 
-    def _notify(self, message: str) -> None:
-        """Surface a problem the operator needs to know about."""
-        log.error(message)
-        try:
-            from tkinter import messagebox
+    def _handle(self, pdf_path: Path) -> None:
+        """Runs on the watcher thread. Must not touch Tk.
 
-            messagebox.showerror("WhatsApp Printer", message)
-        except Exception:
-            pass  # no display, or the dialog host is gone
-
-    def _handle(self, pdf_path) -> None:
-        """Runs on the watcher thread. Must not touch Tk."""
+        Print, read the page, send — then hand the outcome to the popup,
+        whatever it was. Even a failure produces a popup, because the operator
+        walking back to their desk needs to know a receipt did not go out.
+        """
         info = latest_job()
         job = self.pipeline.process(
             pdf_path,
             doc_title=info.document,
             windows_user=info.user,
         )
-        log.info("job %s -> %s", job.id, job.status)
-
-        if job.status is JobStatus.AWAITING:
-            self.host.submit(job.id)
+        log.info(
+            "job %s -> %s (%s)",
+            job.id,
+            job.status,
+            job.recipient or job.hold_reason or job.error or "",
+        )
+        self.host.submit(job.id)
 
     # -- lifecycle ---------------------------------------------------------
 
     def _serve_web(self) -> None:
-        try:
-            import io
-            import uvicorn
+        import uvicorn
 
-            from .ui.app import create_app
+        from .ui.app import create_app
 
-            # PyInstaller --windowed sets sys.stderr and sys.stdout to None
-            # because there is no console. Uvicorn's log formatter calls
-            # sys.stderr.isatty() which crashes with AttributeError.
-            if sys.stderr is None:
-                sys.stderr = io.StringIO()
-            if sys.stdout is None:
-                sys.stdout = io.StringIO()
-
-            log.info("starting dashboard on http://127.0.0.1:%s", self.settings.ui_port)
-            uvicorn.run(
-                create_app(self.pipeline),
-                host="127.0.0.1",
-                port=self.settings.ui_port,
-                log_config=None,
-            )
-        except Exception:
-            log.exception("web server thread crashed")
+        uvicorn.run(
+            create_app(self.pipeline),
+            host="127.0.0.1",
+            port=self.settings.ui_port,
+            log_level="warning",
+        )
 
     def run(self) -> None:
         for target, name in ((self.watcher.run, "watcher"), (self._serve_web, "web")):
@@ -108,17 +105,12 @@ class Agent:
             thread.start()
             self._threads.append(thread)
 
-        mode = "DRY RUN — nothing will be sent" if self.settings.dry_run else "LIVE"
-        log.info(
-            "WhatsApp Printer agent started (%s); dashboard on http://127.0.0.1:%s",
-            mode,
-            self.settings.ui_port,
-        )
+        mode = "TEST MODE — nothing will be sent" if self.settings.dry_run else "LIVE"
+        log.info("WhatsApp Printer started (%s); control panel at %s", mode, self.url)
 
-        # Blocks until the Tk loop exits.
-        self.host.run()
+        self.host.run()  # blocks until the Tk loop exits
         self.watcher.stop()
-        log.info("WhatsApp Printer agent stopped")
+        log.info("WhatsApp Printer stopped")
 
 
 def _write_crash_report(exc: BaseException) -> Path | None:
@@ -126,8 +118,7 @@ def _write_crash_report(exc: BaseException) -> Path | None:
 
     Frozen with --windowed there is no console and no stderr, so an exception
     here is otherwise completely invisible — the exe just appears not to run.
-    Uses plain file IO rather than logging, because logging may be the thing
-    that failed.
+    Uses plain file IO rather than logging, because logging may be what failed.
     """
     try:
         target = paths().logs
@@ -170,11 +161,11 @@ def selftest() -> int:
     checks = {
         "settings": agent.settings is not None,
         "pipeline": agent.pipeline is not None,
-        "templates": agent.pipeline.templates.get(
+        "message": agent.pipeline.templates.get(
             agent.settings.default_template
         ) is not None,
         "spool dir": agent.paths.spool.is_dir(),
-        "dialog host": agent.host is not None,
+        "popup host": agent.host is not None,
     }
     for name, ok in checks.items():
         print(f"  {'ok  ' if ok else 'FAIL'}  {name}")

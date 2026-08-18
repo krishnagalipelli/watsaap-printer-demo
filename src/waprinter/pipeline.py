@@ -279,10 +279,6 @@ def build_default(settings: Settings | None = None) -> Pipeline:
         from .send.dryrun import DryRunSender
 
         sender = DryRunSender(p.logs / "dry_run.jsonl")
-    elif getattr(settings, "sender_type", "cloud") == "baileys":
-        from .send.baileys import BaileysSender
-
-        sender = BaileysSender()
     else:
         from .secrets import load_token
         from .send.whatsapp import WhatsAppCloudSender

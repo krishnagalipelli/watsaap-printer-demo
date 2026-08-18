@@ -132,15 +132,6 @@ try {
 
     Copy-Tesseract
 
-    Write-Host '== Building Baileys Service (Node.js) ==' -ForegroundColor Cyan
-    Push-Location 'src\baileys_service'
-    try {
-        Invoke-Step "npm install --no-fund --no-audit"
-        # Using @yao-pkg/pkg (maintained fork of pkg) that supports Node 20+
-        Invoke-Step "npx --yes @yao-pkg/pkg . --targets node20-win-x64 --output ..\..\dist\baileys-service.exe"
-    } finally {
-        Pop-Location
-    }
 
     Write-Host '== Compiling the installer ==' -ForegroundColor Cyan
     if (-not (Test-Path $ISCC)) {

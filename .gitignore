@@ -18,3 +18,7 @@ settings.json
 # Downloaded build artifacts and stray archives in the repo root.
 *.zip
 *.crdownload
+
+# Loose sample documents dropped in the repo root. These are real client and
+# third-party paperwork with names, phone numbers and account details on them.
+/*.pdf

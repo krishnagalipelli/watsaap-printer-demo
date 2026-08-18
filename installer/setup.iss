@@ -52,7 +52,6 @@ Source: "..\dist\waprinter-agent\*"; DestDir: "{app}"; \
     Flags: ignoreversion recursesubdirs; Components: core
 Source: "..\dist\cli\waprinter\*";   DestDir: "{app}\cli"; \
     Flags: ignoreversion recursesubdirs; Components: core
-Source: "..\dist\baileys-service.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: core
 Source: "provision.ps1";             DestDir: "{app}"; Flags: ignoreversion; Components: core
 Source: "..\README.md";              DestDir: "{app}"; Flags: ignoreversion isreadme; Components: core
 
@@ -79,7 +78,6 @@ Name: "{commondesktop}\{#AppName} Dashboard"; Filename: "{#DashboardUrl}"; \
 ; administrator's profile — the agent would then never start for the person
 ; actually printing, and printing would appear to do nothing.
 Name: "{commonstartup}\{#AppName}"; Filename: "{app}\waprinter-agent.exe"
-Name: "{commonstartup}\{#AppName} Baileys Service"; Filename: "{app}\baileys-service.exe"
 
 [Tasks]
 Name: "desktopicon"; Description: "Put a Dashboard shortcut on the desktop"; \
@@ -101,8 +99,6 @@ Filename: "powershell.exe"; \
     Flags: runhidden waituntilterminated
 
 ; Start the agent now so the first print works without a reboot.
-Filename: "{app}\baileys-service.exe"; Description: "Start Baileys Service"; \
-    Flags: postinstall nowait skipifsilent
 Filename: "{app}\waprinter-agent.exe"; Description: "Start {#AppName}"; \
     Flags: postinstall nowait skipifsilent
 
@@ -113,8 +109,6 @@ Filename: "{#DashboardUrl}"; Description: "Open the dashboard"; \
 ; Stop the agent before pulling the printer out from under it.
 Filename: "taskkill.exe"; Parameters: "/F /IM waprinter-agent.exe"; \
     Flags: runhidden; RunOnceId: "StopAgent"
-Filename: "taskkill.exe"; Parameters: "/F /IM baileys-service.exe"; \
-    Flags: runhidden; RunOnceId: "StopBaileysService"
 Filename: "powershell.exe"; \
     Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\provision.ps1"" -Uninstall"; \
     Flags: runhidden waituntilterminated; RunOnceId: "RemovePrinter"

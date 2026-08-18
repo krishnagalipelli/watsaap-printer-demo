@@ -77,19 +77,17 @@ class Paths:
 @dataclass
 class Settings:
     # --- Sending behaviour -------------------------------------------------
-    # Which sender to use: "cloud" (Meta API) or "baileys" (local node service).
-    sender_type: str = "baileys"
     # dry_run runs the whole pipeline but sends nothing. On until the client
     # has a working provider account.
     dry_run: bool = True
-    # Every print raises a window where the operator types the customer's
-    # number and confirms before anything is sent.
+    # Print, read the page, send. The operator sees only a small popup saying
+    # whether it went. This is the normal flow because these documents do print
+    # the customer's mobile number, and the extractor finds it reliably.
     #
-    # This is the primary flow, not a safety net: these documents do not carry
-    # the customer's phone number at all, so there is nothing to detect. Turning
-    # it off only makes sense for a client whose documents *do* print a number,
-    # and then only after measuring extraction with `waprinter corpus --score`.
-    confirm_before_send: bool = True
+    # Turn this on to make every print stop for confirmation instead — worth it
+    # for a client whose paperwork does not carry a number, or while tuning a
+    # new document layout.
+    confirm_before_send: bool = False
 
     # --- Safety rails ------------------------------------------------------
     # The client's own numbers. Seeded at install; anything matching is never

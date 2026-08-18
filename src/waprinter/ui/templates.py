@@ -1,7 +1,12 @@
-"""Inline HTML for the local UI.
+"""The control panel, laid out like a printer's properties window.
 
-Kept as strings rather than template files so the frozen executable stays a
-single self-contained bundle with no data-file paths to get wrong.
+Deliberately not a dashboard full of charts. The mental model is the dialog you
+get from Printer Properties: a status line at the top telling you whether the
+device is ready, tabs for the few things you can change, grouped fields with an
+Apply button, and a Test Send that plays the same role as "Print Test Page".
+
+Everything on screen is either something the operator must act on or something
+that tells them the printer is working. Anything else was cut.
 """
 
 from __future__ import annotations
@@ -14,226 +19,198 @@ BASE = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ title }} — WhatsApp Printer</title>
 <style>
-  :root { color-scheme: light dark; --bg:#fff; --fg:#1a1a1a; --muted:#666;
-          --line:#e2e2e2; --accent:#128c7e; --warn:#b45309; --bad:#b91c1c;
-          --card:#fafafa; }
+  :root { color-scheme: light dark;
+          --bg:#f0f0f0; --panel:#fff; --fg:#1a1a1a; --muted:#5c5c5c;
+          --line:#c8c8c8; --line-soft:#e6e6e6;
+          --ok:#0f7b43; --warn:#a35a00; --bad:#b3261e; --sel:#0f6cbd; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#16181c; --fg:#e8e8e8; --muted:#9aa0a6; --line:#2c2f36;
-            --accent:#25d366; --warn:#f59e0b; --bad:#f87171; --card:#1e2127; }
+    :root { --bg:#1b1c1f; --panel:#232529; --fg:#e9e9ea; --muted:#a0a3a8;
+            --line:#3a3d43; --line-soft:#2c2f34;
+            --ok:#3fbf7f; --warn:#e0a44a; --bad:#f4776b; --sel:#4aa3f0; }
   }
-  * { box-sizing: border-box; }
-  body { margin:0; font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
-         background:var(--bg); color:var(--fg); }
-  header { border-bottom:1px solid var(--line); padding:12px 20px;
-           display:flex; align-items:center; gap:20px; flex-wrap:wrap; }
-  header h1 { font-size:16px; margin:0; font-weight:600; }
-  nav a { color:var(--muted); text-decoration:none; margin-right:16px; }
-  nav a.on { color:var(--fg); font-weight:600; }
-  main { padding:20px; max-width:900px; }
-  .mode { margin-left:auto; font-size:13px; padding:3px 10px; border-radius:99px;
-          border:1px solid var(--line); }
-  .mode.dry { color:var(--warn); border-color:var(--warn); }
-  .mode.live { color:var(--accent); border-color:var(--accent); }
-  .job { border:1px solid var(--line); border-radius:8px; padding:14px 16px;
-         margin-bottom:12px; background:var(--card); }
-  .job h3 { margin:0 0 4px; font-size:15px; }
-  .why { color:var(--warn); margin:6px 0 12px; }
-  .meta { color:var(--muted); font-size:13px; }
-  form.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap;
-             margin-top:10px; }
-  input[type=text] { padding:7px 10px; border:1px solid var(--line);
-                     border-radius:6px; background:var(--bg); color:var(--fg);
-                     font-size:14px; min-width:190px; }
-  button { padding:7px 14px; border-radius:6px; border:1px solid var(--accent);
-           background:var(--accent); color:#fff; font-size:14px; cursor:pointer; }
-  button.ghost { background:transparent; color:var(--muted);
-                 border-color:var(--line); }
-  table { border-collapse:collapse; width:100%; font-size:14px; }
-  th, td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); }
-  th { color:var(--muted); font-weight:600; }
-  .tag { font-size:12px; padding:2px 8px; border-radius:99px;
-         border:1px solid var(--line); }
-  .tag.sent { color:var(--accent); border-color:var(--accent); }
-  .tag.held { color:var(--warn); border-color:var(--warn); }
-  .tag.failed { color:var(--bad); border-color:var(--bad); }
-  .empty { color:var(--muted); padding:30px 0; }
-  .flash { padding:10px 14px; border-radius:6px; margin-bottom:16px;
-           border:1px solid var(--accent); color:var(--accent); }
-  .flash.err { border-color:var(--bad); color:var(--bad); }
-  label { display:block; margin:14px 0 4px; font-size:14px; }
-  .hint { color:var(--muted); font-size:13px; margin-top:2px; }
-  pre { background:var(--card); border:1px solid var(--line); border-radius:6px;
-        padding:12px; white-space:pre-wrap; font:13px/1.5 ui-monospace, monospace; }
-  .tiles { display:grid; gap:12px; margin-bottom:24px;
-           grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); }
-  .tile { border:1px solid var(--line); border-radius:8px; padding:14px 16px;
-          background:var(--card); }
-  .tile .n { font-size:30px; font-weight:600; line-height:1.1; }
-  .tile .k { color:var(--muted); font-size:13px; margin-top:4px; }
-  .tile.good .n { color:var(--accent); }
-  .tile.warn .n { color:var(--warn); }
-  .tile.bad  .n { color:var(--bad); }
-  h2 { font-size:15px; margin:0 0 10px; }
-  .cta { display:inline-block; margin-top:4px; color:var(--warn); }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:13px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  .window { max-width:720px; margin:18px auto; background:var(--panel);
+            border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+
+  /* --- device status strip, like the top of a printer properties page --- */
+  .device { display:flex; align-items:center; gap:14px; padding:16px 18px;
+            border-bottom:1px solid var(--line-soft); }
+  .device .icon { font-size:26px; line-height:1; }
+  .device h1 { margin:0; font-size:15px; font-weight:600; }
+  .device .state { margin-top:2px; font-size:12.5px; }
+  .state.ok   { color:var(--ok); }
+  .state.warn { color:var(--warn); }
+  .state.bad  { color:var(--bad); }
+  .device .spacer { margin-left:auto; }
+
+  /* --- tabs ------------------------------------------------------------- */
+  nav { display:flex; gap:2px; padding:0 12px; background:var(--bg);
+        border-bottom:1px solid var(--line); }
+  nav a { padding:8px 15px; font-size:12.5px; color:var(--muted);
+          text-decoration:none; border:1px solid transparent;
+          border-bottom:none; border-radius:5px 5px 0 0; position:relative;
+          top:1px; }
+  nav a:hover { color:var(--fg); }
+  nav a.on { background:var(--panel); color:var(--fg); font-weight:600;
+             border-color:var(--line); }
+  nav .count { display:inline-block; min-width:17px; padding:0 5px;
+               margin-left:5px; border-radius:9px; background:var(--warn);
+               color:#fff; font-size:11px; text-align:center; }
+
+  main { padding:18px; }
+
+  /* --- grouped fields --------------------------------------------------- */
+  fieldset { border:1px solid var(--line-soft); border-radius:5px;
+             padding:14px 16px 16px; margin:0 0 16px; }
+  legend { padding:0 6px; font-size:12px; font-weight:600; color:var(--muted);
+           text-transform:uppercase; letter-spacing:.4px; }
+  .field { display:flex; align-items:baseline; gap:12px; margin-bottom:11px; }
+  .field > label { flex:0 0 170px; text-align:right; color:var(--fg); }
+  .field > .control { flex:1; min-width:0; }
+  input[type=text], input[type=number], select {
+      width:100%; padding:5px 8px; border:1px solid var(--line);
+      border-radius:3px; background:var(--panel); color:var(--fg);
+      font:inherit; }
+  input:focus, select:focus { outline:2px solid var(--sel); outline-offset:-1px; }
+  .hint { color:var(--muted); font-size:11.5px; margin-top:3px; }
+  .check { display:flex; gap:8px; align-items:flex-start; margin-bottom:11px; }
+  .check input { margin-top:2px; }
+
+  /* --- buttons ---------------------------------------------------------- */
+  .buttons { display:flex; gap:8px; justify-content:flex-end;
+             border-top:1px solid var(--line-soft); padding-top:14px; }
+  button, .btn { font:inherit; padding:5px 18px; border-radius:3px;
+                 border:1px solid var(--line); background:var(--panel);
+                 color:var(--fg); cursor:pointer; text-decoration:none; }
+  button.primary { background:var(--sel); border-color:var(--sel); color:#fff; }
+  button:hover, .btn:hover { border-color:var(--sel); }
+
+  /* --- readouts --------------------------------------------------------- */
+  .counters { display:flex; gap:0; border:1px solid var(--line-soft);
+              border-radius:5px; overflow:hidden; margin-bottom:16px; }
+  .counters div { flex:1; padding:12px 14px; border-right:1px solid var(--line-soft); }
+  .counters div:last-child { border-right:none; }
+  .counters .n { font-size:21px; font-weight:600; }
+  .counters .k { color:var(--muted); font-size:11.5px; margin-top:1px; }
+  .counters .n.ok { color:var(--ok); }
+  .counters .n.warn { color:var(--warn); }
+  .counters .n.bad { color:var(--bad); }
+
+  table { border-collapse:collapse; width:100%; font-size:12.5px; }
+  th { text-align:left; padding:6px 8px; color:var(--muted); font-weight:600;
+       border-bottom:1px solid var(--line); }
+  td { padding:6px 8px; border-bottom:1px solid var(--line-soft);
+       vertical-align:top; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:9px;
+          font-size:11px; border:1px solid var(--line); color:var(--muted); }
+  .pill.ok { color:var(--ok); border-color:var(--ok); }
+  .pill.warn { color:var(--warn); border-color:var(--warn); }
+  .pill.bad { color:var(--bad); border-color:var(--bad); }
+
+  .item { border:1px solid var(--line-soft); border-radius:5px;
+          padding:12px 14px; margin-bottom:10px; }
+  .item h3 { margin:0 0 2px; font-size:13.5px; }
+  .item .why { color:var(--warn); margin:6px 0 10px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .row input[type=text] { width:190px; }
+  .empty { color:var(--muted); padding:22px 0; text-align:center; }
+  .notice { padding:9px 12px; border-radius:4px; margin-bottom:14px;
+            border:1px solid var(--ok); color:var(--ok); font-size:12.5px; }
+  .notice.err { border-color:var(--bad); color:var(--bad); }
+  .notice ul { margin:5px 0 0 16px; padding:0; }
+  code { font:12px ui-monospace, Menlo, Consolas, monospace; }
+  pre { background:var(--bg); border:1px solid var(--line-soft);
+        border-radius:4px; padding:11px; white-space:pre-wrap;
+        font:12px/1.5 ui-monospace, Menlo, Consolas, monospace; margin:0; }
 </style>
 </head>
 <body>
-<header>
-  <h1>WhatsApp Printer</h1>
+<div class="window">
+  <div class="device">
+    <div class="icon">{{ device.icon }}</div>
+    <div>
+      <h1>WhatsApp Printer</h1>
+      <div class="state {{ device.tone }}">{{ device.state }}</div>
+    </div>
+    <div class="spacer"></div>
+    <form method="post" action="/test-send">
+      <button type="submit">Test send</button>
+    </form>
+  </div>
+
   <nav>
-    <a href="/" class="{{ 'on' if page == 'dashboard' }}">Dashboard</a>
-    <a href="/queue" class="{{ 'on' if page == 'queue' }}">Queue{{ queue_badge }}</a>
-    <a href="/history" class="{{ 'on' if page == 'history' }}">History</a>
+    <a href="/" class="{{ 'on' if page == 'status' }}">Status</a>
+    <a href="/queue" class="{{ 'on' if page == 'queue' }}">Needs attention{% if attention %}<span class="count">{{ attention }}</span>{% endif %}</a>
+    <a href="/history" class="{{ 'on' if page == 'history' }}">Recent</a>
     <a href="/settings" class="{{ 'on' if page == 'settings' }}">Settings</a>
   </nav>
-  <span class="mode {{ 'dry' if dry_run else 'live' }}">
-    {{ 'DRY RUN — nothing is sent' if dry_run else 'LIVE' }}
-  </span>
-</header>
-<main>
-{% if flash %}<div class="flash {{ flash_kind }}">{{ flash }}</div>{% endif %}
-{# `body` is already-rendered markup from an autoescaping pass, so it is safe
-   here. Every value inside it was escaped when that inner template ran. #}
-{{ body | safe }}
-</main>
+
+  <main>
+    {% if flash %}<div class="notice {{ flash_kind }}">{{ flash }}</div>{% endif %}
+    {{ body | safe }}
+  </main>
+</div>
 </body>
 </html>
 """
 
-DASHBOARD = """
-<div id="wa-status" style="border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:20px; background:var(--card); text-align:center; display:none;">
-  <h2 style="margin:0 0 8px; color:var(--bad);">⚠ WhatsApp Not Connected</h2>
-  <p style="color:var(--muted); margin:0 0 12px;">Scan this QR code with your WhatsApp to link this device</p>
-  <img id="wa-qr" style="max-width:280px; border-radius:8px; border:1px solid var(--line);" />
-  <p id="wa-waiting" style="color:var(--muted); margin:12px 0 0; display:none;">Waiting for QR code...</p>
-</div>
-<div id="wa-connected" style="border:1px solid var(--accent); border-radius:8px; padding:12px 16px; margin-bottom:20px; background:var(--card); display:none;">
-  <span style="color:var(--accent); font-weight:600;">✓ WhatsApp Connected</span>
-</div>
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
-<script>
-(function() {
-  var box = document.getElementById('wa-status');
-  var ok  = document.getElementById('wa-connected');
-  var img = document.getElementById('wa-qr');
-  var wait = document.getElementById('wa-waiting');
-  function poll() {
-    fetch('/wa-status').then(function(r){ return r.json(); }).then(function(d) {
-      if (d.state === 'open') {
-        box.style.display = 'none';
-        ok.style.display = 'block';
-      } else {
-        ok.style.display = 'none';
-        box.style.display = 'block';
-        if (d.qr) {
-          QRCode.toDataURL(d.qr, { width: 280, margin: 2 }, function (err, url) {
-            if (!err) {
-              img.src = url;
-              img.style.display = 'inline-block';
-              wait.style.display = 'none';
-            }
-          });
-        }
-        else { img.style.display = 'none'; wait.style.display = 'block'; }
-      }
-    }).catch(function() {
-      box.style.display = 'none';
-      ok.style.display = 'none';
-    });
-  }
-  poll();
-  setInterval(poll, 3000);
-})();
-</script>
-
-<h2>Today</h2>
-<div class="tiles">
-  <div class="tile good">
-    <div class="n">{{ today.sent }}</div>
-    <div class="k">{{ 'would have been sent' if settings.dry_run else 'sent' }}</div>
-  </div>
-  <div class="tile">
-    <div class="n">{{ today.printed }}</div>
-    <div class="k">documents printed</div>
-  </div>
-  <div class="tile {{ 'warn' if today.waiting }}">
-    <div class="n">{{ today.waiting }}</div>
-    <div class="k">waiting on you</div>
-  </div>
-  <div class="tile {{ 'bad' if today.failed }}">
-    <div class="n">{{ today.failed }}</div>
-    <div class="k">failed</div>
-  </div>
+STATUS = """
+<div class="counters">
+  <div><div class="n ok">{{ today.sent }}</div>
+       <div class="k">{{ 'sent today' if not settings.dry_run else 'test sends today' }}</div></div>
+  <div><div class="n">{{ today.printed }}</div><div class="k">documents printed</div></div>
+  <div><div class="n {{ 'warn' if today.waiting }}">{{ today.waiting }}</div>
+       <div class="k">need attention</div></div>
+  <div><div class="n {{ 'bad' if today.failed }}">{{ today.failed }}</div>
+       <div class="k">failed</div></div>
 </div>
 
-{% if today.waiting %}
-  <p><a class="cta" href="/queue">{{ today.waiting }} document(s) need a number
-  — open the queue →</a></p>
+{% if problems %}
+<fieldset>
+  <legend>Before this can send</legend>
+  <ul style="margin:0 0 0 16px; padding:0; color:var(--warn)">
+    {% for p in problems %}<li>{{ p }}</li>{% endfor %}
+  </ul>
+  <div class="hint" style="margin-top:8px">
+    Fix these in <a href="/settings">Settings</a>. Printing still works meanwhile —
+    documents are captured and wait here.
+  </div>
+</fieldset>
 {% endif %}
 
-<h2>Delivery</h2>
-{% if not delivery_available %}
-  <p class="meta">Delivery receipts aren't wired up yet, so this shows what the
-  provider accepted rather than what reached the customer's phone.</p>
-{% endif %}
-<table>
-  <tr><th>State</th><th>Count</th><th></th></tr>
-  <tr><td>Accepted by provider</td><td>{{ today.sent }}</td>
-      <td class="meta">handed over successfully</td></tr>
-  <tr><td>Rejected / failed</td><td>{{ today.failed }}</td>
-      <td class="meta">see the queue for why</td></tr>
-  <tr><td>Suppressed reprints</td><td>{{ today.duplicate }}</td>
-      <td class="meta">same document already sent</td></tr>
-</table>
-
-<h2 style="margin-top:24px">Recent activity</h2>
-<table>
-  <tr><th>When</th><th>Status</th><th>Sent to</th><th>Document</th></tr>
-  {% for job in recent %}
-  <tr>
-    <td>{{ job.created_at.strftime('%H:%M') }}</td>
-    <td><span class="tag {{ job.status }}">{{ job.status }}</span></td>
-    <td>{{ job.recipient or '—' }}</td>
-    <td>{{ job.fields.invoice_number or job.doc_title or '—' }}</td>
-  </tr>
-  {% endfor %}
-</table>
-{% if not recent %}
-  <p class="empty">Nothing printed yet today. Print something to the
-  <strong>WhatsApp Printer</strong> and it will appear here.</p>
-{% endif %}
+<fieldset>
+  <legend>How to use</legend>
+  <div>In any program choose <strong>File → Print</strong>, pick
+  <strong>WhatsApp Printer</strong>, and print as normal. The customer's number
+  is read off the page and the document is sent to them on WhatsApp. A small
+  panel appears in the corner to say whether it went.</div>
+</fieldset>
 """
 
 QUEUE = """
 {% if not jobs %}
-  <p class="empty">Nothing waiting. Held jobs appear here when the number on a
-  printed page is missing, ambiguous, or not certain enough to send blind.</p>
+  <p class="empty">Nothing waiting. Documents appear here only when the
+  customer's number could not be read off the page.</p>
 {% endif %}
 {% for job in jobs %}
-  <div class="job">
-    <h3>{{ job.fields.invoice_number or job.doc_title or 'Untitled document' }}</h3>
-    <div class="meta">
-      {{ job.created_at.strftime('%d %b %Y, %H:%M') }}
+  <div class="item">
+    <h3>{{ job.fields.invoice_number or job.doc_title or 'Document' }}</h3>
+    <div class="hint">
+      {{ job.created_at.strftime('%d %b, %H:%M') }}
       {% if job.fields.customer_name %} · {{ job.fields.customer_name }}{% endif %}
-      {% if job.fields.total_amount %} · ₹{{ job.fields.total_amount }}{% endif %}
       · <a href="/jobs/{{ job.id }}/pdf" target="_blank">view PDF</a>
     </div>
-    <p class="why">{{ job.hold_reason }}</p>
+    <p class="why">{{ job.hold_reason or job.error }}</p>
     <form class="row" method="post" action="/jobs/{{ job.id }}/send">
       <input type="text" name="recipient" placeholder="Mobile number"
              value="{{ job.recipient or '' }}" required>
-      <button type="submit">Send</button>
+      <button class="primary" type="submit">Send</button>
+      <span style="flex:1"></span>
     </form>
-    {% if job.fields.candidates %}
-      <div class="meta" style="margin-top:8px">
-        Found on the page:
-        {% for c in job.fields.candidates %}
-          {{ c.e164 }} ({{ c.confidence }}){% if not loop.last %}, {% endif %}
-        {% endfor %}
-      </div>
-    {% endif %}
-    <form class="row" method="post" action="/jobs/{{ job.id }}/discard">
-      <button type="submit" class="ghost">Discard</button>
+    <form method="post" action="/jobs/{{ job.id }}/discard" style="margin-top:8px">
+      <button type="submit">Discard</button>
     </form>
   </div>
 {% endfor %}
@@ -241,113 +218,125 @@ QUEUE = """
 
 HISTORY = """
 <table>
-  <tr><th>When</th><th>Status</th><th>Sent to</th><th>Invoice</th><th>Detail</th></tr>
+  <tr><th>Time</th><th>Status</th><th>Sent to</th><th>Document</th><th></th></tr>
   {% for job in jobs %}
   <tr>
     <td>{{ job.created_at.strftime('%d %b %H:%M') }}</td>
-    <td><span class="tag {{ job.status }}">{{ job.status }}</span></td>
+    <td><span class="pill {{ job.tone }}">{{ job.label }}</span></td>
     <td>{{ job.recipient or '—' }}</td>
-    <td>{{ job.fields.invoice_number or '—' }}</td>
-    <td class="meta">{{ job.error or job.hold_reason or job.wamid or '' }}</td>
+    <td>{{ job.fields.invoice_number or job.doc_title or '—' }}</td>
+    <td class="hint">{{ job.error or job.hold_reason or '' }}</td>
   </tr>
   {% endfor %}
 </table>
-{% if not jobs %}<p class="empty">No jobs yet.</p>{% endif %}
+{% if not jobs %}<p class="empty">Nothing printed yet.</p>{% endif %}
 """
 
 SETTINGS = """
 <form method="post" action="/settings">
-  <label>Your own phone numbers</label>
-  <input type="text" name="own_numbers" style="width:100%"
-         value="{{ ','.join(settings.own_numbers) }}">
-  <div class="hint">Comma separated. These are never treated as a customer, so
-  the number in your invoice footer can't receive its own invoice.</div>
-
-  <h3>How messages are sent</h3>
-  {% for s in senders %}
-    <label>
-      <input type="radio" name="sender_type" value="{{ s.key }}"
-             {{ 'checked' if settings.sender_type == s.key }}>
-      {{ s.label }}
-    </label>
-    <div class="hint">{{ s.summary }}
-      {% if s.caution %}<br><strong>{{ s.caution }}</strong>{% endif %}
+  <fieldset>
+    <legend>WhatsApp account</legend>
+    <div class="field">
+      <label for="pid">Phone number ID</label>
+      <div class="control">
+        <input id="pid" type="text" name="phone_number_id"
+               value="{{ settings.phone_number_id }}">
+        <div class="hint">Meta Business → WhatsApp → API Setup.</div>
+      </div>
     </div>
-  {% endfor %}
-
-  {% if problems %}
-    <div class="flash err" style="margin-top:12px">
-      Not ready to send:
-      <ul style="margin:6px 0 0 18px">
-        {% for p in problems %}<li>{{ p }}</li>{% endfor %}
-      </ul>
+    <div class="field">
+      <label for="own">Our own numbers</label>
+      <div class="control">
+        <input id="own" type="text" name="own_numbers"
+               value="{{ ','.join(settings.own_numbers) }}">
+        <div class="hint">Comma separated. Never treated as a customer, so the
+        number printed on your own letterhead cannot be sent its own receipt.</div>
+      </div>
     </div>
-  {% endif %}
+    <div class="field">
+      <label for="tpl">Message</label>
+      <div class="control">
+        <input id="tpl" type="text" name="default_template"
+               value="{{ settings.default_template }}">
+        <div class="hint">Approved templates only — Meta requires this for
+        messages you start. Change the wording by submitting a new template.</div>
+      </div>
+    </div>
+  </fieldset>
 
-  <label>WhatsApp phone number ID</label>
-  <input type="text" name="phone_number_id" style="width:100%"
-         value="{{ settings.phone_number_id }}">
-  <div class="hint">Official API only. From Meta Business — WhatsApp → API Setup.</div>
+  <fieldset>
+    <legend>Sending</legend>
+    <div class="check">
+      <input id="dry" type="checkbox" name="dry_run"
+             {{ 'checked' if settings.dry_run }}>
+      <div><label for="dry"><strong>Test mode</strong> — process everything,
+        send nothing</label>
+        <div class="hint">Leave on until the WhatsApp account is live.</div></div>
+    </div>
+    <div class="check">
+      <input id="confirm" type="checkbox" name="confirm_before_send"
+             {{ 'checked' if settings.confirm_before_send }}>
+      <div><label for="confirm">Ask before every send</label>
+        <div class="hint">Off by default. Turn on while checking a new document
+        layout, and every print will wait here instead of going straight out.</div>
+      </div>
+    </div>
+    <div class="field">
+      <label for="dedupe">Ignore reprints for</label>
+      <div class="control" style="max-width:170px">
+        <input id="dedupe" type="text" name="dedupe_window_hours"
+               value="{{ settings.dedupe_window_hours }}"> <span class="hint">hours</span>
+      </div>
+    </div>
+    <div class="field">
+      <label for="rate">Maximum per minute</label>
+      <div class="control" style="max-width:170px">
+        <input id="rate" type="text" name="max_sends_per_minute"
+               value="{{ settings.max_sends_per_minute }}">
+        <div class="hint">Stops a runaway batch print.</div>
+      </div>
+    </div>
+  </fieldset>
 
-  <label>Message template</label>
-  <input type="text" name="default_template" style="width:100%"
-         value="{{ settings.default_template }}">
-  <div class="hint">Must be approved by Meta before it can be used.</div>
+  <fieldset>
+    <legend>Scanned documents</legend>
+    <div class="check">
+      <input id="ocr" type="checkbox" name="ocr_enabled"
+             {{ 'checked' if settings.ocr_enabled }}>
+      <div><label for="ocr">Read documents printed as an image (OCR)</label>
+        <div class="hint">
+          {% if ocr_available %}Ready.{% else %}
+          <strong>Not available</strong> — reinstall with the OCR component.
+          {% endif %}
+        </div></div>
+    </div>
+    <div class="check">
+      <input id="ocrsend" type="checkbox" name="ocr_silent_send"
+             {{ 'checked' if settings.ocr_silent_send }}>
+      <div><label for="ocrsend">Send to numbers read by OCR without asking</label>
+        <div class="hint">Off by default. OCR misreads digits on a poor scan,
+        and one wrong digit is a different person.</div></div>
+    </div>
+  </fieldset>
 
-  <label>Suppress reprints for (hours)</label>
-  <input type="text" name="dedupe_window_hours"
-         value="{{ settings.dedupe_window_hours }}">
-
-  <label>Maximum sends per minute</label>
-  <input type="text" name="max_sends_per_minute"
-         value="{{ settings.max_sends_per_minute }}">
-  <div class="hint">Stops a runaway batch print from fanning out.</div>
-
-  <label>
-    <input type="checkbox" name="dry_run" {{ 'checked' if settings.dry_run }}>
-    Dry run — process everything, send nothing
-  </label>
-  <div class="hint">Leave this on until extraction has been measured against
-  real invoices.</div>
-
-  <h3>Scanned invoices</h3>
-  <label>
-    <input type="checkbox" name="ocr_enabled" {{ 'checked' if settings.ocr_enabled }}>
-    Read invoices that were printed as an image (OCR)
-  </label>
-  <div class="hint">
-    {% if ocr_available %}
-      Tesseract is installed and working.
-    {% else %}
-      <strong>Tesseract is not installed</strong>, so scanned pages can't be read.
-      Reinstall with the OCR component selected.
-    {% endif %}
+  <div class="buttons">
+    <button class="primary" type="submit">Apply</button>
   </div>
-
-  <label>
-    <input type="checkbox" name="ocr_silent_send"
-           {{ 'checked' if settings.ocr_silent_send }}>
-    Send to numbers read by OCR without asking
-  </label>
-  <div class="hint">Off by default, and worth leaving off. OCR confuses digits
-  on a poor scan, and one wrong digit in a mobile number is a different real
-  person. With this off, scanned invoices land in the queue for a two-second
-  glance instead.</div>
-
-  <p><button type="submit">Save</button></p>
 </form>
 
-<h3>Current message</h3>
-{% if template %}
-  <pre>{{ template.body }}{% if template.footer %}
+<fieldset style="margin-top:18px">
+  <legend>Current message</legend>
+  {% if template %}
+    <pre>{{ template.body }}{% if template.footer %}
 
 {{ template.footer }}{% endif %}</pre>
-  <p class="meta">Status with Meta: <strong>{{ template.status }}</strong></p>
-  <p class="hint">The variable mapping ({{ settings.template_variables }}) takes
-  effect on the next print. Changing the wording itself means submitting a new
-  template to Meta for approval, which usually takes under a day — the current
-  template keeps working meanwhile.</p>
-{% else %}
-  <p class="empty">No template configured.</p>
-{% endif %}
+    <div class="hint" style="margin-top:8px">
+      Approval status: <strong>{{ template.status }}</strong>.
+      Values in <code>{{ '{{1}}' }}</code> come from the printed page —
+      currently {{ settings.template_variables }}.
+    </div>
+  {% else %}
+    <p class="empty">No message configured.</p>
+  {% endif %}
+</fieldset>
 """
