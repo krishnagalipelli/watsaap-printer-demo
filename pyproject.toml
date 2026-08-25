@@ -1,6 +1,6 @@
 [project]
 name = "waprinter"
-version = "0.1.0"
+version = "0.0.1"
 description = "Virtual Windows printer that sends printed invoices to customers over WhatsApp"
 requires-python = ">=3.11"
 

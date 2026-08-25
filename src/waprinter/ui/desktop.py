@@ -220,6 +220,12 @@ class DesktopWindow:
         ttk.Button(
             row, text="Send", command=lambda j=job.id, e=entry: self.send_job(j, e.get())
         ).pack(side="left", padx=6)
+        if job.chat_url:
+            ttk.Button(
+                row,
+                text="Open WhatsApp",
+                command=lambda j=job.id: self.open_whatsapp(j),
+            ).pack(side="left", padx=(0, 6))
         ttk.Button(
             row, text="View PDF", command=lambda j=job.id: self.open_pdf(j)
         ).pack(side="left")
@@ -275,6 +281,11 @@ class DesktopWindow:
         sending = ttk.LabelFrame(self.settings_tab, text="Sending", padding=12)
         sending.pack(fill="x", pady=(0, 10))
         self._check(sending, "dry_run", "Test mode — process everything, send nothing")
+        self._check(
+            sending,
+            "auto_open_chat",
+            "Open WhatsApp automatically after printing",
+        )
         self._check(sending, "confirm_before_send", "Ask before every send")
         self._entry(sending, "dedupe_window_hours", "Ignore reprints for (hours)", "")
         self._entry(sending, "max_sends_per_minute", "Maximum per minute",
@@ -326,6 +337,7 @@ class DesktopWindow:
             "device_name": s.device_name,
             "update_url": s.update_url,
             "dry_run": s.dry_run,
+            "auto_open_chat": s.auto_open_chat,
             "confirm_before_send": s.confirm_before_send,
             "ocr_enabled": s.ocr_enabled,
             "ocr_silent_send": s.ocr_silent_send,
@@ -358,6 +370,7 @@ class DesktopWindow:
         s.device_name = self.fields["device_name"].get().strip()
         s.update_url = self.fields["update_url"].get().strip()
         s.dry_run = bool(self.fields["dry_run"].get())
+        s.auto_open_chat = bool(self.fields["auto_open_chat"].get())
         s.confirm_before_send = bool(self.fields["confirm_before_send"].get())
         s.ocr_enabled = bool(self.fields["ocr_enabled"].get())
         s.ocr_silent_send = bool(self.fields["ocr_silent_send"].get())
@@ -426,6 +439,40 @@ class DesktopWindow:
             return
         webbrowser.open(job.pdf_path.as_uri())
 
+    def open_whatsapp(self, job_id: str) -> bool:
+        """Open the member's chat with the message already typed.
+
+        Also puts the receipt on the clipboard, because a wa.me link carries
+        text only — there is no way to attach a file to one. Ctrl+V in WhatsApp
+        Desktop then attaches it, which is the shortest path we can offer until
+        the API account is live.
+        """
+        from ..send.link import copy_file_to_clipboard, open_chat, reveal
+
+        job = self.pipeline.store.get(job_id)
+        if job is None or not job.chat_url:
+            messagebox.showerror(
+                "WhatsApp Printer",
+                "This document has no WhatsApp link.",
+                parent=self.root,
+            )
+            return False
+
+        copied = copy_file_to_clipboard(job.pdf_path)
+        try:
+            open_chat(job.chat_url)
+            self.pipeline.hand_off(job_id)
+        except Exception as exc:
+            log.exception("could not open the chat")
+            messagebox.showerror("WhatsApp Printer", str(exc), parent=self.root)
+            return False
+
+        if not copied:
+            # No clipboard help available, so show them where the file is.
+            reveal(job.pdf_path)
+        self.refresh()
+        return True
+
     def check_updates(self) -> None:
         """Manual check, so a same-day fix does not wait for the daily one."""
         if self.on_check_updates is None:
@@ -468,10 +515,28 @@ class DesktopWindow:
         job = self.pipeline.store.get(job_id)
         if job is None:
             return
+
+        # One member at a time at a counter, so go straight to the chat rather
+        # than making them click. The notification that follows reports what
+        # happened and reminds them to paste.
+        if (
+            job.status is JobStatus.READY
+            and getattr(self.settings, "auto_open_chat", False)
+            and job.chat_url
+        ):
+            if self.open_whatsapp(job_id):
+                job = self.pipeline.store.get(job_id) or job
         # A batch print should not stack panels down the screen.
         for existing in self._notifications:
             existing.close()
-        self._notifications = [Notification(self.root, job, on_open=self.show)]
+        self._notifications = [
+            Notification(
+                self.root,
+                job,
+                on_open=self.show,
+                on_whatsapp=lambda j=job.id: self.open_whatsapp(j),
+            )
+        ]
 
     # -- refresh -----------------------------------------------------------
 

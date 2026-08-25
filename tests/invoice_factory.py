@@ -77,6 +77,14 @@ class ChitReceiptSpec:
     member_phone: str | None = "9000012345"
     phone_label: str = "Mobile :"
 
+    # Pre-printed stationery wording. The client's real receipts carry it, but
+    # their PDF text layer does not — the software only prints the filled-in
+    # fields, so this text is only ever seen by OCR.
+    preprinted_wording: bool = False
+    # At higher resolutions Tesseract emits the anchor and the name as separate
+    # lines at the same height rather than one line.
+    split_name_line: bool = False
+
     amount: str = "100.00"
     amount_words: str = "One Hundred Only"
     payment_mode: str = "Cash"
@@ -106,11 +114,23 @@ def build_chit_receipt(spec: ChitReceiptSpec, out_path: Path) -> Path:
 
     # Name and phone share a line, which is why the name has to be trimmed at
     # the next label rather than run to the end of the row.
-    text(LEFT, 170, f"{spec.member_label} {spec.member_name}")
+    name_x = LEFT
+    if spec.preprinted_wording:
+        text(LEFT, 170, "Received from")
+        name_x = LEFT + 78
+    if spec.split_name_line:
+        text(name_x, 170, spec.member_label)
+        text(name_x + 62, 170, spec.member_name)
+    else:
+        text(name_x, 170, f"{spec.member_label} {spec.member_name}")
     if spec.member_phone:
         text(LEFT + 240, 170, f"{spec.phone_label}   {spec.member_phone}")
 
-    text(LEFT, 188, spec.amount_words)
+    if spec.preprinted_wording:
+        text(LEFT, 188, "an amount of Rupees")
+        text(LEFT + 110, 188, spec.amount_words)
+    else:
+        text(LEFT, 188, spec.amount_words)
 
     y = 230
     for left, right in (

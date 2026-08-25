@@ -120,17 +120,31 @@ class Settings:
     phone_number_id: str = ""
     business_account_id: str = ""
     graph_api_version: str = "v21.0"
-    default_template: str = "invoice_document"
+    default_template: str = "chit_receipt"
     template_language: str = "en"
     # Maps template body variable position -> extracted field name.
     # e.g. {"1": "customer_name", "2": "invoice_number", "3": "total_amount"}
     template_variables: dict[str, str] = field(
         default_factory=lambda: {
             "1": "customer_name",
-            "2": "invoice_number",
-            "3": "total_amount",
+            "2": "business_name",
+            "3": "invoice_number",
+            "4": "invoice_date",
+            "5": "total_amount",
+            "6": "payment_mode",
         }
     )
+
+    # --- Message ------------------------------------------------------------
+    # Free text until the Cloud API account is live; a wa.me link carries the
+    # message but cannot carry the PDF, so the operator attaches it.
+    send_mode: str = "link"           # "link" or "api"
+    # Link mode: open the chat as soon as the receipt is read, instead of
+    # waiting for the operator to click. Right for a counter serving one member
+    # at a time. Turn it off where receipts are printed in batches, or ten
+    # prints will fling open ten chats.
+    auto_open_chat: bool = True
+    business_name: str = "Srinidhi Chit Funds"
 
     # --- Updates -----------------------------------------------------------
     # A static JSON file: {"version", "url", "sha256", "notes"}. No server of

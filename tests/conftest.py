@@ -21,6 +21,15 @@ def settings():
         dry_run=True,
         own_numbers=["9845012345"],
         default_country_code="91",
+        # Explicit: the shipped default is link mode, but most of the suite
+        # exercises the Cloud API path. Link mode has its own fixture.
+        send_mode="api",
+        default_template="invoice_document",
+        template_variables={
+            "1": "customer_name",
+            "2": "invoice_number",
+            "3": "total_amount",
+        },
     )
 
 
@@ -72,6 +81,22 @@ def pipeline(settings, store, templates, tmp_path):
         sender=DryRunSender(tmp_path / "dry_run.jsonl"),
         templates=templates,
     )
+
+
+@pytest.fixture
+def link_pipeline(pipeline):
+    """Click-to-chat mode, used until the Cloud API account is live."""
+    pipeline.settings.send_mode = "link"
+    pipeline.settings.default_template = "chit_receipt"
+    pipeline.settings.template_variables = {
+        "1": "customer_name",
+        "2": "business_name",
+        "3": "invoice_number",
+        "4": "invoice_date",
+        "5": "total_amount",
+        "6": "payment_mode",
+    }
+    return pipeline
 
 
 @pytest.fixture

@@ -21,6 +21,10 @@ STATUS_LABELS: dict[JobStatus, tuple[str, str]] = {
     JobStatus.SENT: ("Sent", "ok"),
     JobStatus.DRY_RUN: ("Test only", "warn"),
     JobStatus.AWAITING: ("Needs a number", "warn"),
+    JobStatus.READY: ("Ready to send", "warn"),
+    # Never "Sent": in link mode a person presses send in WhatsApp and the app
+    # cannot see it happen.
+    JobStatus.HANDED_OFF: ("Opened in WhatsApp", "ok"),
     JobStatus.HELD: ("Waiting", "warn"),
     JobStatus.DUPLICATE: ("Reprint ignored", "muted"),
     JobStatus.FAILED: ("Failed", "bad"),

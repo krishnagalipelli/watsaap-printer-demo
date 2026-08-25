@@ -129,3 +129,69 @@ class TestProfileConfiguration:
 
     def test_a_missing_profile_file_uses_defaults(self, tmp_path):
         assert DocumentProfile.load(tmp_path / "nope.json").name == "default"
+
+
+class TestPreprintedStationery:
+    """A form whose wording is printed on the paper, not by the software.
+
+    The client's receipts are like this: the PDF text layer holds only the
+    filled-in fields, so the pre-printed words ("Received from", "an amount of
+    Rupees") appear only when the page is read by OCR. That made the bug
+    invisible on the text path and guaranteed on the scanned one.
+    """
+
+    def test_the_name_is_read_when_two_anchors_share_a_row(self, receipt):
+        # "Received from" and "Sri/Smt/M/s" both match. The first has nothing
+        # after it; the last has the name.
+        fields = extract_fields(receipt(ChitReceiptSpec(preprinted_wording=True)))
+        assert fields.customer_name == "ANITHA RAMESH"
+
+    def test_boilerplate_below_the_anchor_is_not_a_name(self, receipt):
+        # Regression: the message greeted the member as "an amount of Rupees".
+        fields = extract_fields(receipt(ChitReceiptSpec(preprinted_wording=True)))
+        assert "amount" not in (fields.customer_name or "").lower()
+        assert "rupees" not in (fields.customer_name or "").lower()
+
+    def test_the_name_is_read_when_it_is_a_separate_line_at_the_same_height(
+        self, receipt
+    ):
+        # At 300 dpi Tesseract split "Sri/Smt/M/s . NAME" into two lines, which
+        # left the anchor with nothing beside it. Rows put them back together.
+        spec = ChitReceiptSpec(preprinted_wording=True, split_name_line=True)
+        assert extract_fields(receipt(spec, "split.pdf")).customer_name == "ANITHA RAMESH"
+
+    def test_the_recipient_is_still_correct(self, receipt):
+        spec = ChitReceiptSpec(preprinted_wording=True, split_name_line=True)
+        fields = extract_fields(receipt(spec, "split2.pdf"), excluded_numbers={"+91" + OFFICE[1:]})
+        assert fields.best.e164 == "+919000012345"
+
+
+class TestTwoColumnInvoiceStillWorks:
+    def test_the_invoice_number_is_not_mistaken_for_the_customer(self, make_invoice):
+        # The "Bill To" row also carries "Invoice No: INV-2291" from the right
+        # column, joined into one row. Reading the row must not return that.
+        fields = extract_fields(make_invoice(InvoiceSpec()))
+        assert fields.customer_name == "Meghana Enterprises"
+        assert "INV-2291" not in fields.customer_name
+
+
+class TestGarbledOcrNames:
+    """A poor scan mangles the anchor, and the fragment lands in the greeting."""
+
+    def test_debris_in_front_of_a_name_is_dropped(self):
+        # Tesseract reads "Sri/Smt/M/s" as "'M’s" at low resolution. Without
+        # this the member is greeted as "Dear 'M’s . ANITHA RAMESH".
+        from waprinter.extract.fields import _strip_leading_junk
+
+        assert _strip_leading_junk("'M’s   . ANITHA RAMESH") == "ANITHA RAMESH"
+
+    def test_a_clean_name_is_untouched(self):
+        from waprinter.extract.fields import _strip_leading_junk
+
+        assert _strip_leading_junk("ANITHA RAMESH") == "ANITHA RAMESH"
+
+    def test_initials_survive(self):
+        # A period is not junk; "R. K. SHARMA" is a name.
+        from waprinter.extract.fields import _strip_leading_junk
+
+        assert _strip_leading_junk("R. K. SHARMA") == "R. K. SHARMA"

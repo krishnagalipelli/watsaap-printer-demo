@@ -11,7 +11,14 @@ from ..models import JobStatus, PrintJob
 
 # Statuses where the operator has to do something, so the notification must not
 # disappear on its own.
-ACTIONABLE = {JobStatus.FAILED, JobStatus.HELD, JobStatus.AWAITING}
+ACTIONABLE = {
+    JobStatus.FAILED,
+    JobStatus.HELD,
+    JobStatus.AWAITING,
+    # Link mode: the whole point is that the operator clicks through to
+    # WhatsApp, so this must never close itself.
+    JobStatus.READY,
+}
 
 
 def needs_action(job: PrintJob) -> bool:
@@ -34,6 +41,22 @@ def describe(job: PrintJob) -> tuple[str, str, str]:
             "Not sent — test mode",
             f"{document} would have gone to {who}. Turn off test mode in "
             f"Settings to send for real.",
+        )
+
+    if job.status is JobStatus.READY:
+        who = f"{name} · {job.recipient}" if name else job.recipient
+        return (
+            "wait",
+            "Ready to send",
+            f"{document} → {who}. Open WhatsApp, attach the receipt and send.",
+        )
+
+    if job.status is JobStatus.HANDED_OFF:
+        return (
+            "ok",
+            "Opened in WhatsApp",
+            f"{document} → {job.recipient}. Press Ctrl+V to attach the "
+            f"receipt, then send.",
         )
 
     if job.status is JobStatus.DUPLICATE:

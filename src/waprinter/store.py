@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     template_name   TEXT,
     message_preview TEXT,
     wamid           TEXT,
+    chat_url        TEXT,
     error           TEXT,
     sent_at         TEXT
 );
@@ -100,6 +101,8 @@ def _fields_from_json(raw: str) -> ExtractedFields:
         customer_name=payload.get("customer_name"),
         invoice_date=payload.get("invoice_date"),
         total_amount=payload.get("total_amount"),
+        amount_words=payload.get("amount_words"),
+        payment_mode=payload.get("payment_mode"),
         page_count=payload.get("page_count", 0),
         has_text_layer=payload.get("has_text_layer", True),
         used_ocr=payload.get("used_ocr", False),
@@ -128,8 +131,8 @@ class Store:
             INSERT INTO jobs (id, created_at, pdf_path, status, doc_title,
                               windows_user, fields_json, recipient, confidence,
                               hold_reason, dedupe_key, template_name,
-                              message_preview, wamid, error, sent_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                              message_preview, wamid, chat_url, error, sent_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
                 status          = excluded.status,
                 doc_title       = excluded.doc_title,
@@ -142,6 +145,7 @@ class Store:
                 template_name   = excluded.template_name,
                 message_preview = excluded.message_preview,
                 wamid           = excluded.wamid,
+                chat_url        = excluded.chat_url,
                 error           = excluded.error,
                 sent_at         = excluded.sent_at
             """,
@@ -160,6 +164,7 @@ class Store:
                 job.template_name,
                 job.message_preview,
                 job.wamid,
+                job.chat_url,
                 job.error,
                 _iso(job.sent_at),
             ),
@@ -189,15 +194,21 @@ class Store:
     def pending(self, limit: int = 200) -> list[PrintJob]:
         """Everything waiting on a person.
 
-        Includes AWAITING as well as HELD: if the agent is restarted while a
-        dialog is open, that job would otherwise be invisible to everyone.
+        Includes AWAITING and READY as well as HELD: if the agent restarts
+        while a dialog or notification is open, that job would otherwise be
+        invisible to everyone.
         """
         rows = self.conn.execute(
             """
-            SELECT * FROM jobs WHERE status IN (?, ?)
+            SELECT * FROM jobs WHERE status IN (?, ?, ?)
             ORDER BY created_at DESC LIMIT ?
             """,
-            (str(JobStatus.AWAITING), str(JobStatus.HELD), limit),
+            (
+                str(JobStatus.AWAITING),
+                str(JobStatus.HELD),
+                str(JobStatus.READY),
+                limit,
+            ),
         ).fetchall()
         return [self._row_to_job(r) for r in rows]
 
@@ -239,11 +250,17 @@ class Store:
         row = self.conn.execute(
             """
             SELECT * FROM jobs
-            WHERE dedupe_key = ? AND status IN (?, ?) AND sent_at IS NOT NULL
+            WHERE dedupe_key = ? AND status IN (?, ?, ?) AND sent_at IS NOT NULL
               AND sent_at >= ?
             ORDER BY sent_at DESC LIMIT 1
             """,
-            (dedupe_key, str(JobStatus.SENT), str(JobStatus.DRY_RUN), cutoff),
+            (
+                dedupe_key,
+                str(JobStatus.SENT),
+                str(JobStatus.DRY_RUN),
+                str(JobStatus.HANDED_OFF),
+                cutoff,
+            ),
         ).fetchone()
         return self._row_to_job(row) if row else None
 
@@ -273,6 +290,7 @@ class Store:
             template_name=row["template_name"],
             message_preview=row["message_preview"],
             wamid=row["wamid"],
+            chat_url=row["chat_url"],
             error=row["error"],
             sent_at=_dt(row["sent_at"]),
         )

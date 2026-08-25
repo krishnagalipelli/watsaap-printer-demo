@@ -38,8 +38,11 @@ class Notification:
         master: tk.Misc,
         job: PrintJob,
         on_open: Callable[[], None] | None = None,
+        on_whatsapp: Callable[[], None] | None = None,
     ):
         self.on_open = on_open
+        self.on_whatsapp = on_whatsapp
+        self.job = job
         tone, headline, detail = describe(job)
         accent, glyph = TONES[tone]
         actionable = needs_action(job)
@@ -78,7 +81,12 @@ class Notification:
             ttk.Button(row, text="Dismiss", width=10, command=self.close).pack(
                 side="right"
             )
-            if on_open is not None:
+            if job.chat_url and on_whatsapp is not None:
+                # The one button that matters in link mode.
+                ttk.Button(
+                    row, text="Open WhatsApp", width=15, command=self._whatsapp
+                ).pack(side="right", padx=(0, 6))
+            elif on_open is not None:
                 ttk.Button(row, text="Open", width=10, command=self._open).pack(
                     side="right", padx=(0, 6)
                 )
@@ -95,6 +103,11 @@ class Notification:
         x = self.win.winfo_screenwidth() - width - MARGIN
         y = self.win.winfo_screenheight() - height - TASKBAR_ALLOWANCE
         self.win.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _whatsapp(self) -> None:
+        if self.on_whatsapp:
+            self.on_whatsapp()
+        self.close()
 
     def _open(self) -> None:
         if self.on_open:

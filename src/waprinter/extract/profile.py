@@ -94,6 +94,19 @@ AMOUNT_LABELS = [
     "total amount", "amount paid", "amount", "total",
 ]
 
+# How a receipt states the amount in words. Indian receipts end the phrase with
+# "Only", which makes it findable without any label at all.
+AMOUNT_WORDS_PATTERNS = [
+    r"\b((?:[A-Za-z]+[ -]){1,10}?Only)\b",
+]
+
+# Labels introducing how the customer paid, and the values worth recognising.
+PAYMENT_MODE_LABELS = ["mode of payment", "payment mode", "paid by", "mode"]
+PAYMENT_MODES = [
+    "cash", "upi", "cheque", "check", "dd", "neft", "rtgs", "imps",
+    "online", "card", "bank transfer", "net banking",
+]
+
 # Lines that follow a customer anchor but are not the customer's name.
 NOT_A_NAME_PREFIXES = [
     "gstin", "gst", "pan", "state", "address", "phone", "mobile", "mob",
@@ -124,6 +137,13 @@ class DocumentProfile:
     )
     date_patterns: list[str] = field(default_factory=lambda: list(DATE_PATTERNS))
     amount_labels: list[str] = field(default_factory=lambda: list(AMOUNT_LABELS))
+    amount_words_patterns: list[str] = field(
+        default_factory=lambda: list(AMOUNT_WORDS_PATTERNS)
+    )
+    payment_mode_labels: list[str] = field(
+        default_factory=lambda: list(PAYMENT_MODE_LABELS)
+    )
+    payment_modes: list[str] = field(default_factory=lambda: list(PAYMENT_MODES))
     not_a_name_prefixes: list[str] = field(
         default_factory=lambda: list(NOT_A_NAME_PREFIXES)
     )
@@ -175,6 +195,20 @@ class DocumentProfile:
             # Earlier entries are more specific, so they score higher.
             for rank, label in enumerate(reversed(self.amount_labels), start=1)
         ]
+        self.amount_words_res = [
+            re.compile(p, re.IGNORECASE) for p in self.amount_words_patterns
+        ]
+        # A labelled mode ("Mode of Payment: Cash"), or the bare word standing
+        # on its own line — which is all the text layer of a pre-printed form
+        # actually contains.
+        self.payment_mode_labelled_re = re.compile(
+            rf"\b(?:{_alt(self.payment_mode_labels)})\b\s*[:\-–]?\s*"
+            rf"({_alt(self.payment_modes)})\b",
+            re.IGNORECASE,
+        )
+        self.payment_mode_bare_re = re.compile(
+            rf"^\s*({_alt(self.payment_modes)})\s*$", re.IGNORECASE
+        )
         self.not_a_name_re = re.compile(
             rf"^\s*(?:{_alt(self.not_a_name_prefixes)})\b", re.IGNORECASE
         )

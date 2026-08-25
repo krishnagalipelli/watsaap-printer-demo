@@ -31,5 +31,12 @@ class TestProblems:
         template.status = "pending"
         templates.put(template)
         monkeypatch.setenv("WAPRINTER_HOME", str(templates.path.parent))
-        found = " ".join(problems(Settings(own_numbers=["9845012345"])))
+        found = " ".join(
+            problems(
+                Settings(
+                    own_numbers=["9845012345"], default_template="invoice_document"
+                ),
+                templates,
+            )
+        )
         assert "not yet approved" in found

@@ -60,7 +60,29 @@ class MessageTemplate:
         return self.status == "approved" and self.header_document
 
 
+CHIT_RECEIPT_BODY = (
+    "Dear {{1}},\n\n"
+    "Thank you for your payment to {{2}}.\n\n"
+    "Please find your payment receipt attached as a PDF.\n"
+    "Receipt No.: {{3}}\n"
+    "Date: {{4}}\n"
+    "Amount Paid: \u20b9{{5}}\n"
+    "Payment Mode: {{6}}\n"
+    "Thank you for choosing {{2}}."
+)
+
 DEFAULT_TEMPLATES = [
+    MessageTemplate(
+        name="chit_receipt",
+        language="en",
+        body=CHIT_RECEIPT_BODY,
+        footer="Regards,\nSrinidhi Chit Funds",
+        # Link mode sends free text, so nothing needs Meta's approval. The same
+        # wording has to be submitted as a template before the Cloud API can
+        # use it.
+        status="approved",
+        category="UTILITY",
+    ),
     MessageTemplate(
         name="invoice_document",
         language="en",
@@ -125,13 +147,15 @@ def render(
     variable_map: dict[str, str],
     fields: ExtractedFields,
     doc_title: str | None = None,
+    extra: dict[str, str] | None = None,
 ) -> RenderedMessage:
     """Resolve a template's variables from the extracted invoice fields.
 
     `variable_map` maps a placeholder position to a field name, e.g.
-    {"1": "customer_name", "2": "invoice_number"}.
+    {"1": "customer_name", "2": "invoice_number"}. `extra` supplies values that
+    are configuration rather than page content — the business's own name.
     """
-    values = fields.as_template_vars()
+    values = {**fields.as_template_vars(), **(extra or {})}
     parameters: list[str] = []
     missing: list[str] = []
 

@@ -22,6 +22,12 @@ class Confidence(enum.StrEnum):
 class JobStatus(enum.StrEnum):
     CAPTURED = "captured"      # PDF landed, not yet parsed
     AWAITING = "awaiting"      # dialog is up, operator is entering the number
+    # Link mode only. READY means the message is composed and waiting for the
+    # operator to open WhatsApp; HANDED_OFF means the chat was opened with the
+    # text prefilled. Neither is SENT — a person still presses send, and the
+    # app cannot see that happen, so it must never claim otherwise.
+    READY = "ready"
+    HANDED_OFF = "handed_off"
     HELD = "held"              # needs an operator decision (no/ambiguous number)
     QUEUED = "queued"          # cleared the gate, waiting on the sender
     SENT = "sent"
@@ -57,6 +63,13 @@ class ExtractedFields:
     customer_name: str | None = None
     invoice_date: str | None = None
     total_amount: str | None = None
+    # The amount as the receipt spells it — "One Hundred Only". On a chit
+    # receipt this is the only unambiguous statement of what was paid: the
+    # figures appear five times over (dues, sub-totals, interest) and the
+    # labels that would tell them apart are pre-printed, so they are not in the
+    # PDF's text layer at all.
+    amount_words: str | None = None
+    payment_mode: str | None = None
     page_count: int = 0
     has_text_layer: bool = True   # False => the ERP printed a raster
     used_ocr: bool = False        # a raster page that OCR managed to read
@@ -78,6 +91,8 @@ class ExtractedFields:
             "customer_name": self.customer_name or "",
             "invoice_date": self.invoice_date or "",
             "total_amount": self.total_amount or "",
+            "amount_words": self.amount_words or "",
+            "payment_mode": self.payment_mode or "",
         }
 
 
@@ -104,6 +119,7 @@ class PrintJob:
     message_preview: str | None = None    # the body text as the customer sees it
 
     wamid: str | None = None              # WhatsApp message id, once accepted
+    chat_url: str | None = None           # link mode: the prefilled chat link
     error: str | None = None
     sent_at: datetime | None = None
 

@@ -130,9 +130,14 @@ class Pipeline:
             self.settings.template_variables,
             job.fields,
             doc_title=job.doc_title,
+            extra={"business_name": self.settings.business_name},
         )
         job.template_name = template.name
         job.message_preview = message.preview
+
+        # --- link mode ----------------------------------------------------
+        if self.settings.send_mode == "link":
+            return self._prepare_link(job, message)
 
         if message.missing:
             # Not fatal — the placeholder still sends — but worth recording,
@@ -157,6 +162,44 @@ class Pipeline:
             return job
 
         return self._fail(job, result.error or "Send failed", retryable=result.retryable)
+
+    def _prepare_link(self, job: PrintJob, message) -> PrintJob:
+        """Compose a click-to-chat link and wait for the operator to open it.
+
+        Nothing is sent here and nothing can be: a wa.me link opens WhatsApp
+        with the text prefilled and a person presses send. The job sits at READY
+        until they do, and is only ever recorded as handed over.
+        """
+        from .send.link import chat_url
+
+        try:
+            job.chat_url = chat_url(job.recipient, message.preview)
+        except ValueError as exc:
+            return self._hold(job, str(exc))
+        job.status = JobStatus.READY
+        job.hold_reason = "Ready to send. Open WhatsApp to review and send it."
+        self.store.upsert(job)
+        self.store.log(job.id, "link:ready", job.recipient)
+        return job
+
+    def hand_off(self, job_id: str, now: datetime | None = None) -> PrintJob:
+        """Record that the operator opened the chat. Link mode only.
+
+        Deliberately not SENT: the app cannot observe whether they pressed send
+        in WhatsApp, and claiming otherwise would make the history a lie.
+        """
+        now = now or datetime.now()
+        job = self.store.get(job_id)
+        if job is None:
+            raise KeyError(f"No such job: {job_id}")
+        if not job.chat_url:
+            raise ValueError("This document has no WhatsApp link.")
+        job.status = JobStatus.HANDED_OFF
+        job.hold_reason = None
+        job.sent_at = now
+        self.store.upsert(job)
+        self.store.log(job.id, "link:opened", job.recipient)
+        return job
 
     def release(
         self,
@@ -197,6 +240,21 @@ class Pipeline:
         job.dedupe_key = dedupe_key(job.fields, e164)
         self.store.log(job.id, "released", f"operator chose {e164}")
 
+        if self.settings.send_mode == "link":
+            template = self.templates.get(self.settings.default_template)
+            if template is None:
+                return self._fail(job, "No message is configured.")
+            message = render(
+                template,
+                self.settings.template_variables,
+                job.fields,
+                doc_title=job.doc_title,
+                extra={"business_name": self.settings.business_name},
+            )
+            job.template_name = template.name
+            job.message_preview = message.preview
+            return self._prepare_link(job, message)
+
         template = self.templates.get(self.settings.default_template)
         if template is None:
             return self._fail(
@@ -208,6 +266,7 @@ class Pipeline:
             self.settings.template_variables,
             job.fields,
             doc_title=job.doc_title,
+            extra={"business_name": self.settings.business_name},
         )
         job.template_name = template.name
         job.message_preview = message.preview
