@@ -26,6 +26,7 @@ from . import update
 from .capture.spooler import latest_job
 from .capture.watcher import SpoolWatcher
 from .config import Settings, paths
+from .instance import SingleInstance
 from .pipeline import Pipeline, build_default
 from .runner import configure_logging
 from .ui.desktop import DesktopWindow
@@ -49,6 +50,7 @@ class Agent:
         self._busy = threading.Event()
 
         self.window = DesktopWindow(self.pipeline, on_check_updates=self.check_updates)
+        self.instance = SingleInstance(self.paths.root / "instance.port")
         self.watcher = SpoolWatcher(
             spool=self.paths.spool,
             inbox=self.paths.inbox,
@@ -136,16 +138,23 @@ class Agent:
 
     def run(self, visible: bool = True) -> None:
         self._stop = threading.Event()
+        # Listen before the watcher starts, so a shortcut clicked a moment
+        # later raises this window instead of starting a rival agent.
+        self.instance.acquire(on_show=self.window.request_show)
         threading.Thread(target=self.watcher.run, name="watcher", daemon=True).start()
         threading.Thread(target=self._update_loop, name="updates", daemon=True).start()
 
         mode = "TEST MODE — nothing will be sent" if self.settings.dry_run else "LIVE"
         log.info("WhatsApp Printer started (%s)", mode)
 
-        self.window.run(visible=visible)  # blocks on the Tk loop
-
-        self._stop.set()
-        self.watcher.stop()
+        try:
+            self.window.run(visible=visible)  # blocks on the Tk loop
+        finally:
+            self._stop.set()
+            self.watcher.stop()
+            # Clear the port file even on a crash, so the next launch is not
+            # left knocking on a door nobody is behind.
+            self.instance.release()
         log.info("WhatsApp Printer stopped")
 
 
@@ -225,7 +234,15 @@ def main(argv: list[str] | None = None) -> int:
         if "--selftest" in argv:
             return selftest()
         # --hidden: started at logon, so do not steal focus with the window.
-        Agent().run(visible="--hidden" not in argv)
+        hidden = "--hidden" in argv
+        # An agent may already be running, hidden, from the logon entry. The
+        # operator clicking the desktop icon wants that window, not a second
+        # agent competing for the same spool folder. A logon start that finds
+        # one already there just bows out.
+        guard = SingleInstance(paths().root / "instance.port")
+        if guard.signal_running(show=not hidden):
+            return 0
+        Agent().run(visible=not hidden)
         return 0
     except Exception as exc:
         log.exception("agent crashed")

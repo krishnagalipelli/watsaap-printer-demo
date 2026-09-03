@@ -124,14 +124,16 @@ class WhatsAppCloudSender:
             }
         ]
         if message.parameters:
-            components.append(
-                {
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "text": value} for value in message.parameters
-                    ],
-                }
-            )
+            # A named template needs every body parameter labelled; a
+            # positional one is matched by order alone and rejects the label.
+            names = message.parameter_names
+            body_params: list[dict] = []
+            for index, value in enumerate(message.parameters):
+                param = {"type": "text", "text": value}
+                if index < len(names):
+                    param["parameter_name"] = names[index]
+                body_params.append(param)
+            components.append({"type": "body", "parameters": body_params})
 
         body = {
             "messaging_product": "whatsapp",

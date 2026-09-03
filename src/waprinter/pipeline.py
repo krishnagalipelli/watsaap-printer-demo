@@ -101,6 +101,7 @@ class Pipeline:
                     self.settings.template_variables,
                     job.fields,
                     doc_title=job.doc_title,
+                    document_noun=self.settings.document_noun,
                 )
                 job.template_name = template.name
                 job.message_preview = message.preview
@@ -131,6 +132,7 @@ class Pipeline:
             job.fields,
             doc_title=job.doc_title,
             extra={"business_name": self.settings.business_name},
+            document_noun=self.settings.document_noun,
         )
         job.template_name = template.name
         job.message_preview = message.preview
@@ -250,6 +252,7 @@ class Pipeline:
                 job.fields,
                 doc_title=job.doc_title,
                 extra={"business_name": self.settings.business_name},
+                document_noun=self.settings.document_noun,
             )
             job.template_name = template.name
             job.message_preview = message.preview
@@ -267,6 +270,7 @@ class Pipeline:
             job.fields,
             doc_title=job.doc_title,
             extra={"business_name": self.settings.business_name},
+            document_noun=self.settings.document_noun,
         )
         job.template_name = template.name
         job.message_preview = message.preview

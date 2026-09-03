@@ -40,6 +40,7 @@ def message(approved_template, fields):
         approved_template,
         {"1": "customer_name", "2": "invoice_number", "3": "total_amount"},
         fields,
+        document_noun="Invoice",
     )
 
 
@@ -84,9 +85,123 @@ class TestRendering:
         m = render(
             MessageTemplate(name="t", body="hi", status="approved"),
             {},
-            ExtractedFields(invoice_number="INV/2291\\<>:*"),
+            ExtractedFields(invoice_number="INV2291<>:*"),
+            document_noun="Invoice",
         )
         assert m.filename == "Invoice-INV2291.pdf"
+
+    def test_filename_keeps_a_separator_inside_the_number(self):
+        # "CR1747/26" is one identifier. Deleting the slash gives a member a
+        # number that appears on no receipt when they read it back.
+        m = render(
+            MessageTemplate(name="t", body="hi", status="approved"),
+            {},
+            ExtractedFields(invoice_number="CR1747/26"),
+            document_noun="Receipt",
+        )
+        assert m.filename == "Receipt-CR1747-26.pdf"
+
+    def test_filename_says_what_the_client_calls_its_paperwork(self):
+        m = render(
+            MessageTemplate(name="t", body="hi", status="approved"),
+            {},
+            ExtractedFields(invoice_number="CR1747/26"),
+        )
+        # Default is the generic word: calling a receipt an invoice is worse
+        # than calling it nothing.
+        assert m.filename == "Document-CR1747-26.pdf"
+
+
+class TestNamedTemplates:
+    """Templates whose variables Meta records by name, not by position."""
+
+    @pytest.fixture
+    def named_template(self):
+        return MessageTemplate(
+            name="chits_details",
+            language="en",
+            body=(
+                "Dear {{customer_name}}, receipt {{receipt_no}} dated {{date}} "
+                "for ₹{{amount}} paid by {{payment_mode}}."
+            ),
+            parameter_format="named",
+            status="approved",
+        )
+
+    @pytest.fixture
+    def named_message(self, named_template, fields):
+        return render(
+            named_template,
+            # Only the names that differ from our field names need mapping.
+            {"receipt_no": "invoice_number", "date": "invoice_date",
+             "amount": "total_amount"},
+            ExtractedFields(
+                customer_name="Venkat",
+                invoice_number="CR1747/26",
+                invoice_date="2026-08-14",
+                total_amount="1000",
+                payment_mode="UPI",
+            ),
+        )
+
+    def test_a_named_body_is_detected_without_being_told(self):
+        tpl = MessageTemplate(name="t", body="Hi {{customer_name}}")
+        assert tpl.named is True
+        assert MessageTemplate(name="t", body="Hi {{1}}").named is False
+
+    def test_unmapped_names_fall_back_to_the_field_of_the_same_name(
+        self, named_message
+    ):
+        assert named_message.parameters[0] == "Venkat"
+        assert named_message.missing == []
+
+    def test_preview_substitutes_named_placeholders(self, named_message):
+        assert named_message.preview == (
+            "Dear Venkat, receipt CR1747/26 dated 2026-08-14 for ₹1000 paid "
+            "by UPI."
+        )
+
+    @respx.mock
+    def test_body_parameters_carry_their_names(self, sender, pdf, named_message):
+        respx.post(f"{BASE}/media").mock(
+            return_value=httpx.Response(200, json={"id": "media-abc"})
+        )
+        send = respx.post(f"{BASE}/messages").mock(
+            return_value=httpx.Response(200, json={"messages": [{"id": "wamid.X"}]})
+        )
+
+        assert sender.send("+916281125979", pdf, named_message).ok
+
+        payload = __import__("json").loads(send.calls[0].request.read())
+        assert payload["template"]["name"] == "chits_details"
+        body_params = payload["template"]["components"][1]["parameters"]
+        assert body_params[0] == {
+            "type": "text",
+            "text": "Venkat",
+            "parameter_name": "customer_name",
+        }
+        assert [p["parameter_name"] for p in body_params] == [
+            "customer_name", "receipt_no", "date", "amount", "payment_mode",
+        ]
+
+    @respx.mock
+    def test_a_positional_template_still_sends_unlabelled(
+        self, sender, pdf, message
+    ):
+        # Meta rejects a parameter_name on a positional template, so the label
+        # must not leak across.
+        respx.post(f"{BASE}/media").mock(
+            return_value=httpx.Response(200, json={"id": "media-abc"})
+        )
+        send = respx.post(f"{BASE}/messages").mock(
+            return_value=httpx.Response(200, json={"messages": [{"id": "wamid.X"}]})
+        )
+
+        assert sender.send("+919876543210", pdf, message).ok
+
+        payload = __import__("json").loads(send.calls[0].request.read())
+        body_params = payload["template"]["components"][1]["parameters"]
+        assert all("parameter_name" not in p for p in body_params)
 
 
 class TestTemplateStore:

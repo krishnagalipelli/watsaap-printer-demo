@@ -122,8 +122,11 @@ class Settings:
     graph_api_version: str = "v21.0"
     default_template: str = "chit_receipt"
     template_language: str = "en"
-    # Maps template body variable position -> extracted field name.
-    # e.g. {"1": "customer_name", "2": "invoice_number", "3": "total_amount"}
+    # Maps a template body variable -> extracted field name. Positional
+    # templates key on the position ({{1}}); named ones key on the variable
+    # name ({{receipt_no}}), and only need an entry where Meta's name differs
+    # from ours. Both key sets live here so switching default_template between
+    # the two shapes does not need this rewritten.
     template_variables: dict[str, str] = field(
         default_factory=lambda: {
             "1": "customer_name",
@@ -132,6 +135,17 @@ class Settings:
             "4": "invoice_date",
             "5": "total_amount",
             "6": "payment_mode",
+            "receipt_no": "invoice_number",
+            "date": "invoice_date",
+            # The amount in words, not figures. A chit receipt prints the
+            # figures five times over — dues, sub-totals, interest — and the
+            # labels that would tell them apart are pre-printed, so they never
+            # reach the PDF's text layer. `total_amount` is therefore blank on
+            # this layout, and a blank parameter sends as "-", which on a
+            # payment receipt is worse than saying nothing. The words are
+            # unambiguous. A client whose paperwork does label its total should
+            # point this back at `total_amount`.
+            "amount": "amount_words",
         }
     )
 
@@ -145,6 +159,10 @@ class Settings:
     # prints will fling open ten chats.
     auto_open_chat: bool = True
     business_name: str = "Srinidhi Chit Funds"
+    # What this client's paperwork is called, used to name the attached PDF:
+    # "Receipt-CR1747-26.pdf". The customer reads this before they open
+    # anything, so a chit fund must not be sending "Invoice-".
+    document_noun: str = "Receipt"
 
     # --- Updates -----------------------------------------------------------
     # A static JSON file: {"version", "url", "sha256", "notes"}. No server of

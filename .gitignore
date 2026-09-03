@@ -22,3 +22,6 @@ settings.json
 # Loose sample documents dropped in the repo root. These are real client and
 # third-party paperwork with names, phone numbers and account details on them.
 /*.pdf
+
+# macOS Finder metadata.
+.DS_Store

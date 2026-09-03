@@ -29,6 +29,13 @@ log = logging.getLogger(__name__)
 REFRESH_MS = 2000
 POLL_MS = 400
 
+# Settings that are a fixed choice rather than free text: the plain-English
+# label the operator picks, paired with the value stored in settings.json.
+SEND_MODES = [
+    ("Send automatically", "api"),
+    ("Open WhatsApp for me to send", "link"),
+]
+
 TONE_COLOURS = {
     "ok": "#0f7b43",
     "warn": "#a35a00",
@@ -45,6 +52,10 @@ class DesktopWindow:
         self.settings = pipeline.settings
         self.on_check_updates = on_check_updates
         self.incoming: queue.Queue[str] = queue.Queue()
+        # Set by another launch of the app asking this copy to come forward.
+        # An Event rather than a queue: ten impatient double-clicks should
+        # raise the window once, not stack ten raises behind each other.
+        self._show_requested = threading.Event()
         self._notifications: list[Notification] = []
         self._queue_rows: dict[str, tk.Widget] = {}
 
@@ -64,6 +75,7 @@ class DesktopWindow:
         self.root.after(POLL_MS, self._pump)
         self.root.after(REFRESH_MS, self._refresh)
         self.refresh()
+        self._load_settings_into_form()
 
     # -- chrome ------------------------------------------------------------
 
@@ -266,6 +278,8 @@ class DesktopWindow:
 
     def _build_settings(self) -> None:
         self.fields: dict[str, tk.Variable] = {}
+        # For fields whose stored value is not what the operator reads.
+        self.choices: dict[str, list[tuple[str, str]]] = {}
 
         account = ttk.LabelFrame(self.settings_tab, text="WhatsApp account", padding=12)
         account.pack(fill="x", pady=(0, 10))
@@ -277,9 +291,19 @@ class DesktopWindow:
         self._entry(account, "default_template", "Message",
                     "An approved template name. Meta requires this for messages "
                     "you start.")
+        self._entry(account, "document_noun", "Attachment name",
+                    "What your paperwork is called. Names the PDF on the "
+                    "customer's phone: Receipt-CR1747-26.pdf.")
 
         sending = ttk.LabelFrame(self.settings_tab, text="Sending", padding=12)
         sending.pack(fill="x", pady=(0, 10))
+        self._choice(
+            sending, "send_mode", "After printing", SEND_MODES,
+            "Send automatically needs an approved message and a working "
+            "WhatsApp Business account. Otherwise the receipt is read and "
+            "WhatsApp opens with the message ready, and you press send and "
+            "attach the PDF yourself.",
+        )
         self._check(sending, "dry_run", "Test mode — process everything, send nothing")
         self._check(
             sending,
@@ -320,6 +344,53 @@ class DesktopWindow:
                 parent, text=hint, style="Hint.TLabel", wraplength=560, justify="left"
             ).pack(anchor="w", padx=(184, 0))
 
+    def _choice(
+        self,
+        parent,
+        name: str,
+        label: str,
+        options: list[tuple[str, str]],
+        hint: str,
+    ) -> None:
+        """A setting with a fixed set of values, picked by its plain label.
+
+        Read-only, so the operator cannot type a value the code does not
+        understand — the failure that leaves would be silent, at the worst
+        moment.
+        """
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text=label, width=24, anchor="e").pack(side="left", padx=(0, 10))
+        var = tk.StringVar()
+        ttk.Combobox(
+            row,
+            textvariable=var,
+            values=[text for text, _ in options],
+            state="readonly",
+        ).pack(side="left", fill="x", expand=True)
+        self.fields[name] = var
+        self.choices[name] = options
+        if hint:
+            ttk.Label(
+                parent, text=hint, style="Hint.TLabel", wraplength=560, justify="left"
+            ).pack(anchor="w", padx=(184, 0))
+
+    def _choice_label(self, name: str, value: str) -> str:
+        """The label for a stored value; the first option if it is unknown."""
+        options = self.choices[name]
+        for text, stored in options:
+            if stored == value:
+                return text
+        return options[0][0]
+
+    def _choice_value(self, name: str, fallback: str) -> str:
+        """The stored value for whatever label is showing."""
+        showing = self.fields[name].get()
+        for text, stored in self.choices[name]:
+            if text == showing:
+                return stored
+        return fallback
+
     def _check(self, parent, name: str, label: str) -> None:
         var = tk.BooleanVar()
         ttk.Checkbutton(parent, text=label, variable=var).pack(anchor="w", pady=2)
@@ -331,11 +402,13 @@ class DesktopWindow:
             "phone_number_id": s.phone_number_id,
             "own_numbers": ", ".join(s.own_numbers),
             "default_template": s.default_template,
+            "document_noun": s.document_noun,
             "dedupe_window_hours": str(s.dedupe_window_hours),
             "max_sends_per_minute": str(s.max_sends_per_minute),
             "branch_name": s.branch_name,
             "device_name": s.device_name,
             "update_url": s.update_url,
+            "send_mode": self._choice_label("send_mode", s.send_mode),
             "dry_run": s.dry_run,
             "auto_open_chat": s.auto_open_chat,
             "confirm_before_send": s.confirm_before_send,
@@ -359,12 +432,17 @@ class DesktopWindow:
             return
 
         was_test = s.dry_run
+        was_manual = s.send_mode == "link"
+        s.send_mode = self._choice_value("send_mode", s.send_mode)
         s.phone_number_id = self.fields["phone_number_id"].get().strip()
         s.own_numbers = [
             n.strip() for n in self.fields["own_numbers"].get().split(",") if n.strip()
         ]
         s.default_template = (
             self.fields["default_template"].get().strip() or s.default_template
+        )
+        s.document_noun = (
+            self.fields["document_noun"].get().strip() or s.document_noun
         )
         s.branch_name = self.fields["branch_name"].get().strip()
         s.device_name = self.fields["device_name"].get().strip()
@@ -376,14 +454,28 @@ class DesktopWindow:
         s.ocr_silent_send = bool(self.fields["ocr_silent_send"].get())
         s.save()
 
+        # One dialog, not two: changing both at once is the go-live moment,
+        # and two stacked warnings get clicked through as a single reflex.
+        changed = []
         if was_test and not s.dry_run:
+            changed.append("Test mode is now OFF.")
+        if was_manual and s.send_mode == "api":
+            changed.append(
+                "Receipts will now go out on their own, with no one pressing "
+                "send."
+            )
+        if changed:
             messagebox.showwarning(
                 "WhatsApp Printer",
-                "Test mode is now OFF. Printing will send real messages to "
-                "customers.",
+                "\n\n".join(changed)
+                + "\n\nPrinting will send real messages to customers.",
                 parent=self.root,
             )
         self.refresh()
+        # Saved values are normalised on the way in (numbers trimmed, own
+        # numbers split), so show what was actually stored rather than what
+        # was typed.
+        self._load_settings_into_form()
 
     # -- actions -----------------------------------------------------------
 
@@ -501,7 +593,18 @@ class DesktopWindow:
         """Thread-safe: called by the watcher when a job finishes."""
         self.incoming.put(job_id)
 
+    def request_show(self) -> None:
+        """Thread-safe: called by the instance guard from its own thread.
+
+        Tk may only be touched by the thread running the loop, so this records
+        the request and lets _pump act on it.
+        """
+        self._show_requested.set()
+
     def _pump(self) -> None:
+        if self._show_requested.is_set():
+            self._show_requested.clear()
+            self.show()
         try:
             job_id = self.incoming.get_nowait()
         except queue.Empty:
@@ -571,7 +674,11 @@ class DesktopWindow:
 
         self._render_queue()
         self._render_recent()
-        self._load_settings_into_form()
+        # The settings form is deliberately NOT reloaded here. refresh() runs
+        # on a two-second timer, and reloading would overwrite whatever the
+        # operator is halfway through typing. The form is filled once at
+        # startup and again after Apply, which is the only time saved state
+        # and the form can legitimately disagree.
 
     def _refresh(self) -> None:
         try:
