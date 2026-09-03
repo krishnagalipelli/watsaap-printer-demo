@@ -281,7 +281,20 @@ class DesktopWindow:
         # For fields whose stored value is not what the operator reads.
         self.choices: dict[str, list[tuple[str, str]]] = {}
 
-        account = ttk.LabelFrame(self.settings_tab, text="WhatsApp account", padding=12)
+        # Apply belongs to the tab, not to the scrolling content. The groups
+        # below run past the bottom edge on a laptop screen, and a button that
+        # has scrolled out of sight reads as a button that is not there — an
+        # operator typed a whole page of settings, pressed Test send, and was
+        # told the fields were empty.
+        buttons = ttk.Frame(self.settings_tab)
+        buttons.pack(side="bottom", fill="x", pady=(8, 0))
+        ttk.Button(buttons, text="Apply", command=self.apply_settings).pack(
+            side="right"
+        )
+
+        body = self._scrollable(self.settings_tab)
+
+        account = ttk.LabelFrame(body, text="WhatsApp account", padding=12)
         account.pack(fill="x", pady=(0, 10))
         self._entry(account, "phone_number_id", "Phone number ID",
                     "Meta Business → WhatsApp → API Setup.")
@@ -295,7 +308,7 @@ class DesktopWindow:
                     "What your paperwork is called. Names the PDF on the "
                     "customer's phone: Receipt-CR1747-26.pdf.")
 
-        sending = ttk.LabelFrame(self.settings_tab, text="Sending", padding=12)
+        sending = ttk.LabelFrame(body, text="Sending", padding=12)
         sending.pack(fill="x", pady=(0, 10))
         self._choice(
             sending, "send_mode", "After printing", SEND_MODES,
@@ -315,22 +328,53 @@ class DesktopWindow:
         self._entry(sending, "max_sends_per_minute", "Maximum per minute",
                     "Per computer. Stops one runaway batch print.")
 
-        scanned = ttk.LabelFrame(self.settings_tab, text="Scanned documents", padding=12)
+        scanned = ttk.LabelFrame(body, text="Scanned documents", padding=12)
         scanned.pack(fill="x", pady=(0, 10))
         self._check(scanned, "ocr_enabled", "Read documents printed as an image (OCR)")
         self._check(scanned, "ocr_silent_send",
                     "Send to numbers read by OCR without asking")
 
-        install = ttk.LabelFrame(self.settings_tab, text="This computer", padding=12)
+        install = ttk.LabelFrame(body, text="This computer", padding=12)
         install.pack(fill="x", pady=(0, 10))
         self._entry(install, "branch_name", "Branch", "")
         self._entry(install, "device_name", "Computer", "")
         self._entry(install, "update_url", "Update location",
                     "A link to the version file. Leave blank to disable updates.")
 
-        buttons = ttk.Frame(self.settings_tab)
-        buttons.pack(fill="x", pady=(4, 0))
-        ttk.Button(buttons, text="Apply", command=self.apply_settings).pack(side="right")
+    def _scrollable(self, parent: ttk.Frame) -> ttk.Frame:
+        """A vertically scrolling region filling `parent`, returning its content
+        frame. Tk has no scrolling container, so it is a canvas with a frame
+        inside it."""
+        canvas = tk.Canvas(parent, highlightthickness=0, borderwidth=0)
+        bar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=bar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        bar.pack(side="right", fill="y")
+
+        inner = ttk.Frame(canvas)
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        # The content decides how tall the scroll region is; the canvas decides
+        # how wide the content is, so the groups stretch instead of sitting in
+        # a narrow column.
+        inner.bind(
+            "<Configure>",
+            lambda _e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>", lambda e: canvas.itemconfigure(window, width=e.width)
+        )
+
+        # Tk delivers the wheel to the widget under the pointer, which is
+        # normally an entry inside the frame rather than the canvas. Bind on
+        # the window and match by widget path, so the wheel still works over a
+        # field but leaves the other tabs' lists alone.
+        def wheel(event: "tk.Event") -> None:
+            path = str(event.widget)
+            if path == str(canvas) or path.startswith(f"{canvas}."):
+                canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+        parent.winfo_toplevel().bind("<MouseWheel>", wheel, add="+")
+        return inner
 
     def _entry(self, parent, name: str, label: str, hint: str) -> None:
         row = ttk.Frame(parent)
