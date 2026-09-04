@@ -41,6 +41,77 @@ class Pipeline:
         # What this client's paperwork calls things. Defaults cover every layout
         # seen so far; a profile.json overrides key by key.
         self.profile = profile or DocumentProfile()
+        # What the two shared files looked like when we last read them.
+        self._stamps: dict[str, int | None] = {
+            "settings": self._stamp(paths().settings),
+            "templates": self._stamp(self.templates.path),
+        }
+
+    def reload_if_changed(self) -> bool:
+        """Pick up settings and templates written by another process.
+
+        The CLI and the window are two processes over the same two files.
+        `waprinter go-live` and `waprinter templates --sync` both write, and
+        the agent used to keep whatever it read at startup -- so the operator
+        ran the command, watched it succeed, printed, and the agent went on
+        refusing to send using a status it had cached hours earlier. Restarting
+        was the only cure, and nothing said so.
+
+        Settings are updated in place rather than replaced, because the window
+        holds a reference to the same object.
+        """
+        settings_path = paths().settings
+        templates_path = self.templates.path
+        changed = False
+
+        if self._stamp(settings_path) != self._stamps.get("settings"):
+            self._stamps["settings"] = self._stamp(settings_path)
+            try:
+                fresh = Settings.load()
+            except Exception:
+                log.exception("could not re-read settings.json")
+                return changed
+            before = (
+                self.settings.dry_run,
+                self.settings.phone_number_id,
+                self.settings.graph_api_version,
+                self.settings.force_ipv4,
+            )
+            for name in fresh.__dataclass_fields__:
+                setattr(self.settings, name, getattr(fresh, name))
+            after = (
+                self.settings.dry_run,
+                self.settings.phone_number_id,
+                self.settings.graph_api_version,
+                self.settings.force_ipv4,
+            )
+            changed = True
+            if before != after:
+                try:
+                    self.rebuild_sender()
+                    log.info("settings changed on disk; sender re-wired")
+                except Exception:
+                    # Leave the old sender in place rather than lose the
+                    # ability to send at all.
+                    log.exception("could not re-wire the sender after a reload")
+
+        if self._stamp(templates_path) != self._stamps.get("templates"):
+            self._stamps["templates"] = self._stamp(templates_path)
+            try:
+                self.templates.load()
+                log.info("templates changed on disk; reloaded")
+                changed = True
+            except Exception:
+                log.exception("could not re-read templates.json")
+
+        return changed
+
+    @staticmethod
+    def _stamp(path: Path) -> int | None:
+        try:
+            return path.stat().st_mtime_ns
+        except OSError:
+            return None
 
     def rebuild_sender(self) -> None:
         """Re-choose the sender from the current settings.

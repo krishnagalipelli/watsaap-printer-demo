@@ -711,6 +711,14 @@ class DesktopWindow:
     def refresh(self) -> None:
         from ..send.readiness import problems
 
+        # The CLI writes the same files this window reads. Notice that before
+        # deciding what the status line says, or it reports a staleness the
+        # operator has already fixed.
+        try:
+            self.pipeline.reload_if_changed()
+        except Exception:
+            log.exception("could not reload settings or templates")
+
         outstanding = problems(self.settings, self.pipeline.templates)
         counters = vm.counters_for_today(self.pipeline.store, self.settings)
         waiting = len(self.pipeline.store.pending())

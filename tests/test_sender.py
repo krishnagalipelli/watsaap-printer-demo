@@ -577,3 +577,65 @@ class TestTemplateSync:
         store.put(_template_from_meta(self._meta_entry()))
 
         assert TemplateStore(tmp_path / "templates.json").get("chits_details").usable
+
+
+class TestReloadingWhatTheCliWrote:
+    """The agent and the CLI are two processes over the same two files.
+
+    The trap this removes: `templates --sync` and `go-live` both succeeded on
+    the command line, and the running agent kept refusing to send because it
+    held what it read at startup. Restarting was the only cure and nothing
+    said so.
+    """
+
+    def test_it_notices_a_template_approved_by_the_cli(self, pipeline, tmp_path):
+        from waprinter.send.templates import TemplateStore
+
+        store = TemplateStore(pipeline.templates.path)
+        template = store.get("chits_details")
+        assert template.usable is False
+
+        # As `waprinter templates --sync` would, from another process.
+        template.status = "approved"
+        template.header_document = True
+        store.put(template)
+
+        assert pipeline.templates.get("chits_details").usable is False, "cached"
+        assert pipeline.reload_if_changed() is True
+        assert pipeline.templates.get("chits_details").usable is True
+
+    def test_it_notices_go_live_and_rewires_the_sender(self, pipeline, monkeypatch):
+        from waprinter.config import Settings
+        from waprinter.send.dryrun import DryRunSender
+        from waprinter.send.whatsapp import WhatsAppCloudSender
+
+        monkeypatch.setattr("waprinter.secrets.load_token", lambda: "a-real-token")
+        pipeline.settings.dry_run = True
+        pipeline.rebuild_sender()
+        assert isinstance(pipeline.sender, DryRunSender)
+
+        # As `waprinter go-live` would, from another process.
+        on_disk = Settings.load()
+        on_disk.dry_run = False
+        on_disk.phone_number_id = "123456"
+        on_disk.save()
+
+        assert pipeline.reload_if_changed() is True
+        assert pipeline.settings.dry_run is False
+        assert isinstance(pipeline.sender, WhatsAppCloudSender)
+
+    def test_the_settings_object_is_updated_in_place(self, pipeline):
+        """The window holds a reference to it, so it must not be replaced."""
+        from waprinter.config import Settings
+
+        original = pipeline.settings
+        on_disk = Settings.load()
+        on_disk.business_name = "Changed By The CLI"
+        on_disk.save()
+
+        pipeline.reload_if_changed()
+        assert pipeline.settings is original
+        assert original.business_name == "Changed By The CLI"
+
+    def test_an_unchanged_pair_of_files_is_not_reloaded(self, pipeline):
+        assert pipeline.reload_if_changed() is False
