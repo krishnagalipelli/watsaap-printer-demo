@@ -309,6 +309,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("go-live", help="turn dry-run off").set_defaults(func=cmd_go_live)
 
     args = parser.parse_args(argv)
+    if args.verbose:
+        from .runner import configure_logging
+
+        # Only on request: the normal commands print a report, and a stream of
+        # log records over the top of it helps nobody. At DEBUG, httpcore
+        # traces every stage of a request -- TCP connect, TLS handshake,
+        # headers sent, body sent, response awaited -- which is the only way
+        # to see *where* a send dies when the network itself tests clean.
+        configure_logging(paths().logs, level=logging.DEBUG)
     return args.func(args)
 
 
