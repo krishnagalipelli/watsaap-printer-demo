@@ -206,6 +206,122 @@ def cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(_args: argparse.Namespace) -> int:
+    """Report this install's health, and try a real upload, saying where it dies.
+
+    Written because a client's counter PC failed every send with "Server
+    disconnected without sending a response" while curl, on the same machine
+    with the same PDF and the same endpoint, got a clean 401. Nothing in the
+    settings or the logs distinguishes those two cases. This does: it makes the
+    same call the pipeline makes and prints httpcore's own account of which
+    stage failed -- TCP, TLS, sending the body, or awaiting the response.
+
+    Prints no secrets. The token is described, never shown.
+    """
+    import io
+
+    import httpx
+
+    from . import __version__
+    from .secrets import load_token
+    from .send.templates import TemplateStore
+
+    s = Settings.load()
+    p = paths()
+
+    print("-- this install ------------------------------------------------")
+    print(f"  version          : {__version__}")
+    print(f"  data dir         : {p.root}")
+    print(f"  test mode        : {s.dry_run}")
+    print(f"  send mode        : {s.send_mode}")
+    print(f"  phone number id  : {s.phone_number_id or '(not set)'}")
+    print(f"  message template : {s.default_template}")
+    print(f"  force ipv4       : {s.force_ipv4}")
+
+    template = TemplateStore(p.templates).get(s.default_template)
+    if template is None:
+        print(f"  template status  : NOT CONFIGURED")
+    else:
+        print(f"  template status  : {template.status} "
+              f"({'usable' if template.usable else 'NOT usable'})")
+
+    try:
+        token = load_token()
+    except Exception as exc:
+        print(f"  access token     : COULD NOT BE READ -- {exc}")
+        token = None
+    if not token:
+        print("  access token     : missing")
+    else:
+        # Describe it; never print it. A stray newline from a wrapped paste
+        # makes an illegal header, which fails in a way worth telling apart.
+        odd = sum(1 for c in token if not (32 <= ord(c) < 127))
+        print(f"  access token     : {len(token)} chars, "
+              f"{'clean' if not odd else f'{odd} NON-PRINTABLE CHARACTER(S)'}")
+
+    # Capture httpcore's own trace of whatever the next two calls do.
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setFormatter(logging.Formatter("    %(name)-22s %(message).140s"))
+    for name in ("httpcore.connection", "httpcore.http11", "httpx"):
+        trace = logging.getLogger(name)
+        trace.setLevel(logging.DEBUG)
+        trace.addHandler(handler)
+
+    print("\n-- can this machine reach Meta ---------------------------------")
+    try:
+        with httpx.Client(timeout=20) as c:
+            r = c.get("https://graph.facebook.com/v21.0/")
+        print(f"  GET  graph.facebook.com -> HTTP {r.status_code} (reachable)")
+    except Exception as exc:
+        print(f"  GET  graph.facebook.com -> {type(exc).__name__}: {exc}")
+
+    print("\n-- can this machine upload a document --------------------------")
+    if not token or not s.phone_number_id:
+        print("  skipped: needs both an access token and a phone number id.")
+    else:
+        # The real PDF the pipeline would send, so size and content match what
+        # actually fails. Falls back to a generated one on a fresh install.
+        pdf = next(
+            iter(sorted(p.inbox.glob("*.pdf"), key=lambda f: f.stat().st_mtime,
+                        reverse=True)),
+            None,
+        )
+        if pdf is not None:
+            payload, label = pdf.read_bytes(), pdf.name
+        else:
+            import pymupdf
+
+            doc = pymupdf.open()
+            doc.new_page()
+            payload, label = doc.tobytes(), "generated-test.pdf"
+        print(f"  using {label} ({len(payload) / 1024:.0f} KB)")
+        try:
+            with httpx.Client(timeout=30) as c:
+                r = c.post(
+                    f"https://graph.facebook.com/v{s.graph_api_version.lstrip('v')}"
+                    f"/{s.phone_number_id}/media",
+                    headers={"Authorization": f"Bearer {token}"},
+                    data={"messaging_product": "whatsapp", "type": "application/pdf"},
+                    files={"file": (label, payload, "application/pdf")},
+                )
+            body = r.json()
+            if "id" in body:
+                print(f"  POST media -> HTTP {r.status_code}  UPLOAD WORKED "
+                      f"(media id {body['id']})")
+            else:
+                err = body.get("error", {})
+                print(f"  POST media -> HTTP {r.status_code}  "
+                      f"[{err.get('code')}] {err.get('message')}")
+        except Exception as exc:
+            print(f"  POST media -> {type(exc).__name__}: {exc}")
+            print("\n-- where it died -----------------------------------------------")
+            print(buf.getvalue() or "    (no trace captured)")
+            return 1
+
+    return 0
+
+
 def cmd_set_token(_args: argparse.Namespace) -> int:
     import getpass
 
@@ -307,6 +423,9 @@ def main(argv: list[str] | None = None) -> int:
         func=cmd_set_token
     )
     sub.add_parser("go-live", help="turn dry-run off").set_defaults(func=cmd_go_live)
+    sub.add_parser(
+        "doctor", help="check this install and try a real upload"
+    ).set_defaults(func=cmd_doctor)
 
     args = parser.parse_args(argv)
     if args.verbose:
