@@ -498,6 +498,27 @@ class DesktopWindow:
         s.ocr_silent_send = bool(self.fields["ocr_silent_send"].get())
         s.save()
 
+        # Which sender is wired in was decided at startup. Re-decide it now, or
+        # turning test mode off would change only what jobs are *called*: the
+        # dry-run sender would stay in place and receipts would be recorded as
+        # sent while nothing left the machine.
+        try:
+            self.pipeline.rebuild_sender()
+        except Exception as exc:
+            # Put test mode back rather than leave the app claiming it will
+            # send when it has no way to. Recording a receipt as delivered when
+            # it was not is the one failure the operator cannot recover from.
+            s.dry_run = True
+            s.save()
+            self._load_settings_into_form()
+            self.refresh()
+            messagebox.showerror(
+                "WhatsApp Printer",
+                f"Cannot send for real yet, so test mode has been left on.\n\n{exc}",
+                parent=self.root,
+            )
+            return
+
         # One dialog, not two: changing both at once is the go-live moment,
         # and two stacked warnings get clicked through as a single reflex.
         changed = []

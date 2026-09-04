@@ -120,6 +120,10 @@ class Settings:
     phone_number_id: str = ""
     business_account_id: str = ""
     graph_api_version: str = "v21.0"
+    # Send over IPv4 only. The sender falls back to this on its own after a
+    # dropped connection, which costs one failed upload; setting it here skips
+    # that on a counter PC already known to have a broken IPv6 route.
+    force_ipv4: bool = False
     default_template: str = "chit_receipt"
     template_language: str = "en"
     # Maps a template body variable -> extracted field name. Positional

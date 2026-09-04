@@ -14,6 +14,8 @@ the id is used seconds after it is minted.
 
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 
 import httpx
@@ -21,7 +23,24 @@ import httpx
 from ..models import SendResult
 from .templates import RenderedMessage
 
+log = logging.getLogger(__name__)
+
 GRAPH_HOST = "https://graph.facebook.com"
+
+# How many times to attempt the media upload, and how long to wait between.
+# Upload is the one step that can be retried without asking whether it already
+# worked: a second upload mints a second media id and costs nothing. A dropped
+# connection here is common on a counter PC behind antivirus TLS inspection,
+# and losing a customer's receipt to one blip is not acceptable.
+UPLOAD_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = (0.5, 2.0)
+
+# Binding the socket to any IPv4 address forces the connection onto IPv4.
+# Counter PCs on Indian consumer broadband routinely get an IPv6 route to
+# Facebook that completes a TCP handshake and then black-holes anything large
+# enough to need fragmenting — the upload dies with no response while every
+# small request looks perfectly healthy.
+IPV4_ANY = "0.0.0.0"
 
 # Failures worth retrying: transient server trouble and throttling. Everything
 # else (bad number, unapproved template, expired token) will fail identically on
@@ -42,11 +61,43 @@ class WhatsAppCloudSender:
         api_version: str = "v21.0",
         timeout: float = 30.0,
         client: httpx.Client | None = None,
+        force_ipv4: bool = False,
     ):
         self.phone_number_id = phone_number_id
         self.access_token = access_token
         self.api_version = api_version
-        self._client = client or httpx.Client(timeout=timeout)
+        self._timeout = timeout
+        # A caller-supplied client is never replaced: it belongs to whoever
+        # passed it, and the tests depend on keeping theirs.
+        self._owns_client = client is None
+        self._ipv4_only = False
+        self._client = client or self._new_client(force_ipv4)
+        if force_ipv4:
+            self._ipv4_only = True
+
+    def _new_client(self, ipv4_only: bool) -> httpx.Client:
+        transport = (
+            httpx.HTTPTransport(local_address=IPV4_ANY) if ipv4_only else None
+        )
+        return httpx.Client(timeout=self._timeout, transport=transport)
+
+    def _fall_back_to_ipv4(self) -> bool:
+        """Move this session onto IPv4 after a transport failure. Once only.
+
+        The whole client is swapped, not just the upload, so the template send
+        that follows goes the same way — a media id uploaded over a route that
+        works is no use if the message referencing it takes the broken one.
+        """
+        if self._ipv4_only or not self._owns_client:
+            return False
+        log.info("connection dropped; retrying over IPv4 for the rest of this session")
+        try:
+            self._client.close()
+        except Exception:
+            pass
+        self._client = self._new_client(ipv4_only=True)
+        self._ipv4_only = True
+        return True
 
     @property
     def _base(self) -> str:
@@ -75,7 +126,7 @@ class WhatsAppCloudSender:
             )
 
         try:
-            media_id = self._upload(pdf_path, message.filename)
+            media_id = self._upload_with_retries(pdf_path, message.filename)
         except _ApiError as exc:
             return SendResult(ok=False, error=f"Upload failed: {exc}", retryable=exc.retryable)
         except httpx.HTTPError as exc:
@@ -86,9 +137,48 @@ class WhatsAppCloudSender:
         except _ApiError as exc:
             return SendResult(ok=False, error=str(exc), retryable=exc.retryable)
         except httpx.HTTPError as exc:
-            return SendResult(ok=False, error=str(exc), retryable=True)
+            # Deliberately NOT retried. The connection dropped without an
+            # answer, so whether Meta accepted the message is unknown — and a
+            # retry that guesses wrong sends a customer their receipt twice.
+            # A person decides this one, from the queue.
+            return SendResult(
+                ok=False,
+                error=f"{exc} — the message may or may not have been sent. "
+                f"Check WhatsApp before resending.",
+                retryable=False,
+            )
 
         return SendResult(ok=True, wamid=wamid)
+
+    def _upload_with_retries(self, pdf_path: Path, filename: str) -> str:
+        """Upload, retrying the failures that a retry can actually fix."""
+        last: Exception | None = None
+        for attempt in range(UPLOAD_ATTEMPTS):
+            try:
+                return self._upload(pdf_path, filename)
+            except httpx.HTTPError as exc:
+                last = exc
+                # A transport-level failure is the symptom of a bad route, not
+                # of a bad request. Change the route before trying again.
+                self._fall_back_to_ipv4()
+            except _ApiError as exc:
+                if not exc.retryable:
+                    raise
+                last = exc
+            if attempt < UPLOAD_ATTEMPTS - 1:
+                pause = RETRY_BACKOFF_SECONDS[
+                    min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)
+                ]
+                log.info(
+                    "media upload attempt %s of %s failed (%s); retrying in %ss",
+                    attempt + 1,
+                    UPLOAD_ATTEMPTS,
+                    last,
+                    pause,
+                )
+                time.sleep(pause)
+        assert last is not None
+        raise last
 
     # -- internals ---------------------------------------------------------
 

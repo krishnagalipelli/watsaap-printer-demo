@@ -42,6 +42,17 @@ class Pipeline:
         # seen so far; a profile.json overrides key by key.
         self.profile = profile or DocumentProfile()
 
+    def rebuild_sender(self) -> None:
+        """Re-choose the sender from the current settings.
+
+        The sender used to be chosen once, at startup. Turning test mode off in
+        the settings page then changed what a job was *recorded* as without
+        changing what actually happened: the dry-run sender stayed wired in, so
+        the job was written down as SENT while nothing left the machine and
+        nothing reached Meta. Anything that saves settings must call this.
+        """
+        self.sender = build_sender(self.settings)
+
     def process(
         self,
         pdf_path: Path,
@@ -328,6 +339,36 @@ class Pipeline:
         return job
 
 
+def build_sender(settings: Settings) -> Sender:
+    """Choose the sender these settings ask for.
+
+    Split out of build_default so it can be called again when the settings
+    change. Which sender is wired in decides whether a message actually leaves
+    the machine, and that decision must not outlive the setting it was made
+    from — see Pipeline.rebuild_sender.
+    """
+    if settings.dry_run:
+        from .send.dryrun import DryRunSender
+
+        return DryRunSender(paths().logs / "dry_run.jsonl")
+
+    from .secrets import load_token
+    from .send.whatsapp import WhatsAppCloudSender
+
+    token = load_token()
+    if not token:
+        raise RuntimeError(
+            "No WhatsApp access token stored. Add one in Settings, or turn "
+            "dry-run back on."
+        )
+    return WhatsAppCloudSender(
+        phone_number_id=settings.phone_number_id,
+        access_token=token,
+        api_version=settings.graph_api_version,
+        force_ipv4=settings.force_ipv4,
+    )
+
+
 def build_default(settings: Settings | None = None) -> Pipeline:
     """Wire a pipeline from the on-disk configuration."""
     settings = settings or Settings.load()
@@ -337,25 +378,4 @@ def build_default(settings: Settings | None = None) -> Pipeline:
     templates = TemplateStore(p.templates)
     profile = DocumentProfile.load(p.profile)
 
-    sender: Sender
-    if settings.dry_run:
-        from .send.dryrun import DryRunSender
-
-        sender = DryRunSender(p.logs / "dry_run.jsonl")
-    else:
-        from .secrets import load_token
-        from .send.whatsapp import WhatsAppCloudSender
-
-        token = load_token()
-        if not token:
-            raise RuntimeError(
-                "No WhatsApp access token stored. Add one in Settings, or turn "
-                "dry-run back on."
-            )
-        sender = WhatsAppCloudSender(
-            phone_number_id=settings.phone_number_id,
-            access_token=token,
-            api_version=settings.graph_api_version,
-        )
-
-    return Pipeline(settings, store, sender, templates, profile)
+    return Pipeline(settings, store, build_sender(settings), templates, profile)

@@ -325,3 +325,180 @@ class TestSending:
         result = sender.send("+919876543210", pdf, message)
         assert not result.ok
         assert result.retryable
+
+
+class TestSenderFollowsSettings:
+    """Turning test mode off must change what happens, not just what it is called.
+
+    The bug this guards: the sender was chosen once, at startup. Unticking
+    "Test mode" in the settings page flipped settings.dry_run, so a job was
+    recorded as SENT — while the dry-run sender was still wired in and nothing
+    reached Meta or the customer. The operator's own screen said it went.
+    """
+
+    def test_leaving_test_mode_rewires_the_sender(self, pipeline, monkeypatch):
+        from waprinter.send.dryrun import DryRunSender
+        from waprinter.send.whatsapp import WhatsAppCloudSender
+
+        monkeypatch.setattr("waprinter.secrets.load_token", lambda: "a-real-token")
+        pipeline.settings.dry_run = True
+        pipeline.rebuild_sender()
+        assert isinstance(pipeline.sender, DryRunSender)
+
+        pipeline.settings.dry_run = False
+        pipeline.settings.phone_number_id = "123456"
+        pipeline.rebuild_sender()
+        assert isinstance(pipeline.sender, WhatsAppCloudSender)
+
+    def test_going_live_without_a_token_refuses_rather_than_pretending(
+        self, pipeline, monkeypatch
+    ):
+        monkeypatch.setattr("waprinter.secrets.load_token", lambda: None)
+        pipeline.settings.dry_run = False
+        with pytest.raises(RuntimeError, match="access token"):
+            pipeline.rebuild_sender()
+
+    def test_returning_to_test_mode_rewires_back(self, pipeline, monkeypatch):
+        from waprinter.send.dryrun import DryRunSender
+
+        monkeypatch.setattr("waprinter.secrets.load_token", lambda: "a-real-token")
+        pipeline.settings.dry_run = False
+        pipeline.settings.phone_number_id = "123456"
+        pipeline.rebuild_sender()
+        pipeline.settings.dry_run = True
+        pipeline.rebuild_sender()
+        assert isinstance(pipeline.sender, DryRunSender)
+
+
+class TestTransientNetworkFailures:
+    """A dropped connection must not lose a receipt — but must not double-send.
+
+    The failure this guards: "Upload failed: Server disconnected without
+    sending a response". The sender marked it retryable and nothing retried,
+    so one network blip on the counter PC lost the document permanently.
+    """
+
+    @respx.mock
+    def test_a_dropped_upload_is_retried_and_succeeds(self, message, tmp_path):
+        pdf = tmp_path / "receipt.pdf"
+        pdf.write_bytes(b"%PDF-1.4 test %%EOF")
+
+        route = respx.post(url__regex=r".*/media$").mock(
+            side_effect=[
+                httpx.RemoteProtocolError("Server disconnected without sending a response"),
+                httpx.Response(200, json={"id": "media-123"}),
+            ]
+        )
+        respx.post(url__regex=r".*/messages$").mock(
+            return_value=httpx.Response(200, json={"messages": [{"id": "wamid.X"}]})
+        )
+
+        sender = WhatsAppCloudSender("123", "token")
+        sender._client = httpx.Client(timeout=5)
+        result = sender.send("+919492787875", pdf, message)
+
+        assert result.ok, result.error
+        assert result.wamid == "wamid.X"
+        assert route.call_count == 2
+
+    @respx.mock
+    def test_it_gives_up_after_the_last_attempt(self, message, tmp_path):
+        from waprinter.send.whatsapp import UPLOAD_ATTEMPTS
+
+        pdf = tmp_path / "receipt.pdf"
+        pdf.write_bytes(b"%PDF-1.4 test %%EOF")
+        route = respx.post(url__regex=r".*/media$").mock(
+            side_effect=httpx.RemoteProtocolError("Server disconnected")
+        )
+
+        sender = WhatsAppCloudSender("123", "token")
+        sender._client = httpx.Client(timeout=5)
+        result = sender.send("+919492787875", pdf, message)
+
+        assert not result.ok
+        assert "Upload failed" in result.error
+        assert route.call_count == UPLOAD_ATTEMPTS
+
+    @respx.mock
+    def test_a_rejected_upload_is_not_retried(self, message, tmp_path):
+        """An expired token fails identically every time; retrying just stalls."""
+        pdf = tmp_path / "receipt.pdf"
+        pdf.write_bytes(b"%PDF-1.4 test %%EOF")
+        route = respx.post(url__regex=r".*/media$").mock(
+            return_value=httpx.Response(
+                401, json={"error": {"code": 190, "message": "expired token"}}
+            )
+        )
+
+        sender = WhatsAppCloudSender("123", "token")
+        sender._client = httpx.Client(timeout=5)
+        result = sender.send("+919492787875", pdf, message)
+
+        assert not result.ok
+        assert route.call_count == 1
+
+    @respx.mock
+    def test_a_dropped_template_send_is_never_retried(self, message, tmp_path):
+        """Retrying an unanswered send would risk two receipts to one customer."""
+        pdf = tmp_path / "receipt.pdf"
+        pdf.write_bytes(b"%PDF-1.4 test %%EOF")
+        respx.post(url__regex=r".*/media$").mock(
+            return_value=httpx.Response(200, json={"id": "media-123"})
+        )
+        route = respx.post(url__regex=r".*/messages$").mock(
+            side_effect=httpx.RemoteProtocolError("Server disconnected")
+        )
+
+        sender = WhatsAppCloudSender("123", "token")
+        sender._client = httpx.Client(timeout=5)
+        result = sender.send("+919492787875", pdf, message)
+
+        assert not result.ok
+        assert route.call_count == 1, "an unanswered send must not be repeated"
+        assert "may or may not have been sent" in result.error
+        assert result.retryable is False
+
+
+class TestIPv4Fallback:
+    """A counter PC with a black-holed IPv6 route must still get the receipt out.
+
+    TCP connects, so every reachability check passes; only a payload large
+    enough to need fragmenting dies, and it dies with no response at all.
+    """
+
+    @respx.mock
+    def test_a_dropped_upload_moves_the_session_to_ipv4(self, message, tmp_path):
+        pdf = tmp_path / "receipt.pdf"
+        pdf.write_bytes(b"%PDF-1.4 test %%EOF")
+        respx.post(url__regex=r".*/media$").mock(
+            side_effect=[
+                httpx.RemoteProtocolError("Server disconnected without sending a response"),
+                httpx.Response(200, json={"id": "media-123"}),
+            ]
+        )
+        respx.post(url__regex=r".*/messages$").mock(
+            return_value=httpx.Response(200, json={"messages": [{"id": "wamid.X"}]})
+        )
+
+        sender = WhatsAppCloudSender("123", "token")
+        assert sender._ipv4_only is False
+        result = sender.send("+919492787875", pdf, message)
+
+        assert result.ok, result.error
+        assert sender._ipv4_only is True, "the session should have moved to IPv4"
+
+    def test_the_setting_starts_on_ipv4_without_a_failed_upload_first(self):
+        sender = WhatsAppCloudSender("123", "token", force_ipv4=True)
+        assert sender._ipv4_only is True
+
+    def test_a_caller_supplied_client_is_never_swapped(self):
+        """The tests' own client, and anything injected, must survive."""
+        mine = httpx.Client()
+        sender = WhatsAppCloudSender("123", "token", client=mine)
+        assert sender._fall_back_to_ipv4() is False
+        assert sender._client is mine
+
+    def test_the_fallback_happens_once(self):
+        sender = WhatsAppCloudSender("123", "token")
+        assert sender._fall_back_to_ipv4() is True
+        assert sender._fall_back_to_ipv4() is False

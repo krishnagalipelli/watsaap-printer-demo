@@ -198,6 +198,11 @@ def cmd_history(args: argparse.Namespace) -> int:
             f"{job.created_at:%d %b %H:%M}  {str(job.status):9s}  {target:15s}  "
             f"{job.fields.invoice_number or '-'}"
         )
+        # Why a job did not arrive is the whole reason anyone reads this list;
+        # without it the operator sees "failed" and has to go to the log file.
+        reason = job.error or job.hold_reason
+        if reason:
+            print(f"      {reason}")
     return 0
 
 
@@ -255,6 +260,17 @@ def cmd_go_live(_args: argparse.Namespace) -> int:
     settings.save()
     print("Dry-run is OFF. Printing to 'WhatsApp Printer' will now send real "
           "messages.")
+    # Dry-run is only one of the two switches. Link mode never calls the Cloud
+    # API at all, so going live while it is set leaves nothing in the Meta
+    # dashboard and nothing on the customer's phone — with no error to explain
+    # it, because from the app's side handing over to WhatsApp is a success.
+    if settings.send_mode == "link":
+        print()
+        print("  NOTE: send_mode is 'link', so messages are NOT sent by the")
+        print("        API. WhatsApp opens with the text ready and someone")
+        print("        presses send. For automatic sending set send_mode to")
+        print(f"        'api' in {paths().settings}, or choose")
+        print("        'Send automatically' in Settings, then restart the app.")
     return 0
 
 

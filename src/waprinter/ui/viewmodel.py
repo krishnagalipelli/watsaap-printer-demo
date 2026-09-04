@@ -56,6 +56,12 @@ def device_state(settings: Settings, waiting: int, problems: list[str]) -> Devic
         return DeviceState("Test mode — documents are read but nothing is sent", "warn")
     if problems:
         return DeviceState(f"Not ready — {problems[0]}", "bad")
+    # Link mode is a working state, but not an automatic one: nothing goes out
+    # until a person presses send in WhatsApp. A bare "Ready" here reads as
+    # "receipts are going out on their own", which is how an operator ends up
+    # believing a message was delivered that is still sitting on their screen.
+    if settings.send_mode == "link":
+        return DeviceState("Ready — WhatsApp opens for you to press send", "warn")
     if waiting:
         return DeviceState(f"Ready — {waiting} document(s) need attention", "warn")
     return DeviceState("Ready", "ok")

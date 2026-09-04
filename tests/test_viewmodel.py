@@ -56,14 +56,22 @@ class TestDeviceState:
         assert state.tone == "bad"
 
     def test_waiting_documents_are_surfaced(self):
-        state = vm.device_state(Settings(dry_run=False), 3, [])
+        state = vm.device_state(Settings(dry_run=False, send_mode="api"), 3, [])
         assert "3 document(s) need attention" in state.text
         assert state.tone == "warn"
 
     def test_ready_when_nothing_is_outstanding(self):
-        state = vm.device_state(Settings(dry_run=False), 0, [])
+        state = vm.device_state(Settings(dry_run=False, send_mode="api"), 0, [])
         assert state.text == "Ready"
         assert state.tone == "ok"
+
+    def test_link_mode_never_reads_as_sending_on_its_own(self):
+        """A bare "Ready" in link mode is how an operator comes to believe a
+        receipt was delivered while it is still waiting on their screen."""
+        state = vm.device_state(Settings(dry_run=False, send_mode="link"), 0, [])
+        assert state.text != "Ready"
+        assert "press send" in state.text
+        assert state.tone == "warn"
 
 
 class TestCounters:
