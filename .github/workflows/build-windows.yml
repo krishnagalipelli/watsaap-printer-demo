@@ -86,9 +86,39 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # The manifest the installed app polls. Generated here rather than
+      # committed, because the checksum can only be known once the installer
+      # exists, and a manifest whose sha256 is wrong is worse than none: the
+      # download is discarded and every machine silently stops updating.
+      - name: Write the update manifest
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem 'installer\Output\*.exe' | Select-Object -First 1
+          if ($exe.BaseName -notmatch '(\d+\.\d+\.\d+)$') {
+            throw "Cannot read a version out of $($exe.Name)"
+          }
+          $built = $Matches[1]
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          # A manifest that disagrees with the app's own __version__ either
+          # re-installs the same build forever or never offers it at all.
+          if ($built -ne $tag) {
+            throw "Installer is $built but the tag says $tag. Bump the version before tagging."
+          }
+          $sha = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          [ordered]@{
+            version = $built
+            url     = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$($exe.Name)"
+            sha256  = $sha
+            notes   = "WhatsApp Printer $built"
+          } | ConvertTo-Json | Set-Content 'installer\Output\latest.json' -Encoding utf8NoBOM
+          Get-Content 'installer\Output\latest.json'
+
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: installer/Output/*.exe
+          files: |
+            installer/Output/*.exe
+            installer/Output/latest.json
           generate_release_notes: true

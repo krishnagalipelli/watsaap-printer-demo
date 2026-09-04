@@ -171,7 +171,13 @@ class Settings:
     # --- Updates -----------------------------------------------------------
     # A static JSON file: {"version", "url", "sha256", "notes"}. No server of
     # ours is involved; if it is unreachable, everything else carries on.
-    update_url: str = ""
+    # /releases/latest/download/ always resolves to the newest release's copy
+    # of the file, so this address never changes as versions come and go. CI
+    # writes latest.json when a v* tag is built; see build-windows.yml.
+    update_url: str = (
+        "https://github.com/krishnagalipelli/watsaap-printer-demo"
+        "/releases/latest/download/latest.json"
+    )
     update_check_enabled: bool = True
     last_update_check: str = ""
 
