@@ -502,3 +502,78 @@ class TestIPv4Fallback:
         sender = WhatsAppCloudSender("123", "token")
         assert sender._fall_back_to_ipv4() is True
         assert sender._fall_back_to_ipv4() is False
+
+
+class TestTemplateSync:
+    """The stored status decides whether a send is allowed, so it must be Meta's.
+
+    The dead end this removes: `chits_details` shipped as "pending", Meta had
+    it approved, and nothing in the app could change that. The template read as
+    unusable for ever and the app refused to send a perfectly good message.
+    """
+
+    def _meta_entry(self, **over):
+        entry = {
+            "name": "chits_details",
+            "language": "en",
+            "status": "APPROVED",
+            "category": "UTILITY",
+            "parameter_format": "NAMED",
+            "components": [
+                {"type": "HEADER", "format": "DOCUMENT"},
+                {"type": "BODY", "text": "Dear {{customer_name}}, receipt {{receipt_no}}."},
+                {"type": "FOOTER", "text": "Srinidhi Chit Funds"},
+            ],
+        }
+        entry.update(over)
+        return entry
+
+    def test_an_approved_template_becomes_usable(self):
+        from waprinter.cli import _template_from_meta
+
+        t = _template_from_meta(self._meta_entry())
+        assert t.status == "approved"
+        assert t.header_document is True
+        assert t.usable is True
+        assert t.named is True
+        assert t.placeholders == ["customer_name", "receipt_no"]
+        assert t.footer == "Srinidhi Chit Funds"
+
+    def test_a_pending_template_stays_unusable(self):
+        from waprinter.cli import _template_from_meta
+
+        assert _template_from_meta(self._meta_entry(status="PENDING")).usable is False
+
+    def test_a_template_without_a_document_header_is_not_usable(self):
+        """There would be nowhere to attach the PDF."""
+        from waprinter.cli import _template_from_meta
+
+        entry = self._meta_entry(
+            components=[{"type": "BODY", "text": "Dear {{1}}."}]
+        )
+        t = _template_from_meta(entry)
+        assert t.status == "approved"
+        assert t.header_document is False
+        assert t.usable is False
+
+    def test_a_text_header_is_not_a_document_header(self):
+        from waprinter.cli import _template_from_meta
+
+        entry = self._meta_entry(
+            components=[
+                {"type": "HEADER", "format": "TEXT", "text": "Receipt"},
+                {"type": "BODY", "text": "Dear {{1}}."},
+            ]
+        )
+        assert _template_from_meta(entry).header_document is False
+
+    def test_syncing_replaces_a_stale_pending_status(self, tmp_path):
+        from waprinter.cli import _template_from_meta
+        from waprinter.send.templates import TemplateStore
+
+        store = TemplateStore(tmp_path / "templates.json")
+        assert store.get("chits_details").usable is False   # as shipped
+
+        store.put(_template_from_meta(self._meta_entry()))
+
+        assert TemplateStore(tmp_path / "templates.json").get("chits_details").usable

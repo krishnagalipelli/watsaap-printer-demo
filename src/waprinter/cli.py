@@ -206,6 +206,109 @@ def cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _template_from_meta(item: dict) -> "MessageTemplate":
+    """Turn one entry of Meta's message_templates response into ours."""
+    from .send.templates import MessageTemplate
+
+    body, footer, header_document = "", None, False
+    for component in item.get("components") or []:
+        kind = (component.get("type") or "").upper()
+        if kind == "BODY":
+            body = component.get("text") or ""
+        elif kind == "FOOTER":
+            footer = component.get("text")
+        elif kind == "HEADER":
+            header_document = (component.get("format") or "").upper() == "DOCUMENT"
+
+    return MessageTemplate(
+        name=item["name"],
+        language=item.get("language", "en"),
+        body=body,
+        header_document=header_document,
+        footer=footer,
+        # Meta reports APPROVED / PENDING / REJECTED / PAUSED.
+        status=(item.get("status") or "pending").lower(),
+        category=(item.get("category") or "UTILITY").upper(),
+        parameter_format=(item.get("parameter_format") or "positional").lower(),
+    )
+
+
+def cmd_templates(args: argparse.Namespace) -> int:
+    """Show the stored templates, or replace them with what Meta actually has.
+
+    The stored copy is what decides whether a send is allowed, and it used to
+    be editable only by hand. A template Meta had approved still read as
+    "pending" here for ever, with no command or button to correct it, so the
+    app refused to send a message that was perfectly good.
+    """
+    from .send.templates import TemplateStore
+
+    store = TemplateStore(paths().templates)
+
+    if args.sync:
+        import httpx
+
+        from .secrets import load_token
+
+        settings = Settings.load()
+        token = load_token()
+        if not token:
+            print("No access token stored. Run: waprinter set-token")
+            return 1
+        waba = settings.business_account_id
+        if not waba:
+            print("business_account_id is not set in settings.json.")
+            print("Find it in Meta Business Manager -> WhatsApp Manager ->")
+            print("Account tools -> Overview (the WhatsApp Business Account ID).")
+            return 1
+
+        url = (
+            f"https://graph.facebook.com/{settings.graph_api_version}"
+            f"/{waba}/message_templates"
+        )
+        try:
+            with httpx.Client(timeout=30) as client:
+                response = client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={"limit": 100},
+                )
+            payload = response.json()
+        except Exception as exc:
+            print(f"Could not reach Meta: {exc}")
+            return 1
+
+        if "data" not in payload:
+            error = payload.get("error", {})
+            print(f"Meta refused the request: [{error.get('code')}] "
+                  f"{error.get('message')}")
+            return 1
+
+        for item in payload["data"]:
+            store.put(_template_from_meta(item))
+        print(f"Synced {len(payload['data'])} template(s) from Meta.\n")
+
+    templates = store.all()
+    if not templates:
+        print("No templates stored.")
+        return 0
+
+    settings = Settings.load()
+    for template in sorted(templates, key=lambda t: t.name):
+        marker = "*" if template.name == settings.default_template else " "
+        state = "usable" if template.usable else f"NOT usable"
+        note = ""
+        if not template.usable:
+            if template.status != "approved":
+                note = f" -- status is {template.status}"
+            elif not template.header_document:
+                # Without a document header there is nowhere to attach the PDF.
+                note = " -- no document header, so a PDF cannot be attached"
+        print(f" {marker} {template.name:24s} {template.status:10s} {state}{note}")
+    print("\n * = the message this install sends. Change it in Settings.")
+    return 0
+
+
 def cmd_doctor(_args: argparse.Namespace) -> int:
     """Report this install's health, and try a real upload, saying where it dies.
 
@@ -444,6 +547,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser(
         "doctor", help="check this install and try a real upload"
     ).set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("templates", help="list templates, or sync them from Meta")
+    p.add_argument(
+        "--sync", action="store_true", help="replace them with what Meta reports"
+    )
+    p.set_defaults(func=cmd_templates)
 
     args = parser.parse_args(argv)
     if args.verbose:
