@@ -14,7 +14,7 @@
 ;     in the user's own session instead.
 
 #define AppName        "WhatsApp Printer"
-#define AppVersion     "0.1.2"
+#define AppVersion     "0.1.3"
 #define AppPublisher   "Sunrise Software"
 #define DataDir        "C:\ProgramData\WAPrinter"
 

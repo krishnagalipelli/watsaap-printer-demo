@@ -12,6 +12,8 @@ Two modes, both tested here:
 
 from __future__ import annotations
 
+import pytest
+
 from datetime import datetime, timedelta
 
 from invoice_factory import InvoiceSpec
@@ -201,3 +203,49 @@ class TestGateDirectly:
         assert Decision("send") is Decision.SEND
         assert Decision("confirm") is Decision.CONFIRM
         assert Decision("hold") is Decision.HOLD
+
+
+class TestTokenValidation:
+    """A token that cannot work must never let the app call itself ready.
+
+    From a real failure: Ctrl+V in a Windows Command Prompt types \x16 rather
+    than pasting, getpass took that single control character as the token, and
+    it survived .strip() because \x16 is not whitespace. Every check only asked
+    whether a token was present, so the counter reported Ready and failed every
+    send with what looked like a network fault.
+    """
+
+    def test_a_control_character_is_rejected(self):
+        from waprinter.secrets import token_problem
+
+        problem = token_problem("\x16")
+        assert problem is not None
+        assert "Ctrl+V" in problem
+
+    def test_a_truncated_token_is_rejected(self):
+        from waprinter.secrets import token_problem
+
+        assert "characters" in (token_problem("EAAGshort") or "")
+
+    def test_a_real_looking_token_passes(self):
+        from waprinter.secrets import token_problem
+
+        assert token_problem("EAAG" + "x" * 200) is None
+
+    def test_saving_a_broken_token_raises_rather_than_storing_it(self, tmp_path,
+                                                                 monkeypatch):
+        import waprinter.secrets as secrets
+
+        monkeypatch.setenv("WAPRINTER_HOME", str(tmp_path))
+        with pytest.raises(ValueError, match="Ctrl\\+V"):
+            secrets.save_token("\x16")
+        assert secrets.load_token() is None, "nothing should have been written"
+
+    def test_readiness_reports_a_stored_but_unusable_token(self, monkeypatch):
+        from waprinter.config import Settings
+        from waprinter.send.readiness import problems
+
+        monkeypatch.setattr("waprinter.secrets.load_token", lambda: "\x16")
+        settings = Settings(own_numbers=["9999999999"], phone_number_id="123")
+        found = problems(settings)
+        assert any("Ctrl+V" in p for p in found), found

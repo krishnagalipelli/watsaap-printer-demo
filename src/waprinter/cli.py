@@ -322,16 +322,30 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_set_token(_args: argparse.Namespace) -> int:
+def cmd_set_token(args: argparse.Namespace) -> int:
     import getpass
 
     from .secrets import save_token
 
-    token = getpass.getpass("WhatsApp access token: ").strip()
+    if args.from_file:
+        # The reliable route. Console paste is where this goes wrong: Ctrl+V
+        # in a Command Prompt types a control character instead of pasting,
+        # and getpass takes it as the whole token.
+        token = Path(args.from_file).read_text(encoding="utf-8").strip()
+        print(f"Read {len(token)} characters from {args.from_file}")
+    else:
+        print("Paste with a RIGHT-CLICK, not Ctrl+V -- Ctrl+V does not paste "
+              "in a Command Prompt. Nothing will appear as you paste.")
+        token = getpass.getpass("WhatsApp access token: ").strip()
     if not token:
         print("Nothing entered; token unchanged.")
         return 1
-    save_token(token)
+    try:
+        save_token(token)
+    except ValueError as exc:
+        print(f"Not stored: {exc}")
+        print("The previous token, if any, is unchanged.")
+        return 1
     print(f"Stored in {paths().root}")
     if sys.platform != "win32":
         print("WARNING: no DPAPI on this platform — the token is only base64 "
@@ -419,9 +433,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=30)
     p.set_defaults(func=cmd_history)
 
-    sub.add_parser("set-token", help="store the WhatsApp access token").set_defaults(
-        func=cmd_set_token
+    p = sub.add_parser("set-token", help="store the WhatsApp access token")
+    p.add_argument(
+        "--from-file",
+        help="read the token from a text file instead of pasting it, which is "
+             "the only reliable way on Windows",
     )
+    p.set_defaults(func=cmd_set_token)
     sub.add_parser("go-live", help="turn dry-run off").set_defaults(func=cmd_go_live)
     sub.add_parser(
         "doctor", help="check this install and try a real upload"

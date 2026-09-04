@@ -32,7 +32,7 @@ def problems(settings: Settings, templates: "TemplateStore | None" = None) -> li
     a configured message as missing whenever the two disagreed.
     """
     from ..config import paths
-    from ..secrets import load_token
+    from ..secrets import load_token, token_problem
     from .templates import TemplateStore
 
     found: list[str] = []
@@ -47,8 +47,11 @@ def problems(settings: Settings, templates: "TemplateStore | None" = None) -> li
             "The WhatsApp phone number ID is not set (Meta Business → WhatsApp "
             "→ API Setup)."
         )
-    if not load_token():
-        found.append("No access token is stored.")
+    # Not just "is one stored": a token of one control character is stored,
+    # and answers truthy, and cannot send anything.
+    token_issue = token_problem(load_token())
+    if token_issue:
+        found.append(token_issue)
 
     templates = templates or TemplateStore(paths().templates)
     template = templates.get(settings.default_template)
