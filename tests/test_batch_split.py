@@ -89,7 +89,7 @@ class TestBatchOfReceipts:
         for job in jobs:
             assert job.recipient is not None
             mobiles = _mobiles_in(job.pdf_path)
-            assert mobiles == {job.recipient.removeprefix("+91")}, (
+            assert mobiles == {job.recipient[len("+91") :]}, (
                 f"{job.pdf_path.name} carries numbers other than its own "
                 f"subscriber's: {sorted(mobiles)}"
             )

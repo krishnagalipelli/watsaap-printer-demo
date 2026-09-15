@@ -173,7 +173,11 @@ def _write_crash_report(exc: BaseException) -> Path | None:
         with report.open("a", encoding="utf-8") as fh:
             fh.write(f"\n{'=' * 60}\n{datetime.now():%Y-%m-%d %H:%M:%S}\n")
             fh.write(f"frozen={getattr(sys, 'frozen', False)} exe={sys.executable}\n\n")
-            traceback.print_exception(exc, file=fh)
+            # The three-argument form, because the one-argument form is 3.10+
+            # and the Windows 7 build runs on 3.8. Getting this wrong fails
+            # inside the crash reporter, where the except below swallows it
+            # and the file this function exists to write is never created.
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=fh)
         return report
     except Exception:
         return None
@@ -255,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
         log.exception("agent crashed")
         report = _write_crash_report(exc)
         if "--selftest" in argv:
-            traceback.print_exception(exc)
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
             return 1
         _show_crash(exc, report)
         return 1

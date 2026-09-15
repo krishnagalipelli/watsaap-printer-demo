@@ -57,7 +57,14 @@ def window(tmp_path_factory):
         pytest.skip("no display")
 
     win.tabs.select(win.settings_tab)
-    win.root.update_idletasks()
+    # Map the window before anything measures it. update_idletasks() runs the
+    # geometry calculations but not the map, and Windows gives an unmapped
+    # window no real geometry at all -- the canvas reports a width of 1, so
+    # every measurement below compares against nonsense. macOS happens to fill
+    # them in anyway, which is why this held together until the tests were
+    # first run on the platform the product actually ships on.
+    win.root.deiconify()
+    win.root.update()
     yield win
     win.root.destroy()
     store.close()

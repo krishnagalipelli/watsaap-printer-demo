@@ -6,6 +6,21 @@ from pathlib import Path
 import pytest
 
 
+def _tesseract_available() -> bool:
+    from waprinter.extract.ocr import OcrSettings, available
+
+    return available(OcrSettings())
+
+
+# Tests that need the binary itself, not just the code path around it. The
+# Windows 7 build ships without OCR -- a 64-bit tesseract.exe cannot be
+# launched from a 32-bit install -- so its CI job has no Tesseract at all, and
+# neither does a fresh dev machine.
+needs_tesseract = pytest.mark.skipif(
+    not _tesseract_available(), reason="Tesseract is not installed"
+)
+
+
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
     """Keep every test out of the real install directory."""

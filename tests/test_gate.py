@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 
 from invoice_factory import InvoiceSpec
 
+from conftest import needs_tesseract
 from waprinter.models import JobStatus
 from waprinter.rules import Decision
 
@@ -137,6 +138,7 @@ class TestAutomaticHolds:
         assert job.recipient == "+919845012345"  # offered as a suggestion
         assert "confidence" in job.hold_reason
 
+    @needs_tesseract
     def test_a_scanned_page_is_read_by_ocr_but_still_held(
         self, pipeline, make_invoice
     ):
@@ -145,6 +147,7 @@ class TestAutomaticHolds:
         assert job.recipient == "+919876543210"
         assert "read by OCR" in job.hold_reason
 
+    @needs_tesseract
     def test_a_scanned_page_can_be_sent_once_ocr_is_trusted(
         self, pipeline, make_invoice
     ):
@@ -154,6 +157,7 @@ class TestAutomaticHolds:
         job = run(pipeline, make_invoice, InvoiceSpec(raster=True))
         assert job.status is JobStatus.DRY_RUN
 
+    @needs_tesseract
     def test_an_unidentifiable_scan_is_held_where_other_messages_exist(
         self, pipeline, make_invoice
     ):

@@ -15,10 +15,9 @@ from waprinter.extract.ocr import OcrSettings, available, find_tessdata
 from waprinter.extract.phone import apply_ocr_verification, scan_numbers
 from waprinter.models import Confidence, PhoneCandidate
 
+from conftest import needs_tesseract  # noqa: E402
+
 OCR = OcrSettings()
-needs_tesseract = pytest.mark.skipif(
-    not available(OCR), reason="Tesseract is not installed"
-)
 
 SELLER = {"+919845012345"}
 

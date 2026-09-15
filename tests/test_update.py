@@ -52,7 +52,7 @@ class TestCheck:
                 200, json={"version": "9.9.9", "url": "https://example.test/s.exe"}
             )
         )
-        result = update.check(MANIFEST, current="1.0.0")
+        result = update.check(MANIFEST, current="1.0.0", build="x64")
         assert result.available
         assert result.release.version == "9.9.9"
         assert "9.9.9" in result.message
@@ -64,7 +64,7 @@ class TestCheck:
                 200, json={"version": "1.0.0", "url": "https://example.test/s.exe"}
             )
         )
-        result = update.check(MANIFEST, current="1.0.0")
+        result = update.check(MANIFEST, current="1.0.0", build="x64")
         assert not result.available
         assert "Up to date" in result.message
 
@@ -79,7 +79,7 @@ class TestCheck:
     @respx.mock
     def test_a_malformed_manifest_does_not_raise(self):
         respx.get(MANIFEST).mock(return_value=httpx.Response(200, json={"oops": True}))
-        assert update.check(MANIFEST, current="1.0.0").failed
+        assert update.check(MANIFEST, current="1.0.0", build="x64").failed
 
     def test_no_configured_url_is_reported_plainly(self):
         assert "No update location" in update.check("").message

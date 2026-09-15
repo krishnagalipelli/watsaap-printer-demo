@@ -136,6 +136,10 @@ jobs:
   # exactly one installer. Nothing here touches them.
   build-win7:
     runs-on: windows-latest
+    # The layout tests map a real window and call update(). Tk fighting its own
+    # geometry manager is a documented way to hang rather than fail, and a
+    # wedged job holds a runner for six hours by default.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
