@@ -13,6 +13,12 @@
 ;     prints, and a service runs in session 0 with no desktop. It starts at logon
 ;     in the user's own session instead.
 
+; Which build this is. build.ps1 passes /DTarget=; compiling this file by
+; hand gives the normal 64-bit one.
+#ifndef Target
+  #define Target "x64"
+#endif
+
 #define AppName        "WhatsApp Printer"
 #define AppVersion     "0.1.6"
 #define AppPublisher   "Sunrise Software"
@@ -25,12 +31,25 @@ AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 DefaultDirName={autopf}\WhatsAppPrinter
 DefaultGroupName={#AppName}
+#if Target == "win7-x86"
+OutputBaseFilename=WhatsAppPrinter-Setup-{#AppVersion}-win7-x86
+#else
 OutputBaseFilename=WhatsAppPrinter-Setup-{#AppVersion}
+#endif
 Compression=lzma2
 SolidCompression=yes
 ; Creating a printer queue is a machine-wide change.
 PrivilegesRequired=admin
+#if Target == "win7-x86"
+; No 64-bit mode: the payload is 32-bit, so it belongs in Program Files
+; (x86) on a 64-bit machine and in Program Files on the 32-bit counters
+; this build exists for. MinVersion is stated rather than inherited
+; because it is the whole point of the build -- 6.1sp1 is Windows 7 SP1,
+; which is what those machines report as 6.1.7601.
+MinVersion=6.1sp1
+#else
 ArchitecturesInstallIn64BitMode=x64compatible
+#endif
 WizardStyle=modern
 UninstallDisplayIcon={app}\waprinter-agent.exe
 DisableProgramGroupPage=yes
@@ -61,7 +80,14 @@ Source: "provision.ps1";             DestDir: "{app}"; Flags: ignoreversion; Com
 ; token with DPAPI and deletes it.
 Source: "{src}\provision.json";       DestDir: "{#DataDir}"; \
     Flags: external ignoreversion skipifsourcedoesntexist; Components: core
-Source: "..\README.md";              DestDir: "{app}"; Flags: ignoreversion isreadme; Components: core
+; Shipped as .txt, and not as the "readme" setup offers to open. isreadme
+; ShellExecutes the file when setup finishes, and a counter PC has nothing
+; registered for .md, so every install ended on "ShellExecuteEx failed;
+; code 2147746293. Application not found." .txt opens in Notepad for anyone
+; who wants it, without setup opening a 16 KB engineering document nobody
+; standing at a counter asked for.
+Source: "..\README.md";              DestDir: "{app}"; DestName: "README.txt"; \
+    Flags: ignoreversion; Components: core
 
 ; Tesseract, for invoices that print as an image rather than as text.
 Source: "vendor\tesseract\*"; DestDir: "{app}\tesseract"; \

@@ -1,0 +1,16 @@
+# Pins for the Windows 7 build, and only for it. Every other machine builds
+# against whatever pip resolves, which is the point of keeping these here
+# rather than in pyproject.toml.
+#
+# Each line is the last release that still ships a 32-bit Python 3.8 wheel, or
+# still produces a binary Windows 7 can start. Without them pip resolves
+# something newer, and the failure is not a resolution error -- it is an
+# installer that builds cleanly on the runner and dies at the counter.
+
+# 1.28 is cp310-abi3 only; 1.24.11 is the last with a cp38-win32 wheel. Well
+# inside the >=1.24 the project asks for.
+pymupdf==1.24.11
+
+# PyInstaller documents itself as "runs in Windows 8 and newer" from 6.0. 5.x
+# still compiles a bootloader that starts on 7.
+pyinstaller==5.13.2

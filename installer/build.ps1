@@ -18,6 +18,14 @@
 
 .PARAMETER SkipOcr
     Build without OCR. Scanned pages will be held with an explanation.
+
+.PARAMETER Target
+    x64       - the normal build, frozen against whatever Python is on PATH.
+    win7-x86  - 32-bit, for counters still on Windows 7. Must be run with a
+                32-bit Python 3.8: 3.9 dropped Windows 7, and 216
+                (ERROR_EXE_MACHINE_TYPE_MISMATCH) is what a 64-bit build gives
+                when someone double-clicks it there. The pins that keep the
+                frozen output startable on 7 are in constraints-win7.txt.
 #>
 
 [CmdletBinding()]
@@ -25,7 +33,9 @@ param(
     [string] $Python       = 'py -3.12',
     [string] $ISCC         = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
     [string] $TesseractDir = 'C:\Program Files\Tesseract-OCR',
-    [switch] $SkipOcr
+    [switch] $SkipOcr,
+    [ValidateSet('x64', 'win7-x86')]
+    [string] $Target = 'x64'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,6 +58,15 @@ function Copy-Tesseract {
         Write-Warning 'Building without OCR; scanned invoices will be held.'
         return
     }
+    # A 64-bit tesseract.exe cannot be launched by a 32-bit install on a 32-bit
+    # Windows, and it is the default install that gets staged here. Bundling it
+    # anyway produces a build whose OCR fails only at the counter, which is the
+    # one place nobody can debug it.
+    if ($Target -eq 'win7-x86' -and -not $PSBoundParameters.ContainsKey('TesseractDir')) {
+        throw "The $Target build needs a 32-bit Tesseract. Pass -TesseractDir " +
+              "<path to a 32-bit install>, or -SkipOcr to hold scanned pages " +
+              "for a person instead."
+    }
     if (-not (Test-Path $TesseractDir)) {
         throw "Tesseract not found at $TesseractDir. Install it, or pass " +
               "-TesseractDir <path> / -SkipOcr."
@@ -69,9 +88,33 @@ function Copy-Tesseract {
 }
 
 try {
-    Write-Host '== Installing build dependencies ==' -ForegroundColor Cyan
-    Invoke-Step "$Python -m pip install --upgrade pip pyinstaller"
-    Invoke-Step "$Python -m pip install -e `".[dev,windows]`""
+    Write-Host "== Installing build dependencies ($Target) ==" -ForegroundColor Cyan
+    if ($Target -eq 'win7-x86') {
+        # -c, not a requirements file: the project still declares what it needs,
+        # and these only cap what pip is allowed to resolve that to.
+        $constraints = 'installer\constraints-win7.txt'
+        Invoke-Step "$Python -m pip install --upgrade pip"
+        Invoke-Step "$Python -m pip install -c $constraints pyinstaller"
+        Invoke-Step "$Python -m pip install -c $constraints -e `".[dev,windows]`""
+
+        # A 64-bit interpreter here would freeze a 64-bit exe and every check
+        # below would still pass, all the way to the counter.
+        Write-Host '== Confirming the interpreter is 32-bit ==' -ForegroundColor Cyan
+        $bits = & cmd /c "$Python -c `"import struct,sys;print(struct.calcsize('P')*8,sys.version_info[:2])`""
+        if ($LASTEXITCODE -ne 0) { throw 'Could not ask Python for its word size.' }
+        Write-Host "  $Python reports $bits"
+        if ($bits -notmatch '^32 ') {
+            throw "$Target needs a 32-bit Python; this one reports $bits. " +
+                  "Use an x86 install (setup-python's architecture: x86)."
+        }
+        if ($bits -notmatch '\(3, 8\)') {
+            Write-Warning ("Expected Python 3.8 for $Target; got $bits. " +
+                           "Anything newer will not start on Windows 7.")
+        }
+    } else {
+        Invoke-Step "$Python -m pip install --upgrade pip pyinstaller"
+        Invoke-Step "$Python -m pip install -e `".[dev,windows]`""
+    }
 
     if ($env:CI) {
         Write-Host '== Skipping tests (already run in CI) ==' -ForegroundColor Yellow
@@ -132,7 +175,7 @@ try {
     if (-not (Test-Path $ISCC)) {
         throw "Inno Setup not found at $ISCC. Install it or pass -ISCC <path>."
     }
-    & $ISCC 'installer\setup.iss'
+    & $ISCC "/DTarget=$Target" 'installer\setup.iss'
     if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed.' }
 
     Write-Host ''

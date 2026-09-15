@@ -85,6 +85,85 @@ class TestCheck:
         assert "No update location" in update.check("").message
 
 
+class TestWhichBuildItOffers:
+    """A counter must only ever be offered an installer it can run.
+
+    The 32-bit Windows 7 build is the reason this exists. Inno Setup's own
+    installer is 32-bit whatever it carries, so handing a Windows 7 machine the
+    x64 installer does not bounce -- it runs, replaces a working install with
+    binaries the OS refuses to start (CreateProcess, code 216), and leaves that
+    counter unable to print with nobody watching.
+    """
+
+    def test_it_reads_the_build_off_the_running_interpreter(self, monkeypatch):
+        monkeypatch.setattr(update.sys, "maxsize", 2**63 - 1)
+        assert update.build_id() == "x64"
+        monkeypatch.setattr(update.sys, "maxsize", 2**31 - 1)
+        assert update.build_id() == "win7-x86"
+
+    @respx.mock
+    def test_a_32_bit_machine_takes_its_own_entry(self):
+        respx.get(MANIFEST).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "version": "9.9.9",
+                    "url": "https://example.test/Setup-9.9.9.exe",
+                    "sha256": "aa",
+                    "builds": {
+                        "win7-x86": {
+                            "url": "https://example.test/Setup-9.9.9-win7-x86.exe",
+                            "sha256": "bb",
+                        }
+                    },
+                },
+            )
+        )
+        result = update.check(MANIFEST, current="1.0.0", build="win7-x86")
+        assert result.available
+        assert result.release.url.endswith("-win7-x86.exe")
+        assert result.release.sha256 == "bb"
+
+    @respx.mock
+    def test_a_32_bit_machine_is_offered_nothing_rather_than_the_64_bit_build(self):
+        respx.get(MANIFEST).mock(
+            return_value=httpx.Response(
+                200,
+                json={"version": "9.9.9", "url": "https://example.test/Setup-9.9.9.exe"},
+            )
+        )
+        result = update.check(MANIFEST, current="1.0.0", build="win7-x86")
+        assert not result.available
+        assert result.release is None
+        # And it says so plainly: this is the state where someone has tagged a
+        # release and forgotten the Windows 7 counters exist.
+        assert "win7-x86" in result.message
+
+    @respx.mock
+    def test_a_64_bit_machine_still_reads_the_top_level_url(self):
+        """Every manifest published so far has only a top-level url."""
+        respx.get(MANIFEST).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "version": "9.9.9",
+                    "url": "https://example.test/Setup-9.9.9.exe",
+                    "sha256": "aa",
+                    "builds": {
+                        "win7-x86": {
+                            "url": "https://example.test/Setup-9.9.9-win7-x86.exe",
+                            "sha256": "bb",
+                        }
+                    },
+                },
+            )
+        )
+        result = update.check(MANIFEST, current="1.0.0", build="x64")
+        assert result.available
+        assert result.release.url.endswith("Setup-9.9.9.exe")
+        assert result.release.sha256 == "aa"
+
+
 class TestDownload:
     @respx.mock
     def test_it_verifies_the_checksum(self, tmp_path, monkeypatch):

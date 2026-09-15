@@ -10,17 +10,17 @@ A held job is a ten-second interruption. A wrong send cannot be taken back.
 
 from __future__ import annotations
 
-import enum
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from ..compat import StrEnum
 from ..config import Settings
 from ..models import Confidence, ExtractedFields, PrintJob
 from ..store import Store
 
 
-class Decision(enum.StrEnum):
+class Decision(StrEnum):
     SEND = "send"          # confident enough to go without anyone looking
     CONFIRM = "confirm"    # raise the dialog; the operator supplies the number
     HOLD = "hold"          # queued for later; nothing to act on right now

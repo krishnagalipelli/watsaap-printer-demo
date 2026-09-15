@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import enum
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from .compat import StrEnum
 
-class Confidence(enum.StrEnum):
+
+class Confidence(StrEnum):
     """How sure we are that a phone candidate is the *customer's* number.
 
     Only HIGH is eligible for a silent send. Everything else is held.
@@ -19,7 +20,7 @@ class Confidence(enum.StrEnum):
     LOW = "low"
 
 
-class JobStatus(enum.StrEnum):
+class JobStatus(StrEnum):
     CAPTURED = "captured"      # PDF landed, not yet parsed
     AWAITING = "awaiting"      # dialog is up, operator is entering the number
     # Link mode only. READY means the message is composed and waiting for the

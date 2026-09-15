@@ -2,7 +2,10 @@
 name = "waprinter"
 version = "0.1.6"
 description = "Virtual Windows printer that sends printed invoices to customers over WhatsApp"
-requires-python = ">=3.11"
+# 3.8 because of the Windows 7 counters: it is the last Python that starts on
+# that OS, and they are frozen against it. Nothing here needs more -- see
+# src/waprinter/compat.py, which holds the single exception.
+requires-python = ">=3.8"
 
 # Deliberately small. The interface is Tk, which ships with Python, so there is
 # no web server, no template engine and no browser runtime to install.

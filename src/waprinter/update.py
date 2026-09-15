@@ -44,6 +44,27 @@ TIMEOUT = 20.0
 # An installer is tens of megabytes; anything far larger is not ours.
 MAX_DOWNLOAD_BYTES = 400 * 1024 * 1024
 
+# The manifest's top-level url is the 64-bit installer, because that is what
+# every manifest written so far has meant. Other builds are named under
+# "builds", and a machine that is not x64 takes only its own entry.
+DEFAULT_BUILD = "x64"
+
+
+def build_id() -> str:
+    """Which installer this installation is able to run.
+
+    Read off the running interpreter rather than stamped in at freeze time,
+    because the word size of the Python an installer was frozen against is
+    exactly what decides whether its payload starts on this machine -- and
+    this is that Python.
+
+    The only 32-bit build is the one for the Windows 7 counters, so it wears
+    that name. Handing those machines the 64-bit installer would not fail
+    politely: Inno Setup itself is 32-bit, so it would run, replace a working
+    install with binaries the OS refuses to start, and leave nothing printing.
+    """
+    return DEFAULT_BUILD if sys.maxsize > 2**32 else "win7-x86"
+
 
 def parse_version(text: str) -> tuple[int, ...]:
     """"1.2.10" -> (1, 2, 10), so 1.2.10 sorts above 1.2.9.
@@ -81,8 +102,14 @@ class CheckResult:
     failed: bool = False
 
 
-def check(url: str, current: str = __version__, client: httpx.Client | None = None) -> CheckResult:
-    """Ask whether a newer build exists. Never raises."""
+def check(
+    url: str,
+    current: str = __version__,
+    client: httpx.Client | None = None,
+    build: str | None = None,
+) -> CheckResult:
+    """Ask whether a newer build exists, for this build. Never raises."""
+    build = build or build_id()
     if not url:
         return CheckResult(message="No update location is configured.", failed=True)
 
@@ -92,10 +119,25 @@ def check(url: str, current: str = __version__, client: httpx.Client | None = No
         response = client.get(url)
         response.raise_for_status()
         payload = response.json()
+        entry = (payload.get("builds") or {}).get(build)
+        if entry is None:
+            if build != DEFAULT_BUILD:
+                # Newer manifests name every build they carry. One that does
+                # not name this machine's is offering it somebody else's
+                # installer, so there is nothing here to take.
+                return CheckResult(
+                    current=current,
+                    message=(
+                        f"Version {payload.get('version', '?')} is out, but the "
+                        f"update server lists no {build} build. This machine "
+                        "cannot run the 64-bit one, so nothing was installed."
+                    ),
+                )
+            entry = payload
         release = Release(
             version=str(payload["version"]),
-            url=str(payload["url"]),
-            sha256=str(payload.get("sha256", "")),
+            url=str(entry["url"]),
+            sha256=str(entry.get("sha256", "")),
             notes=str(payload.get("notes", "")),
         )
     except Exception as exc:

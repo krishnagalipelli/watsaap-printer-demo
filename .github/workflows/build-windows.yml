@@ -90,6 +90,13 @@ jobs:
       # committed, because the checksum can only be known once the installer
       # exists, and a manifest whose sha256 is wrong is worse than none: the
       # download is discarded and every machine silently stops updating.
+      #
+      # TODO before the next tagged release: this describes the x64 installer
+      # only. update.check() now refuses to hand a 32-bit machine an x64 build,
+      # so Windows 7 counters will report "no win7-x86 build listed" and stay
+      # on the version they have -- safe, but they stop receiving fixes until
+      # this grows a "builds": {"win7-x86": {url, sha256}} section fed by the
+      # build-win7 job below.
       - name: Write the update manifest
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -122,3 +129,63 @@ jobs:
             installer/Output/*.exe
             installer/Output/latest.json
           generate_release_notes: true
+
+  # Counters still running Windows 7 SP1, which report 6.1.7601 and are 32-bit.
+  # A separate job rather than a leg of a matrix on the one above: that job
+  # writes the release and its update manifest, and those must keep describing
+  # exactly one installer. Nothing here touches them.
+  build-win7:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 3.8 is the last Python that starts on Windows 7, and x86 because
+          # a 64-bit payload there fails with CreateProcess code 216. Both
+          # halves are load-bearing; build.ps1 re-checks them before freezing.
+          python-version: "3.8"
+          architecture: x86
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      # Run here rather than leaving it to build.ps1, which skips tests under
+      # CI. This is the only thing that proves the 3.8 backport still holds,
+      # and no other job exercises that interpreter.
+      - name: Run the tests on Python 3.8
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -c installer/constraints-win7.txt -e ".[dev,windows]"
+          python -m pytest -q
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          # -SkipOcr: the Tesseract on this runner is 64-bit and cannot be
+          # launched from a 32-bit install on a 32-bit Windows. Scanned pages
+          # are held for a clerk there, which is what they get today anyway.
+          .\installer\build.ps1 -Python 'python' -Target 'win7-x86' -SkipOcr `
+            -ISCC 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' 2>&1 |
+            Tee-Object -FilePath build-win7.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-win7
+          path: build-win7.log
+
+      - name: Check the installer exists
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem 'installer\Output\*win7-x86.exe' -ErrorAction SilentlyContinue
+          if (-not $exe) { throw 'No Windows 7 installer was produced.' }
+          $exe | ForEach-Object { Write-Host ("{0} ({1:N1} MB)" -f $_.Name, ($_.Length / 1MB)) }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WhatsAppPrinter-Setup-win7
+          path: installer/Output/*win7-x86.exe
+          if-no-files-found: error
+          retention-days: 30
