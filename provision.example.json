@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "Copy this to provision.json, fill it in, and put it in the same folder as",
+    "WhatsAppPrinter-Setup.exe. Setup copies it to C:\\ProgramData\\WAPrinter and",
+    "the agent applies it on first start, then deletes it.",
+    "",
+    "It holds the access token in plain text. Keep it on a USB stick or a share",
+    "you control, and never commit it -- this repository is public.",
+    "",
+    "Every key is optional; anything left out keeps its existing value.",
+    "To reconfigure a machine that is already running: waprinter provision FILE"
+  ],
+
+  "access_token": "EAAG...",
+  "phone_number_id": "123456789012345",
+
+  "send_mode": "api",
+  "dry_run": false,
+  "default_template": "chit_receipt",
+  "business_name": "Srinidhi Chit Funds",
+  "document_noun": "Receipt",
+  "own_numbers": ["8782251999"],
+
+  "keep_printed_pdfs": true,
+  "pdf_folder": "D:\\Receipts",
+
+  "branch_name": "Karimnagar",
+  "device_name": "Counter 1"
+}

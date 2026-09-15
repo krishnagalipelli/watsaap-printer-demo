@@ -125,6 +125,27 @@ class Settings:
     # that on a counter PC already known to have a broken IPv6 route.
     force_ipv4: bool = False
     default_template: str = "chit_receipt"
+    # Which approved template each kind of paperwork goes out under. The chit
+    # fund prints removal notices and removal letters through the same queue as
+    # receipts, and they are different documents to different people saying
+    # different things -- a member sent the receipt wording over a removal
+    # notice is worse than one sent nothing. A kind with no entry here, and
+    # anything the profile does not recognise, uses default_template.
+    document_templates: dict[str, str] = field(
+        default_factory=lambda: {
+            "removal_notice": "removal_notice",
+            "removal_letter": "removal_letter",
+        }
+    )
+    # What each kind of paperwork is called on the customer's phone. The
+    # member reads the filename before they open anything, so a removal notice
+    # must not arrive as "Receipt-RN317-26.pdf". Falls back to document_noun.
+    document_nouns: dict[str, str] = field(
+        default_factory=lambda: {
+            "removal_notice": "Removal Notice",
+            "removal_letter": "Removal Letter",
+        }
+    )
     template_language: str = "en"
     # Maps a template body variable -> extracted field name. Positional
     # templates key on the position ({{1}}); named ones key on the variable
@@ -140,6 +161,11 @@ class Settings:
             "5": "total_amount",
             "6": "payment_mode",
             "receipt_no": "invoice_number",
+            # The removal notice and removal letter templates. Their bodies
+            # name the same two fields differently, which is exactly what this
+            # map is for.
+            "notice_no": "invoice_number",
+            "letter_no": "invoice_number",
             "date": "invoice_date",
             # The amount in words, not figures. A chit receipt prints the
             # figures five times over — dues, sub-totals, interest — and the
@@ -167,6 +193,18 @@ class Settings:
     # "Receipt-CR1747-26.pdf". The customer reads this before they open
     # anything, so a chit fund must not be sending "Invoice-".
     document_noun: str = "Receipt"
+
+    # --- Keeping the printed receipts --------------------------------------
+    # Every PDF that comes off the printer is copied here, filed by date and
+    # named after the receipt, so the office has its own record without going
+    # near ProgramData. Blank means <data root>/archive, which is where they
+    # go if nobody chooses anything.
+    #
+    # A copy, not a move: the working file under inbox is what the queue reopens
+    # and what a held job is eventually sent from, and pointing that at a
+    # network drive or a USB stick would break sending the moment it went away.
+    pdf_folder: str = ""
+    keep_printed_pdfs: bool = True
 
     # --- Updates -----------------------------------------------------------
     # A static JSON file: {"version", "url", "sha256", "notes"}. No server of
@@ -196,7 +234,28 @@ class Settings:
         # Ignore unknown keys so a settings file from a newer build does not
         # crash an older service.
         known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        settings = cls(**{k: v for k, v in raw.items() if k in known})
+
+        # A variable added in a release has to reach a machine that already
+        # has a settings.json. Stored dicts replace the default wholesale, so
+        # the keys the removal templates need never arrived on an install that
+        # had printed anything -- and an unresolved variable does not fail,
+        # it sends as "-". A member reading "Notice No.: -" on a removal
+        # notice is the same silent breakage as the template that never
+        # reached an existing install, and as the database column before it.
+        #
+        # Only this map is merged. document_templates and document_nouns say
+        # which documents a branch actually sends, and an empty one is a real
+        # answer -- merging the defaults back would hand every client the chit
+        # fund's paperwork. This one is vocabulary: an entry for a template
+        # you do not use is inert, and a missing one is a broken message.
+        # Stored entries still win, so a remapped variable stays remapped.
+        if "template_variables" in raw:
+            merged = dict(cls().template_variables)
+            merged.update(settings.template_variables)
+            settings.template_variables = merged
+
+        return settings
 
     def save(self, path: Path | None = None) -> None:
         path = path or Paths(data_root()).settings

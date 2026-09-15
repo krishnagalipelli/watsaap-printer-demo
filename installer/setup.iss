@@ -14,7 +14,7 @@
 ;     in the user's own session instead.
 
 #define AppName        "WhatsApp Printer"
-#define AppVersion     "0.1.5"
+#define AppVersion     "0.1.6"
 #define AppPublisher   "Sunrise Software"
 #define DataDir        "C:\ProgramData\WAPrinter"
 
@@ -52,6 +52,15 @@ Source: "..\dist\waprinter-agent\*"; DestDir: "{app}"; \
 Source: "..\dist\cli\waprinter\*";   DestDir: "{app}\cli"; \
     Flags: ignoreversion recursesubdirs; Components: core
 Source: "provision.ps1";             DestDir: "{app}"; Flags: ignoreversion; Components: core
+
+; Unattended configuration, if whoever is installing put a provision.json next
+; to the setup executable. "external" matters: the file is read from {src} at
+; install time rather than compiled into this installer, so the access token
+; travels on the engineer's own USB stick or share and never inside a binary
+; published on GitHub Releases. The agent reads it on first start, seals the
+; token with DPAPI and deletes it.
+Source: "{src}\provision.json";       DestDir: "{#DataDir}"; \
+    Flags: external ignoreversion skipifsourcedoesntexist; Components: core
 Source: "..\README.md";              DestDir: "{app}"; Flags: ignoreversion isreadme; Components: core
 
 ; Tesseract, for invoices that print as an image rather than as text.

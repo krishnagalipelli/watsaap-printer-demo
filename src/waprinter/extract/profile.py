@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 # --- built-in defaults ------------------------------------------------------
@@ -111,6 +111,62 @@ PAYMENT_MODES = [
 NOT_A_NAME_PREFIXES = [
     "gstin", "gst", "pan", "state", "address", "phone", "mobile", "mob",
     "contact", "email", "place of supply", "code", "ph",
+    # Stationery wording on a removal notice, printed between the "To,"
+    # heading and the member's own name. Without these the notice greets
+    # them "Dear Dear Sir/ Madam,".
+    "dear", "under certificate", "regd", "notice of",
+]
+
+
+@dataclass
+class DocumentKind:
+    """One kind of paperwork, recognised by what is printed at the top of it.
+
+    A chit fund prints more than receipts. The same queue carries removal
+    notices and removal letters, which are different documents to different
+    people saying different things, and each has its own approved template.
+    Sending a member the receipt wording over a removal notice would be worse
+    than sending nothing.
+
+    `match` is the phrase that identifies the document -- the title, which is
+    the one thing these layouts do not share. `customer_anchors` overrides the
+    profile's own list for this kind only, because a receipt says "Received
+    from" and a removal notice says "To,".
+    """
+
+    name: str
+    match: list[str] = field(default_factory=list)
+    customer_anchors: list[str] = field(default_factory=list)
+
+
+# Recognised in order, so put the specific before the general. A document
+# matching nothing here is read exactly as it always was.
+DOCUMENT_KINDS = [
+    DocumentKind(
+        name="receipt",
+        # The pre-printed stationery wording. The client's software prints
+        # only the filled-in fields, so on a PDF straight off the printer this
+        # is absent and a receipt matches nothing -- which is correct, and is
+        # what it has always done. It is on the paper, though, so a *scan* of
+        # one carries it, and that is exactly where a positive identification
+        # is needed: without it, a removal notice whose title OCR could not
+        # read is indistinguishable from a receipt, and takes the receipt
+        # template by default.
+        match=["received from", "an amount of rupees"],
+        # No anchor override -- a receipt is read the way it always was.
+    ),
+    DocumentKind(
+        name="removal_notice",
+        match=["removal notice"],
+        # "To," heads the address block. "Dear Sir/ Madam," follows it and is
+        # not a name, and the paragraph after that begins "We Regret...".
+        customer_anchors=["to,"],
+    ),
+    DocumentKind(
+        name="removal_letter",
+        match=["removal letter", "notice of membership removal"],
+        customer_anchors=["to :", "to:"],
+    ),
 ]
 
 
@@ -125,6 +181,9 @@ class DocumentProfile:
     )
     customer_anchors: list[str] = field(
         default_factory=lambda: list(CUSTOMER_ANCHORS)
+    )
+    document_kinds: list[DocumentKind] = field(
+        default_factory=lambda: [DocumentKind(**asdict(k)) for k in DOCUMENT_KINDS]
     )
     document_number_labels: list[str] = field(
         default_factory=lambda: list(DOCUMENT_NUMBER_LABELS)
@@ -151,7 +210,33 @@ class DocumentProfile:
     # -- compiled forms, built once per profile ---------------------------
 
     def __post_init__(self) -> None:
+        # profile.json carries these as plain objects, and load() hands the
+        # dataclass whatever JSON held.
+        self.document_kinds = [
+            k if isinstance(k, DocumentKind) else DocumentKind(**k)
+            for k in self.document_kinds
+        ]
         self._compile()
+
+    def kind_of(self, text: str) -> DocumentKind | None:
+        """Which kind of paperwork this is, from the words printed on it."""
+        lowered = text.lower()
+        for kind in self.document_kinds:
+            if any(phrase.lower() in lowered for phrase in kind.match):
+                return kind
+        return None
+
+    def for_kind(self, kind: DocumentKind | None) -> "DocumentProfile":
+        """This profile as it applies to one kind of document.
+
+        Only the lists a kind actually overrides are replaced, so a removal
+        notice still reads dates, amounts and phone labels the same way
+        everything else does.
+        """
+        if kind is None or not kind.customer_anchors:
+            return self
+        clone = replace(self, customer_anchors=list(kind.customer_anchors))
+        return clone
 
     def _compile(self) -> None:
         # A label only counts when it sits immediately before the value, which
@@ -168,8 +253,12 @@ class DocumentProfile:
             rf"[:\-–]?\s*$",
             re.IGNORECASE,
         )
+        # (?!\w) rather than \b, because an anchor may end in punctuation
+        # ("To,"). Without it "subscriber" matched inside "...list of
+        # subscribers in terms of the provisions of the Chit Fund Act", and a
+        # removal notice greeted the member with that sentence.
         self.customer_anchor_re = re.compile(
-            rf"\b(?:{_alt(self.customer_anchors)})", re.IGNORECASE
+            rf"\b(?:{_alt(self.customer_anchors)})(?!\w)", re.IGNORECASE
         )
         # A colon or dash is required between label and value, which is what
         # keeps "Invoice Date: 12/05/2026" from reading as an invoice number.

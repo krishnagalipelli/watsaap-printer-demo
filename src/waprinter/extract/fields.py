@@ -307,13 +307,31 @@ def extract_fields(
             ocr_error=doc.ocr_error,
         )
 
+    # What kind of paperwork this is decides how the rest of it is read: a
+    # removal notice heads its address block "To,", not "Received from".
+    kind = profile.kind_of(" ".join(row.text for row in doc.rows))
+    profile = profile.for_kind(kind)
+
     candidates = find_candidates(doc, excluded_numbers, country_code, profile)
     words = _amount_words(doc, profile)
 
     # Only pay for the verification pass when OCR actually produced a number.
+    kind_verified = True
     if ocr and any(c.from_ocr for c in candidates):
         verification = pdf_text.read(pdf_path, ocr=ocr, ocr_dpi=ocr.verify_dpi)
         apply_ocr_verification(candidates, scan_numbers(verification, country_code))
+        # The title gets the same treatment as the number, and for a stronger
+        # reason. A misread number sends the right words to the wrong person,
+        # which the recipient can see is not for them. A misread title sends
+        # the wrong words to the right person -- a member who is being removed
+        # thanked for a payment -- and nothing about it looks wrong until they
+        # read it. The second pass runs at a higher resolution, so the common
+        # failure is a title the first read missed entirely and the second one
+        # found: that shows up here as a disagreement and is held.
+        second = profile.kind_of(" ".join(row.text for row in verification.rows))
+        kind_verified = (second.name if second else None) == (
+            kind.name if kind else None
+        )
 
     return ExtractedFields(
         candidates=candidates,
@@ -323,6 +341,8 @@ def extract_fields(
         total_amount=_total_amount(doc, profile) or amount_from_words(words or ""),
         amount_words=words,
         payment_mode=_payment_mode(doc, profile),
+        document_kind=kind.name if kind else None,
+        document_kind_verified=kind_verified,
         page_count=doc.page_count,
         has_text_layer=doc.has_text_layer,
         used_ocr=doc.used_ocr,

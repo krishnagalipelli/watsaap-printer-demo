@@ -148,9 +148,28 @@ class TestAutomaticHolds:
     def test_a_scanned_page_can_be_sent_once_ocr_is_trusted(
         self, pipeline, make_invoice
     ):
+        """One message configured, so there is no other message to get wrong."""
         pipeline.settings.ocr_silent_send = True
+        pipeline.settings.document_templates = {}
         job = run(pipeline, make_invoice, InvoiceSpec(raster=True))
         assert job.status is JobStatus.DRY_RUN
+
+    def test_an_unidentifiable_scan_is_held_where_other_messages_exist(
+        self, pipeline, make_invoice
+    ):
+        """Trusting OCR with a number is not trusting it with the document.
+
+        This install also sends removal notices. A scan whose title could not
+        be read falls back to default_template, and "thank you for your
+        payment" over a removal notice is worse than sending nothing -- so the
+        fallback is not taken silently, however much the number is trusted.
+        """
+        pipeline.settings.ocr_silent_send = True
+        job = run(pipeline, make_invoice, InvoiceSpec(raster=True))
+
+        assert job.status is JobStatus.HELD
+        assert "could not be identified" in job.hold_reason
+        assert job.recipient == "+919876543210"
 
     def test_a_scanned_page_is_held_when_ocr_is_switched_off(
         self, pipeline, make_invoice

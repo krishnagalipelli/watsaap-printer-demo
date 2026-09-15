@@ -95,6 +95,15 @@ def link_pipeline(pipeline):
         "4": "invoice_date",
         "5": "total_amount",
         "6": "payment_mode",
+        # The named keys the shipped default also carries. chit_receipt is
+        # positional, but the removal notice and letter that print through the
+        # same queue are not, and a fixture missing these renders their number
+        # and date as "-" while the real install is fine.
+        "receipt_no": "invoice_number",
+        "notice_no": "invoice_number",
+        "letter_no": "invoice_number",
+        "date": "invoice_date",
+        "amount": "amount_words",
     }
     return pipeline
 

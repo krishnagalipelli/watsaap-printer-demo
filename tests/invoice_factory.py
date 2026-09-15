@@ -90,6 +90,9 @@ class ChitReceiptSpec:
     payment_mode: str = "Cash"
     instalment: str = "8"
 
+    raster: bool = False      # render as an image, i.e. no text layer
+    raster_dpi: int = 110     # the resolution the OCR tests found readable
+
 
 def build_chit_receipt(spec: ChitReceiptSpec, out_path: Path) -> Path:
     doc = fitz.open()
@@ -149,10 +152,7 @@ def build_chit_receipt(spec: ChitReceiptSpec, out_path: Path) -> Path:
 
     text(LEFT, A4.height - 60, f"For {spec.company}")
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(out_path)
-    doc.close()
-    return out_path
+    return _save(doc, page, out_path, spec.raster, spec.raster_dpi)
 
 
 def build(spec: InvoiceSpec, out_path: Path) -> Path:
@@ -250,11 +250,19 @@ def build(spec: InvoiceSpec, out_path: Path) -> Path:
         )
     text(LEFT, footer_y + 14, "This is a computer generated invoice.")
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    return _save(doc, page, out_path, spec.raster, spec.raster_dpi)
 
-    if spec.raster:
-        # Flatten to an image so there is no text layer at all.
-        pix = page.get_pixmap(dpi=spec.raster_dpi)
+
+def _save(doc, page, out_path: Path, raster: bool, raster_dpi: int) -> Path:
+    """Write the document, flattened to an image when a scan is wanted.
+
+    Rasterising removes the text layer entirely, which is what a page arriving
+    from a scanner or a fax-to-PDF looks like: the only way back to the words
+    is OCR, including back to the title that says what the document is.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if raster:
+        pix = page.get_pixmap(dpi=raster_dpi)
         flat = fitz.open()
         img_page = flat.new_page(width=A4.width, height=A4.height)
         img_page.insert_image(A4, pixmap=pix)
@@ -262,6 +270,166 @@ def build(spec: InvoiceSpec, out_path: Path) -> Path:
         flat.close()
     else:
         doc.save(out_path)
-
     doc.close()
     return out_path
+
+
+@dataclass
+class RemovalNoticeSpec:
+    """A chit fund removal notice — the letter before removal.
+
+    Mirrors the layout of a real Srinidhi notice: the title is the only thing
+    that distinguishes it from a receipt, the address block is headed "To,"
+    rather than "Received from", the number is labelled only "No:", and the
+    body prose contains the word "subscribers", which used to be picked up as
+    a customer anchor and greeted the member with half a sentence of the Chit
+    Fund Act.
+
+    The data is invented. Real notices carry a member's name, mobile and the
+    amount they are behind on, none of which belongs in a repo.
+    """
+
+    company: str = "SRINIDHI CHITS (HYDERABAD) PVT. LTD."
+    address: str = "BUS STAND ROAD,KARIMNAGAR,Telangana,505001.  PH : 08782251999"
+    title: str = "Removal Notice"
+
+    notice_number: str = "RN317/26"
+    notice_date: str = "08-Sep-2026"
+
+    member_name: str = "Mr RAGHAVA RAO"
+    member_phone: str | None = "9000012345"
+    chit_number: str = "SKT02M    -8"
+
+    raster: bool = False
+    raster_dpi: int = 110
+
+
+@dataclass
+class RemovalLetterSpec:
+    """A chit fund removal letter — the confirmation after removal.
+
+    The name sits inside an address block under a "To :" heading rather than
+    beside a label, which is why this kind carries its own anchor.
+    """
+
+    company: str = "SRINIDHI CHITS (HYDERABAD) PVT. LTD."
+    address: str = "H.No. 2-7-384, 2ND FLOOR, KARIMNAGAR, Telangana, Phone : 08782251999"
+    title: str = "Removal Letter"
+
+    letter_number: str = "RL151/26"
+    letter_date: str = "08/09/2026"
+
+    member_name: str = "SUNITHA REDDY"
+    member_phone: str | None = "9000067890"
+    village: str = "Vill. Chikatimamidi"
+    district: str = "Nalgonda District"
+
+    raster: bool = False
+    raster_dpi: int = 110
+
+
+def build_removal_notice(spec: RemovalNoticeSpec, out_path: Path) -> Path:
+    doc = fitz.open()
+    page = doc.new_page(width=A4.width, height=A4.height)
+
+    def text(x: float, y: float, s: str, size: int = 9, bold: bool = False) -> None:
+        page.insert_text((x, y), s, fontsize=size, fontname="hebo" if bold else "helv")
+
+    text(LEFT, 40, spec.company, size=12, bold=True)
+    text(LEFT, 56, spec.address)
+    text(240, 78, spec.title, size=12, bold=True)
+
+    text(RIGHT_COL, 100, "No: ")
+    text(RIGHT_COL + 30, 100, spec.notice_number, bold=True)
+    text(RIGHT_COL, 116, "Date:")
+    text(RIGHT_COL + 30, 116, spec.notice_date)
+
+    # The address block. "To," heads it; the salutation sits between the
+    # heading and the name, exactly as the client's stationery prints it.
+    text(LEFT, 140, "To, ")
+    text(LEFT, 156, "Dear Sir/ Madam, ")
+    text(LEFT, 172, spec.member_name)
+    text(LEFT, 188, "Under Certificate of Posting")
+    if spec.member_phone:
+        text(RIGHT_COL, 172, "Mobile :")
+        text(RIGHT_COL + 45, 172, spec.member_phone)
+
+    text(LEFT, 220, f"Ref: Your Chit No.   {spec.chit_number} Value  2,000,000.00")
+
+    body = (
+        "We Regret that you have ignored our intimation cards requesting you to "
+        "make the payments overdue in",
+        "respect of your Chit. This leaves us with no alternative but to make "
+        "this final request for your",
+        "immediate payment of the following instalments.:-",
+    )
+    y = 250
+    for line in body:
+        text(LEFT, y, line)
+        y += 14
+
+    y += 30
+    for month, due, dividend in (
+        ("42-JUL 26", "39,400.00", "600.00"),
+        ("43-AUG 26", "39,600.00", "400.00"),
+    ):
+        text(LEFT, y, month)
+        text(LEFT + 120, y, due)
+        text(LEFT + 220, y, dividend)
+        y += 16
+    text(LEFT, y + 16, "Total ")
+    text(LEFT + 120, y + 16, "123,700.00")
+
+    # The sentence that used to be mistaken for the member's name.
+    text(
+        LEFT,
+        y + 50,
+        "failing which your name will be removed from the list of subscribers in "
+        "terms of the provisions of",
+    )
+    text(LEFT, y + 64, "the The Chit fund Act, 1982")
+    text(LEFT, A4.height - 60, f"For {spec.company}")
+
+    return _save(doc, page, out_path, spec.raster, spec.raster_dpi)
+
+
+def build_removal_letter(spec: RemovalLetterSpec, out_path: Path) -> Path:
+    doc = fitz.open()
+    page = doc.new_page(width=A4.width, height=A4.height)
+
+    def text(x: float, y: float, s: str, size: int = 9, bold: bool = False) -> None:
+        page.insert_text((x, y), s, fontsize=size, fontname="hebo" if bold else "helv")
+
+    text(LEFT, 40, spec.company, size=12, bold=True)
+    text(LEFT, 56, spec.address)
+    text(240, 78, spec.title, size=12, bold=True)
+
+    text(RIGHT_COL, 100, "No: ")
+    text(RIGHT_COL + 30, 100, spec.letter_number, bold=True)
+    text(RIGHT_COL, 116, "Date :")
+    text(RIGHT_COL + 30, 116, spec.letter_date)
+
+    # "To :" heads an address block; the name is its first line.
+    text(LEFT, 140, "To :")
+    text(LEFT, 158, spec.member_name)
+    text(LEFT, 172, "H.No.")
+    text(LEFT, 186, spec.village)
+    text(LEFT, 200, spec.district)
+    if spec.member_phone:
+        text(RIGHT_COL, 158, "Mobile :")
+        text(RIGHT_COL + 45, 158, spec.member_phone)
+
+    text(LEFT, 240, "Notice of Membership Removal Under the ")
+    text(LEFT, 254, "The Chit Fund Act, 1982")
+    text(
+        LEFT,
+        280,
+        "As you have not paid the arrears inspite of the notice sent to you, we "
+        "were constrained to",
+    )
+    text(LEFT, 294, "remove you from membership.")
+    text(LEFT, 330, "Net  amount  due  to  you ")
+    text(LEFT + 200, 330, "1,772,231")
+    text(LEFT, A4.height - 60, f"For {spec.company}")
+
+    return _save(doc, page, out_path, spec.raster, spec.raster_dpi)

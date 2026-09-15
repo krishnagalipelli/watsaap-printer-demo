@@ -84,6 +84,27 @@ into something that passes every mobile test otherwise. Only a single
 high-confidence candidate is sent to automatically; everything else waits in the
 queue.
 
+### A print job is not always one receipt
+
+The counter prints a run of receipts as a single job: one PDF, a different
+subscriber on every page. That has to become one job per subscriber, and not
+only because a batch would otherwise sit in the queue forever — two subscribers
+means two numbers scoring above the send threshold, and the gate is right to
+refuse to choose. The real reason is the attachment. The send path uploads the
+job's PDF whole, so resolving the hold by picking one of the offered numbers
+would post that subscriber a document carrying everyone else's name, mobile and
+amount paid.
+
+The boundary is **a change of document number, not a page break**. A receipt
+that runs onto a second page keeps it, because the continuation carries no
+number of its own. A subscriber copy followed by an office copy of the same
+receipt stays one job, because the number on both is the same. Only a page
+naming a *different* document starts a new one.
+
+Splitting reads the page without OCR: a scanned batch would have to be rendered
+twice over, and a scan is held for a person anyway. A document that cannot be
+split at all is processed whole rather than dropped.
+
 ### Scanned documents
 
 Pages with no text layer go through Tesseract via PyMuPDF, which returns words in
@@ -101,7 +122,122 @@ held. Measured against deliberately poor scans:
 `ocr_silent_send` is off by default, so even a double-confirmed OCR number waits
 for a person.
 
+**The title is read twice as well, for a stronger reason than the number.** A
+misread number sends the right words to the wrong person, who can see the
+message was not meant for them. A misread title sends the wrong words to the
+right person — a member being removed, thanked for a payment — and nothing
+about it looks wrong. So the two passes must agree on what the document is,
+and a disagreement is held whatever `ocr_silent_send` says.
+
+Agreeing on *nothing*, though, is not agreement. Two passes that both failed to
+find a title say only that neither could read one, and an unrecognised document
+falls back to `default_template` — the receipt. That fallback is right on an
+install that only sends receipts, and on one that also sends removal notices it
+is exactly how a notice goes out thanking someone for a payment. So where
+`document_templates` maps anything, an unidentified scan is held rather than
+assumed. Receipts are recognised positively for this: the chit fund's own
+software prints only the filled-in fields, so `Received from` never reaches the
+PDF's text layer — but it is printed on the paper, so a *scan* of a receipt
+carries it, which is precisely where the positive identification is needed.
+
 ---
+
+## More than one kind of paperwork
+
+The same queue carries chit receipts, **removal notices** and **removal
+letters**. They are different documents, to different people, saying different
+things — one warns a member they are about to be removed, the other confirms
+they have been — so each goes out under its own approved template. A member
+sent "Thank you for your payment" over a removal notice would be worse off
+than one sent nothing at all.
+
+The kind is read from the title, which is the one thing these layouts do not
+share, and it decides three things:
+
+| | Receipt | Removal notice | Removal letter |
+|---|---|---|---|
+| Template | `chit_receipt` | `removal_notice` | `removal_letter` |
+| Attached as | `Receipt-CR1747-26.pdf` | `Removal Notice-RN317-26.pdf` | `Removal Letter-RL151-26.pdf` |
+| Name read from | `Received from` | `To,` | `To :` |
+
+The filename matters as much as the wording: the member reads it before they
+open anything, which is why a notice must not arrive called `Receipt-`.
+
+Each kind is a `DocumentKind` in [`extract/profile.py`](src/waprinter/extract/profile.py)
+— a title phrase and whatever anchors that layout needs — so a fourth document
+is configuration, not a release. Anything the profile does not recognise is
+read exactly as it always was and uses `default_template`, which is every
+receipt.
+
+Two things that layout taught us, both now regression-tested. `subscriber` is
+a customer anchor, and it matched inside *"...removed from the list of
+subscribers in terms of the provisions of the Chit Fund Act"*, so a notice
+greeted the member with that sentence. And `Dear Sir/ Madam,` is printed
+between the `To,` heading and the member's own name, which greeted them
+`Dear Dear Sir/ Madam,`.
+
+## Keeping the printed receipts
+
+The office needs its own record of what it printed, and for a while there was
+none worth having: captured PDFs stayed in `inbox` under the name capture gave
+them — `20260907-113601-fee7f6b4.pdf` — flat, forever, inside ProgramData. Not
+a folder anyone browses and not a name anyone can search.
+
+Every processed receipt is now copied into a folder the operator picks on the
+Settings tab, filed by the date it was printed and named after itself:
+
+```
+D:\Receipts\2026-09-07\CHQ6511-26 SHAHNAVAZDANISH MOHAMMAD.pdf
+```
+
+A **copy**, not a move. The file under `inbox` is what the queue reopens, what
+"View PDF" shows and what a held receipt is eventually sent from; if that
+pointed at a share that went offline, sending would break with it. Filing is
+also wrapped so it can never fail a print — a receipt that reached the customer
+but not the folder is a nuisance, the other way round is a lost receipt.
+
+Which is also why `waprinter doctor` reports the folder and tries to write to
+it. A drive letter that stopped being mapped loses copies quietly, exactly
+because filing is not allowed to complain loudly.
+
+## Installing 20+ machines
+
+Put `provision.json` next to `WhatsAppPrinter-Setup.exe`, run setup, walk away.
+Setup copies the file into `C:\ProgramData\WAPrinter`; the agent reads it on
+first start, seals the token with DPAPI, writes the rest into settings and
+deletes the file. Nothing is typed at the counter.
+
+```json
+{ "access_token":    "EAAG...",
+  "phone_number_id": "123456789012345",
+  "send_mode":       "api",
+  "dry_run":         false,
+  "pdf_folder":      "D:\\Receipts",
+  "branch_name":     "Karimnagar" }
+```
+
+Every key is optional and anything left out keeps its current value, so the
+same mechanism reconfigures a machine that is already running — a rotated
+token, a new template, a different receipts folder — pushed over AnyDesk with:
+
+```
+waprinter provision \\share\it\provision.json
+```
+
+See [`provision.example.json`](provision.example.json) for the full set.
+
+**The token is not compiled into the build, and must not be.** This repository
+is public and the installer is published on GitHub Releases, so a token in the
+source is a token on the internet: frozen Python unpacks with `strings`, GitHub
+and Meta both scan for the pattern and revoke, and until they do, anyone can
+send as the business. The number that would be suspended is the client's main
+line — the risk that ruled out Baileys in the first place. So the secret
+travels beside the installer on media the engineer controls, and Inno Setup
+copies it with `external` rather than compiling it in.
+
+A file that cannot be parsed is left in place and reported rather than silently
+deleted, because it still holds the token; one that is applied is overwritten
+before it is unlinked.
 
 ## Updating 20+ machines
 
@@ -119,6 +255,10 @@ Two triggers:
 
 Guard rails: the download is SHA-256 verified against the manifest before it is
 executed, and an update never installs while a document is being processed.
+The database is brought up to the current shape when it is opened, because
+`CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists — a
+column added in a release once never reached a single installed machine, and
+every print failed on the missing column the next morning.
 
 ```json
 { "version": "1.1.0",
@@ -174,6 +314,9 @@ to `logs/dry_run.jsonl`, but nothing is sent.
 | [`ui/notification.py`](src/waprinter/ui/notification.py) | The corner panel after a print |
 | [`update.py`](src/waprinter/update.py) | Version check, verified download, silent install |
 | [`capture/watcher.py`](src/waprinter/capture/watcher.py) | Drains the spool folder; waits for `%%EOF` before claiming a file |
+| [`extract/split.py`](src/waprinter/extract/split.py) | Splits a batch print into one job per receipt |
+| [`archive.py`](src/waprinter/archive.py) | Files a copy of every printed receipt where the office can find it |
+| [`provision.py`](src/waprinter/provision.py) | Configures an install from one file, then deletes it |
 | [`extract/profile.py`](src/waprinter/extract/profile.py) | Per-client document vocabulary |
 | [`extract/phone.py`](src/waprinter/extract/phone.py) | Number parsing and scoring, shared by the page reader and typed input |
 | [`extract/ocr.py`](src/waprinter/extract/ocr.py) | Tesseract discovery and page OCR |
@@ -194,7 +337,5 @@ to `logs/dry_run.jsonl`, but nothing is sent.
   retries are manual from the queue.
 - **Code signing** — every client install currently shows "Windows protected
   your PC".
-- **A provisioning file** — so 20+ installs are configured from one file rather
-  than typed in per machine.
 - **Amount extraction for chit receipts** — several competing figures on the page
   and no "Total" label, so it is deliberately left blank rather than guessed.

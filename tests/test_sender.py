@@ -639,3 +639,151 @@ class TestReloadingWhatTheCliWrote:
 
     def test_an_unchanged_pair_of_files_is_not_reloaded(self, pipeline):
         assert pipeline.reload_if_changed() is False
+
+
+class TestTheBusinessNameIsNotInTheSource:
+    """Whose name the built-in messages go out under.
+
+    One client's registered name typed into the template bodies is how a
+    second client ends up sending removal notices signed by the first. The
+    wording belongs to the product; the name in it belongs to whoever bought
+    it, so it comes from Settings.business_name.
+    """
+
+    def test_the_built_in_messages_carry_this_install_s_name(self, tmp_path):
+        from waprinter.send.templates import TemplateStore
+
+        store = TemplateStore(tmp_path / "t.json", business_name="Acme Chits Pvt Ltd")
+
+        for name in ("removal_notice", "removal_letter"):
+            body = store.get(name).body
+            assert "Acme Chits Pvt Ltd" in body
+            assert "Srinidhi" not in body
+
+    def test_the_receipt_footer_too(self, tmp_path):
+        from waprinter.send.templates import TemplateStore
+
+        store = TemplateStore(tmp_path / "t.json", business_name="Acme Chits Pvt Ltd")
+
+        assert store.get("chit_receipt").footer == "Regards,\nAcme Chits Pvt Ltd"
+
+    def test_no_client_name_is_left_in_the_module(self):
+        """The source itself, not just one rendering of it."""
+        import inspect
+
+        from waprinter.send import templates
+
+        source = inspect.getsource(templates)
+        bodies = [
+            line
+            for line in source.splitlines()
+            # Comments and docstrings explain why the slot exists; only string
+            # content that ships in a message matters here.
+            if "Srinidhi" in line and not line.lstrip().startswith("#")
+        ]
+        assert bodies == [], bodies
+
+    def test_substitution_does_not_disturb_meta_s_placeholders(self, tmp_path):
+        """The slot is filled by replace, never by str.format.
+
+        Formatting a body would turn "{{customer_name}}" into
+        "{customer_name}" -- one brace, no longer a Meta placeholder -- and the
+        send would go out with the literal text and no parameters at all.
+        """
+        from waprinter.send.templates import TemplateStore
+
+        store = TemplateStore(tmp_path / "t.json", business_name="Acme")
+        notice = store.get("removal_notice")
+
+        assert notice.placeholders == ["customer_name", "notice_no", "date"]
+        assert "{{customer_name}}" in notice.body
+
+
+# The bodies Meta actually approved, pasted from the WhatsApp Manager. The
+# company name here is static text in Meta's own template -- it is not a
+# variable and no parameter carries it -- so the built-in copy has to
+# reproduce it exactly or the operator's preview describes a message that was
+# never sent. Only the {{...}} tokens travel with a send.
+META_REMOVAL_NOTICE = """Dear {{customer_name}},
+
+This is to inform you that a Removal Notice has been issued by Srinidhi Chits (HYD) PVT LTD.
+Please find your removal notice attached as a PDF for your reference.
+
+Notice No.: {{notice_no}}
+Date: {{date}}
+
+Kindly review the attached document for further details.
+
+Regards,
+Srinidhi Chits (HYD) PVT LTD."""
+
+META_REMOVAL_LETTER = """Dear {{customer_name}},
+
+This is to inform you that a Removal Letter has been issued by Srinidhi Chits (HYD) PVT LTD.
+Please find your removal letter attached as a PDF.
+
+Letter No.: {{letter_no}}
+Date: {{date}}
+
+Kindly review the attached document for further details.
+
+Thank you for your service with Srinidhi Chits (HYD) PVT LTD."""
+
+# Without the full stop: the templates supply the one that ends the sentence,
+# so a name carrying its own would render "PVT LTD..".
+REGISTERED_NAME = "Srinidhi Chits (HYD) PVT LTD"
+
+
+class TestTheBuiltInBodiesMatchWhatMetaApproved:
+    """A machine with no templates.json sends from the built-in copies.
+
+    That is not a hypothetical fallback -- it is the state of a fresh install,
+    which is every branch until someone runs `waprinter templates --sync`. A
+    built-in body that has drifted from the approved one does not change what
+    the member receives, because only the parameters travel. It changes what
+    the operator is shown before they press send, which is worse: the app
+    would be describing a message nobody sent.
+    """
+
+    @pytest.mark.parametrize(
+        "name, approved",
+        [
+            ("removal_notice", META_REMOVAL_NOTICE),
+            ("removal_letter", META_REMOVAL_LETTER),
+        ],
+    )
+    def test_the_body_is_reproduced_character_for_character(
+        self, tmp_path, name, approved
+    ):
+        from waprinter.send.templates import TemplateStore
+
+        store = TemplateStore(tmp_path / "t.json", business_name=REGISTERED_NAME)
+
+        assert store.get(name).body == approved
+
+    @pytest.mark.parametrize(
+        "name, approved",
+        [
+            ("removal_notice", META_REMOVAL_NOTICE),
+            ("removal_letter", META_REMOVAL_LETTER),
+        ],
+    )
+    def test_the_variables_are_the_ones_meta_expects(self, tmp_path, name, approved):
+        """A body carrying a variable Meta's template has no slot for is
+        rejected outright, and one short of a slot sends "-"."""
+        import re
+
+        from waprinter.send.templates import TemplateStore
+
+        store = TemplateStore(tmp_path / "t.json", business_name=REGISTERED_NAME)
+
+        assert store.get(name).placeholders == re.findall(r"\{\{(\w+)\}\}", approved)
+
+    def test_a_name_that_brings_its_own_full_stop_is_visible_here(self, tmp_path):
+        """Guards the one sharp edge in the slot: the templates end the
+        sentence themselves, so `business_name` must not."""
+        from waprinter.send.templates import TemplateStore
+
+        store = TemplateStore(tmp_path / "t.json", business_name=REGISTERED_NAME + ".")
+
+        assert ".." in store.get("removal_notice").body

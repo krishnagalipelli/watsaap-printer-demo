@@ -139,6 +139,23 @@ def evaluate(
 
     winner = high[0]
 
+    # --- the two reads disagree about what this document even is ----------
+    # Checked before ocr_silent_send, and not governed by it: that setting is
+    # a judgement about trusting a *number* read off a scan. Which approved
+    # template the member is written to is a different question, and a wrong
+    # answer is worse -- a removal notice arriving as "Thank you for your
+    # payment" is worse for the member than no message at all.
+    if not fields.document_kind_verified:
+        kind = (fields.document_kind or "one kind of document").replace("_", " ")
+        return GateOutcome(
+            Decision.HOLD,
+            recipient=winner.e164,
+            confidence=winner.confidence,
+            reason=f"Reading this scan twice gave two different answers about "
+            f"what it is ({kind} on one pass, something else on the other), "
+            f"so it could go out under the wrong message. Check it first.",
+        )
+
     # --- OCR results are not trusted for a silent send by default ---------
     if winner.from_ocr and not settings.ocr_silent_send:
         return GateOutcome(
@@ -147,6 +164,28 @@ def evaluate(
             confidence=winner.confidence,
             reason=f"{winner.e164} was read by OCR from a scanned page. "
             f"Check it against the invoice before sending.",
+        )
+
+    # --- a scan nobody could identify is not a receipt by default ---------
+    # Only reached with ocr_silent_send on, i.e. where the operator has said
+    # OCR may send without them. That is a judgement about the number; it is
+    # not a licence to guess the document. An unrecognised document falls back
+    # to default_template, which is the receipt -- harmless on an install that
+    # has only the one message, and on an install that also sends removal
+    # notices it is how a member being removed gets thanked for a payment.
+    if (
+        fields.used_ocr
+        and fields.document_kind is None
+        and settings.document_templates
+    ):
+        others = ", ".join(sorted(settings.document_templates)).replace("_", " ")
+        return GateOutcome(
+            Decision.HOLD,
+            recipient=winner.e164,
+            confidence=winner.confidence,
+            reason=f"This scan could not be identified, and this printer also "
+            f"sends {others}. Confirm what it is before it goes out under the "
+            f"{settings.default_template.replace('_', ' ')} message.",
         )
 
     key = dedupe_key(fields, winner.e164)

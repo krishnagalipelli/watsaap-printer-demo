@@ -52,17 +52,18 @@ class Runner:
     def _handle(self, pdf_path: Path) -> None:
         """Process one captured PDF."""
         info = latest_job()  # empty off Windows, or if the log is disabled
-        job = self.pipeline.process(
+        jobs = self.pipeline.process_document(
             pdf_path,
             doc_title=info.document,
             windows_user=info.user,
         )
-        log.info(
-            "job %s -> %s (%s)",
-            job.id,
-            job.status,
-            job.recipient or job.hold_reason or "",
-        )
+        for job in jobs:
+            log.info(
+                "job %s -> %s (%s)",
+                job.id,
+                job.status,
+                job.recipient or job.hold_reason or "",
+            )
 
     def start(self) -> None:
         self._thread = threading.Thread(

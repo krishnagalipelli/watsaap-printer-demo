@@ -70,6 +70,17 @@ class ExtractedFields:
     # PDF's text layer at all.
     amount_words: str | None = None
     payment_mode: str | None = None
+    # Which kind of paperwork this is -- "removal_notice", "removal_letter",
+    # None for the ordinary receipt. Decides which approved template it goes
+    # out under, so a member is never sent the receipt wording over a notice.
+    document_kind: str | None = None
+    # Whether the kind above was actually confirmed. A page with a text layer
+    # is read once and read exactly, so it always is. A scan is OCR output
+    # like everything else on it, and only counts as confirmed when the second
+    # read at a different resolution says the same thing. An unconfirmed kind
+    # is held: it picks the approved template, so getting it wrong writes to
+    # the right member with the wrong words.
+    document_kind_verified: bool = True
     page_count: int = 0
     has_text_layer: bool = True   # False => the ERP printed a raster
     used_ocr: bool = False        # a raster page that OCR managed to read

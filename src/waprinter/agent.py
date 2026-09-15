@@ -64,18 +64,19 @@ class Agent:
         self._busy.set()
         try:
             info = latest_job()
-            job = self.pipeline.process(
+            jobs = self.pipeline.process_document(
                 pdf_path,
                 doc_title=info.document,
                 windows_user=info.user,
             )
-            log.info(
-                "job %s -> %s (%s)",
-                job.id,
-                job.status,
-                job.recipient or job.hold_reason or job.error or "",
-            )
-            self.window.submit(job.id)
+            for job in jobs:
+                log.info(
+                    "job %s -> %s (%s)",
+                    job.id,
+                    job.status,
+                    job.recipient or job.hold_reason or job.error or "",
+                )
+                self.window.submit(job.id, auto_open=len(jobs) == 1)
         finally:
             self._busy.clear()
 
@@ -233,6 +234,12 @@ def main(argv: list[str] | None = None) -> int:
         configure_logging(paths().logs)
         if "--selftest" in argv:
             return selftest()
+        # Before anything reads settings: a fresh install is configured from
+        # the provisioning file the installer carried, and then that file is
+        # deleted. Nothing is typed at the counter.
+        from .provision import apply_if_present
+
+        apply_if_present()
         # --hidden: started at logon, so do not steal focus with the window.
         hidden = "--hidden" in argv
         # An agent may already be running, hidden, from the logon entry. The

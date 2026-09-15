@@ -9,6 +9,7 @@ send, to whom, and why did we think that was right".
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -61,6 +62,29 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id, at);
 """
 
+log = logging.getLogger(__name__)
+
+
+def _columns_of(conn: sqlite3.Connection, table: str) -> dict[str, str]:
+    return {row[1]: row[2] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _schema_columns() -> dict[str, dict[str, str]]:
+    """The shape SCHEMA describes, read back from a throwaway database.
+
+    Derived rather than declared so there is nothing to keep in step: SCHEMA
+    stays the single description of the tables, and whatever it gains next is
+    migrated onto installed machines without anyone remembering to say so.
+    """
+    probe = sqlite3.connect(":memory:")
+    try:
+        probe.executescript(SCHEMA)
+        return {
+            table: _columns_of(probe, table) for table in ("jobs", "events")
+        }
+    finally:
+        probe.close()
+
 
 def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
@@ -103,6 +127,7 @@ def _fields_from_json(raw: str) -> ExtractedFields:
         total_amount=payload.get("total_amount"),
         amount_words=payload.get("amount_words"),
         payment_mode=payload.get("payment_mode"),
+        document_kind=payload.get("document_kind"),
         page_count=payload.get("page_count", 0),
         has_text_layer=payload.get("has_text_layer", True),
         used_ocr=payload.get("used_ocr", False),
@@ -118,7 +143,38 @@ class Store:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        self._add_missing_columns()
         self.conn.commit()
+
+    def _add_missing_columns(self) -> None:
+        """Bring a database created by an older build up to the current shape.
+
+        CREATE TABLE IF NOT EXISTS does nothing at all to a table that already
+        exists, so a column added in a later release never reached a machine
+        that had already printed something. `chat_url` was the one that bit:
+        every install predates it, the agent updates itself overnight, and the
+        next morning every print died in upsert() on "table jobs has no column
+        named chat_url" -- silently, because the agent is frozen --windowed.
+
+        Only additions are handled, which is all SQLite does cheaply and all
+        this schema has ever done. Indexes look after themselves: SCHEMA
+        creates those IF NOT EXISTS, which works on an existing table.
+        """
+        for table, expected in _schema_columns().items():
+            have = _columns_of(self.conn, table)
+            if not have:
+                continue  # the table itself is new; executescript just made it
+            for name, declared in expected.items():
+                if name in have:
+                    continue
+                # Every column added since the first release is a nullable
+                # TEXT, which ALTER TABLE can add to a populated table.
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {name} {declared}"
+                )
+                log.warning(
+                    "migrated %s: added missing column %s", table, name
+                )
 
     def close(self) -> None:
         self.conn.close()

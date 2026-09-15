@@ -53,7 +53,7 @@ def problems(settings: Settings, templates: "TemplateStore | None" = None) -> li
     if token_issue:
         found.append(token_issue)
 
-    templates = templates or TemplateStore(paths().templates)
+    templates = templates or TemplateStore(paths().templates, settings.business_name)
     template = templates.get(settings.default_template)
     if template is None:
         found.append(f"Message '{settings.default_template}' is not configured.")

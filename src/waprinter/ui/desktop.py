@@ -17,9 +17,11 @@ import queue
 import threading
 import tkinter as tk
 import webbrowser
-from tkinter import messagebox, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 from .. import __version__
+from ..archive import folder_for
 from ..models import JobStatus
 from . import viewmodel as vm
 from .notification import Notification
@@ -57,7 +59,8 @@ class DesktopWindow:
         # raise the window once, not stack ten raises behind each other.
         self._show_requested = threading.Event()
         self._notifications: list[Notification] = []
-        self._queue_rows: dict[str, tk.Widget] = {}
+        self._queue_rows: dict[str, ttk.Entry] = {}
+        self._queue_shown: tuple | None = None
 
         self.root = tk.Tk()
         self.root.title("WhatsApp Printer")
@@ -196,11 +199,48 @@ class DesktopWindow:
             justify="left",
         )
 
+    @staticmethod
+    def _queue_signature(jobs) -> tuple:
+        """Everything about the queue the operator can actually see.
+
+        If this has not changed there is nothing to redraw, and redrawing
+        anyway would destroy the number they are halfway through typing.
+        """
+        return tuple(
+            (j.id, str(j.status), j.recipient, j.hold_reason, j.error, j.chat_url)
+            for j in jobs
+        )
+
     def _render_queue(self) -> None:
+        jobs = self.pipeline.store.pending()
+        signature = self._queue_signature(jobs)
+
+        # refresh() runs on a two-second timer. Rebuilding these rows destroys
+        # the Entry the operator is typing a number into, which is the same
+        # hazard the settings form is spared below -- except here it silently
+        # ate the input. Redraw only when the visible state actually differs.
+        if signature == self._queue_shown:
+            return
+        self._queue_shown = signature
+
+        # A job arriving or leaving does force a rebuild, and the operator may
+        # be mid-number in one of the rows that survives it. Carry the typed
+        # text, the focus and the caret across.
+        drafts = {
+            job_id: entry.get()
+            for job_id, entry in self._queue_rows.items()
+            if entry.winfo_exists()
+        }
+        focused = self.root.focus_get()
+        focused_job = next(
+            (jid for jid, e in self._queue_rows.items() if e is focused), None
+        )
+        caret = focused.index("insert") if focused_job else None
+
         for child in self.queue_body.winfo_children():
             child.destroy()
+        self._queue_rows.clear()
 
-        jobs = self.pipeline.store.pending()
         if not jobs:
             ttk.Label(
                 self.queue_body,
@@ -212,9 +252,15 @@ class DesktopWindow:
             return
 
         for job in jobs:
-            self._queue_row(job)
+            self._queue_row(job, drafts.get(job.id))
 
-    def _queue_row(self, job) -> None:
+        if focused_job in self._queue_rows:
+            entry = self._queue_rows[focused_job]
+            entry.focus_set()
+            if caret is not None:
+                entry.icursor(caret)
+
+    def _queue_row(self, job, draft: str | None = None) -> None:
         box = ttk.LabelFrame(self.queue_body, text=vm.document_of(job), padding=10)
         box.pack(fill="x", pady=(0, 8))
 
@@ -227,8 +273,9 @@ class DesktopWindow:
         row = ttk.Frame(box)
         row.pack(fill="x")
         entry = ttk.Entry(row, width=22)
-        entry.insert(0, job.recipient or "")
+        entry.insert(0, draft if draft is not None else (job.recipient or ""))
         entry.pack(side="left")
+        self._queue_rows[job.id] = entry
         ttk.Button(
             row, text="Send", command=lambda j=job.id, e=entry: self.send_job(j, e.get())
         ).pack(side="left", padx=6)
@@ -308,6 +355,19 @@ class DesktopWindow:
                     "What your paperwork is called. Names the PDF on the "
                     "customer's phone: Receipt-CR1747-26.pdf.")
 
+        documents = ttk.LabelFrame(body, text="Documents", padding=12)
+        documents.pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            documents,
+            text="This printer carries more than one kind of paperwork, and a "
+                 "member sent the receipt wording over a removal notice is "
+                 "worse off than one sent nothing. Leave a row blank and that "
+                 "document uses the message above.",
+            style="Hint.TLabel", wraplength=560, justify="left",
+        ).pack(anchor="w", pady=(0, 8))
+        for kind in self.pipeline.profile.document_kinds:
+            self._document_row(documents, kind.name)
+
         sending = ttk.LabelFrame(body, text="Sending", padding=12)
         sending.pack(fill="x", pady=(0, 10))
         self._choice(
@@ -333,6 +393,20 @@ class DesktopWindow:
         self._check(scanned, "ocr_enabled", "Read documents printed as an image (OCR)")
         self._check(scanned, "ocr_silent_send",
                     "Send to numbers read by OCR without asking")
+
+        receipts = ttk.LabelFrame(body, text="Printed receipts", padding=12)
+        receipts.pack(fill="x", pady=(0, 10))
+        self._check(
+            receipts,
+            "keep_printed_pdfs",
+            "Keep a copy of every receipt that is printed",
+        )
+        self._folder(
+            receipts, "pdf_folder", "Keep them in",
+            "Filed by the date they were printed and named after the receipt: "
+            "2026-09-07\\CHQ6511-26 SHAHNAVAZDANISH MOHAMMAD.pdf. Leave blank "
+            "to keep them inside the program's own folder.",
+        )
 
         install = ttk.LabelFrame(body, text="This computer", padding=12)
         install.pack(fill="x", pady=(0, 10))
@@ -387,6 +461,82 @@ class DesktopWindow:
             ttk.Label(
                 parent, text=hint, style="Hint.TLabel", wraplength=560, justify="left"
             ).pack(anchor="w", padx=(184, 0))
+
+    def _document_row(self, parent, kind: str) -> None:
+        """One kind of paperwork: the message it goes out under, and what the
+        attached PDF is called.
+
+        Two boxes on one line rather than two rows, because they are one
+        decision -- a removal notice arriving called "Receipt-RN317-26.pdf" is
+        the same mistake as one worded as a receipt, and the member reads the
+        filename before they open anything.
+
+        The list comes from the profile, so a client who adds a fourth
+        document to profile.json gets a row for it without a new release.
+        """
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=3)
+        ttk.Label(
+            row, text=kind.replace("_", " ").capitalize(), width=24, anchor="e"
+        ).pack(side="left", padx=(0, 10))
+        template = tk.StringVar()
+        ttk.Entry(row, textvariable=template).pack(side="left", fill="x", expand=True)
+        ttk.Label(row, text="attached as").pack(side="left", padx=(8, 6))
+        noun = tk.StringVar()
+        ttk.Entry(row, textvariable=noun, width=16).pack(side="left")
+        self.fields[f"doc_template:{kind}"] = template
+        self.fields[f"doc_noun:{kind}"] = noun
+
+    def _folder(self, parent, name: str, label: str, hint: str) -> None:
+        """A path setting, with the two buttons that make it a folder setting.
+
+        Typing a path by hand is how you end up with receipts filed to a drive
+        letter that is not mapped any more, so Browse is the way in and Open is
+        how the operator checks it went where they meant.
+        """
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text=label, width=24, anchor="e").pack(side="left", padx=(0, 10))
+        var = tk.StringVar()
+        ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+        ttk.Button(
+            row, text="Browse...", command=lambda v=var: self._choose_folder(v)
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(
+            row, text="Open", command=lambda v=var: self._open_folder(v)
+        ).pack(side="left", padx=(6, 0))
+        self.fields[name] = var
+        if hint:
+            ttk.Label(
+                parent, text=hint, style="Hint.TLabel", wraplength=560, justify="left"
+            ).pack(anchor="w", padx=(184, 0))
+
+    def _resolved_folder(self, var: "tk.StringVar") -> Path:
+        typed = (var.get() or "").strip()
+        return Path(typed).expanduser() if typed else folder_for(self.settings)
+
+    def _choose_folder(self, var: "tk.StringVar") -> None:
+        chosen = filedialog.askdirectory(
+            parent=self.root,
+            title="Where should printed receipts be kept?",
+            initialdir=str(self._resolved_folder(var)),
+            mustexist=False,
+        )
+        if chosen:
+            # askdirectory hands back forward slashes even on Windows.
+            var.set(str(Path(chosen)))
+
+    def _open_folder(self, var: "tk.StringVar") -> None:
+        folder = self._resolved_folder(var)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            webbrowser.open(folder.as_uri())
+        except OSError as exc:
+            messagebox.showerror(
+                "WhatsApp Printer",
+                f"Could not open that folder.\n\n{folder}\n\n{exc}",
+                parent=self.root,
+            )
 
     def _choice(
         self,
@@ -458,7 +608,16 @@ class DesktopWindow:
             "confirm_before_send": s.confirm_before_send,
             "ocr_enabled": s.ocr_enabled,
             "ocr_silent_send": s.ocr_silent_send,
+            "keep_printed_pdfs": s.keep_printed_pdfs,
+            "pdf_folder": s.pdf_folder,
         }
+        # Blank means "nothing special about this document", which is what an
+        # ordinary receipt is: it takes default_template and document_noun.
+        for kind in self.pipeline.profile.document_kinds:
+            values[f"doc_template:{kind.name}"] = s.document_templates.get(
+                kind.name, ""
+            )
+            values[f"doc_noun:{kind.name}"] = s.document_nouns.get(kind.name, "")
         for name, value in values.items():
             self.fields[name].set(value)
 
@@ -488,6 +647,46 @@ class DesktopWindow:
         s.document_noun = (
             self.fields["document_noun"].get().strip() or s.document_noun
         )
+
+        # Which message each kind of paperwork goes out under. Only what was
+        # actually filled in is stored: an empty map is a real answer -- a
+        # client who sends nothing but receipts -- and it is what the gate
+        # reads to decide whether an unidentifiable scan could be the wrong
+        # document. Writing a row back for every kind would take that away.
+        by_kind: dict[str, str] = {}
+        nouns: dict[str, str] = {}
+        for kind in self.pipeline.profile.document_kinds:
+            name = self.fields[f"doc_template:{kind.name}"].get().strip()
+            noun = self.fields[f"doc_noun:{kind.name}"].get().strip()
+            if name:
+                by_kind[kind.name] = name
+            if noun:
+                nouns[kind.name] = noun
+
+        # A message this computer has never heard of is nearly always a typo,
+        # and one typo holds every notice at the counter with "Template
+        # 'removal_notce' is not configured" -- discovered by an operator, at
+        # the worst moment, with a member waiting. Not always a typo, though:
+        # a template approved in Meta this morning is unknown here until
+        # `waprinter templates --sync` runs. So this asks rather than refuses.
+        problems = []
+        for name in sorted(set(by_kind.values())):
+            template = self.pipeline.templates.get(name)
+            if template is None:
+                problems.append(f"{name} — not on this computer")
+            elif not template.usable:
+                problems.append(f"{name} — {template.status}, not approved by Meta")
+        if problems and not messagebox.askyesno(
+            "WhatsApp Printer",
+            "These messages cannot be sent as things stand:\n\n• "
+            + "\n• ".join(problems)
+            + "\n\nCheck the spelling, or run 'waprinter templates --sync' if "
+            "they were approved recently.\n\nSave anyway?",
+            parent=self.root,
+        ):
+            return
+        s.document_templates = by_kind
+        s.document_nouns = nouns
         s.branch_name = self.fields["branch_name"].get().strip()
         s.device_name = self.fields["device_name"].get().strip()
         s.update_url = self.fields["update_url"].get().strip()
@@ -496,6 +695,26 @@ class DesktopWindow:
         s.confirm_before_send = bool(self.fields["confirm_before_send"].get())
         s.ocr_enabled = bool(self.fields["ocr_enabled"].get())
         s.ocr_silent_send = bool(self.fields["ocr_silent_send"].get())
+
+        keep = bool(self.fields["keep_printed_pdfs"].get())
+        folder = self.fields["pdf_folder"].get().strip()
+        # Refuse a folder that cannot be written to now, rather than accept it
+        # and quietly file nothing. This is the office's own copy of its
+        # paperwork; discovering next March that it stopped in September is
+        # not a recoverable position.
+        if keep and folder:
+            try:
+                Path(folder).expanduser().mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                messagebox.showerror(
+                    "WhatsApp Printer",
+                    f"Printed receipts cannot be kept in that folder.\n\n"
+                    f"{folder}\n\n{exc}",
+                    parent=self.root,
+                )
+                return
+        s.keep_printed_pdfs = keep
+        s.pdf_folder = folder
         s.save()
 
         # Which sender is wired in was decided at startup. Re-decide it now, or
@@ -654,9 +873,14 @@ class DesktopWindow:
 
     # -- notifications -----------------------------------------------------
 
-    def submit(self, job_id: str) -> None:
-        """Thread-safe: called by the watcher when a job finishes."""
-        self.incoming.put(job_id)
+    def submit(self, job_id: str, auto_open: bool = True) -> None:
+        """Thread-safe: called by the watcher when a job finishes.
+
+        `auto_open` is False for every receipt of a batch print. One receipt at
+        a counter should go straight to its chat; ten receipts should not throw
+        ten chat windows at whoever is standing there.
+        """
+        self.incoming.put((job_id, auto_open))
 
     def request_show(self) -> None:
         """Thread-safe: called by the instance guard from its own thread.
@@ -671,15 +895,15 @@ class DesktopWindow:
             self._show_requested.clear()
             self.show()
         try:
-            job_id = self.incoming.get_nowait()
+            job_id, auto_open = self.incoming.get_nowait()
         except queue.Empty:
             pass
         else:
-            self._notify(job_id)
+            self._notify(job_id, auto_open=auto_open)
             self.refresh()
         self.root.after(POLL_MS, self._pump)
 
-    def _notify(self, job_id: str) -> None:
+    def _notify(self, job_id: str, auto_open: bool = True) -> None:
         job = self.pipeline.store.get(job_id)
         if job is None:
             return
@@ -688,7 +912,8 @@ class DesktopWindow:
         # than making them click. The notification that follows reports what
         # happened and reminds them to paste.
         if (
-            job.status is JobStatus.READY
+            auto_open
+            and job.status is JobStatus.READY
             and getattr(self.settings, "auto_open_chat", False)
             and job.chat_url
         ):

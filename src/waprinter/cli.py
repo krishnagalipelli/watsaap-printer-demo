@@ -6,6 +6,7 @@
     waprinter queue               show jobs waiting on an operator
     waprinter history             recent jobs and where they went
     waprinter set-token           store the WhatsApp access token
+    waprinter provision FILE      configure this install from one file
     waprinter go-live             turn dry-run off, with the checks that implies
 """
 
@@ -40,21 +41,29 @@ def cmd_process(args: argparse.Namespace) -> int:
     from .pipeline import build_default
 
     pipeline = build_default()
-    job = pipeline.process(Path(args.pdf), doc_title=Path(args.pdf).stem)
+    jobs = pipeline.process_document(Path(args.pdf), doc_title=Path(args.pdf).stem)
 
-    print(f"status     : {job.status}")
-    print(f"recipient  : {job.recipient or '-'}")
-    print(f"confidence : {job.confidence or '-'}")
-    if job.hold_reason:
-        print(f"reason     : {job.hold_reason}")
-    if job.error:
-        print(f"error      : {job.error}")
-    print(f"invoice    : {job.fields.invoice_number or '-'}")
-    print(f"customer   : {job.fields.customer_name or '-'}")
-    print(f"total      : {job.fields.total_amount or '-'}")
-    if job.message_preview:
-        print("--- message ---")
-        print(job.message_preview)
+    if len(jobs) > 1:
+        print(f"{Path(args.pdf).name} holds {len(jobs)} receipts\n")
+
+    for index, job in enumerate(jobs, start=1):
+        if len(jobs) > 1:
+            print(f"--- receipt {index} of {len(jobs)}: {job.pdf_path.name} ---")
+        print(f"status     : {job.status}")
+        print(f"recipient  : {job.recipient or '-'}")
+        print(f"confidence : {job.confidence or '-'}")
+        if job.hold_reason:
+            print(f"reason     : {job.hold_reason}")
+        if job.error:
+            print(f"error      : {job.error}")
+        print(f"invoice    : {job.fields.invoice_number or '-'}")
+        print(f"customer   : {job.fields.customer_name or '-'}")
+        print(f"total      : {job.fields.total_amount or '-'}")
+        if job.message_preview:
+            print("--- message ---")
+            print(job.message_preview)
+        if index < len(jobs):
+            print()
     return 0
 
 
@@ -243,14 +252,14 @@ def cmd_templates(args: argparse.Namespace) -> int:
     """
     from .send.templates import TemplateStore
 
-    store = TemplateStore(paths().templates)
+    settings = Settings.load()
+    store = TemplateStore(paths().templates, settings.business_name)
 
     if args.sync:
         import httpx
 
         from .secrets import load_token
 
-        settings = Settings.load()
         token = load_token()
         if not token:
             print("No access token stored. Run: waprinter set-token")
@@ -294,8 +303,12 @@ def cmd_templates(args: argparse.Namespace) -> int:
         return 0
 
     settings = Settings.load()
+    # Which kind of paperwork each template is used for, so the listing says
+    # why a template is in play rather than implying only one ever is.
+    used_for = {v: k for k, v in settings.document_templates.items()}
+    used_for.setdefault(settings.default_template, "everything else")
     for template in sorted(templates, key=lambda t: t.name):
-        marker = "*" if template.name == settings.default_template else " "
+        marker = "*" if template.name in used_for else " "
         state = "usable" if template.usable else f"NOT usable"
         note = ""
         if not template.usable:
@@ -304,9 +317,65 @@ def cmd_templates(args: argparse.Namespace) -> int:
             elif not template.header_document:
                 # Without a document header there is nowhere to attach the PDF.
                 note = " -- no document header, so a PDF cannot be attached"
-        print(f" {marker} {template.name:24s} {template.status:10s} {state}{note}")
-    print("\n * = the message this install sends. Change it in Settings.")
+        purpose = f"  <- {used_for[template.name]}" if marker == "*" else ""
+        print(
+            f" {marker} {template.name:24s} {template.status:10s}"
+            f"{state}{note}{purpose}"
+        )
+    print("\n * = a message this install sends, and the document it is sent for.")
     return 0
+
+
+def _report_receipt_folder(s) -> None:
+    """Where the office's own copies go, and whether they can actually go there.
+
+    A folder that stopped being writable -- an unmapped drive letter, a share
+    that needs credentials nobody entered after a reboot -- loses copies
+    silently, because filing is deliberately unable to fail a print.
+    """
+    from .archive import folder_for
+
+    if not s.keep_printed_pdfs:
+        print("  printed receipts : not being kept")
+        return
+
+    folder = folder_for(s)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        probe = folder / ".waprinter-write-test"
+        probe.touch()
+        probe.unlink()
+        print(f"  printed receipts : {folder}")
+    except OSError as exc:
+        print(f"  printed receipts : {folder}")
+        print(f"                     CANNOT BE WRITTEN TO -- {exc}")
+
+
+def cmd_provision(args: argparse.Namespace) -> int:
+    """Configure this installation from a file, instead of by hand.
+
+    Normally the agent does this by itself on first start. This exists for the
+    install that is already running -- a template change, a new receipts folder,
+    a rotated token pushed to twenty machines over AnyDesk without walking
+    anybody through the settings page.
+    """
+    from .provision import FILENAME, apply, find
+
+    source = find(args.file)
+    if source is None:
+        looked = args.file or f"{FILENAME} beside the program or in its data folder"
+        print(f"No provisioning file found ({looked}).")
+        return 1
+
+    result = apply(source, remove=not args.keep)
+    print(result.summary())
+    for warning in result.warnings:
+        print(f"  ! {warning}")
+    if result.removed:
+        print(f"  {source.name} has been deleted; it held the access token.")
+    elif not args.keep:
+        print(f"  {source} is still on this machine and holds the token.")
+    return 0 if result.ok else 1
 
 
 def cmd_doctor(_args: argparse.Namespace) -> int:
@@ -340,8 +409,9 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     print(f"  phone number id  : {s.phone_number_id or '(not set)'}")
     print(f"  message template : {s.default_template}")
     print(f"  force ipv4       : {s.force_ipv4}")
+    _report_receipt_folder(s)
 
-    template = TemplateStore(p.templates).get(s.default_template)
+    template = TemplateStore(p.templates, s.business_name).get(s.default_template)
     if template is None:
         print(f"  template status  : NOT CONFIGURED")
     else:
@@ -474,7 +544,7 @@ def cmd_go_live(_args: argparse.Namespace) -> int:
             "invoice footer is never treated as a customer"
         )
 
-    templates = TemplateStore(paths().root / "templates.json")
+    templates = TemplateStore(paths().root / "templates.json", settings.business_name)
     template = templates.get(settings.default_template)
     if template is None:
         problems.append(f"template '{settings.default_template}' is not configured")
@@ -544,6 +614,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.set_defaults(func=cmd_set_token)
     sub.add_parser("go-live", help="turn dry-run off").set_defaults(func=cmd_go_live)
+
+    p = sub.add_parser("provision", help="configure this install from a file")
+    p.add_argument("file", nargs="?", help=f"path to the provisioning file")
+    p.add_argument(
+        "--keep",
+        action="store_true",
+        help="do not delete the file afterwards; it holds the access token in "
+             "plain text, so only for a file on a share you control",
+    )
+    p.set_defaults(func=cmd_provision)
     sub.add_parser(
         "doctor", help="check this install and try a real upload"
     ).set_defaults(func=cmd_doctor)

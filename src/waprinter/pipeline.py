@@ -12,9 +12,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from .archive import file_away
 from .config import Settings, paths
 from .extract import extract_fields
+from .extract.pdf_text import read as read_pdf
 from .extract.profile import DocumentProfile
+from .extract.split import receipt_groups, segment_path, write_segment
 from .models import JobStatus, PrintJob
 from .rules import Decision, evaluate
 from .rules.gate import _excluded_numbers, dedupe_key
@@ -124,6 +127,91 @@ class Pipeline:
         """
         self.sender = build_sender(self.settings)
 
+    def template_for(self, fields) -> tuple[str, object | None]:
+        """The approved template this document goes out under, and its name.
+
+        A removal notice is not a receipt and must not borrow its wording, so
+        the kind read off the page picks the template. Anything unrecognised
+        keeps default_template, which is every receipt.
+        """
+        name = self.settings.document_templates.get(
+            fields.document_kind or ""
+        ) or self.settings.default_template
+        return name, self.templates.get(name)
+
+    def noun_for(self, fields) -> str:
+        """What to call the attached PDF for this kind of document."""
+        return (
+            self.settings.document_nouns.get(fields.document_kind or "")
+            or self.settings.document_noun
+        )
+
+    def process_document(
+        self,
+        pdf_path: Path,
+        doc_title: str | None = None,
+        windows_user: str | None = None,
+        now: datetime | None = None,
+    ) -> list[PrintJob]:
+        """Take one captured PDF all the way through, as one job per receipt.
+
+        This is the entry point for anything that captures a print. A run of
+        receipts printed as a single job becomes one job per subscriber, each
+        carrying only its own pages, because the send path uploads the job's
+        PDF whole and the alternative is posting one subscriber the rest of
+        the counter's afternoon.
+
+        A document holding a single receipt -- which is nearly all of them --
+        takes the same path it always did, against the original file.
+        """
+        try:
+            groups = self._receipt_groups(pdf_path)
+        except Exception:
+            # Splitting is an optimisation on top of a working single-job
+            # path, and must never be the reason a print is lost.
+            log.exception("could not split %s; processing it whole", pdf_path)
+            groups = []
+
+        if len(groups) < 2:
+            jobs = [self.process(pdf_path, doc_title, windows_user, now)]
+        else:
+            log.info("%s holds %d receipts; splitting", pdf_path, len(groups))
+            jobs = []
+            for index, pages in enumerate(groups, start=1):
+                try:
+                    part = write_segment(
+                        pdf_path, pages, segment_path(pdf_path, index)
+                    )
+                except Exception:
+                    log.exception(
+                        "could not write receipt %d of %s", index, pdf_path
+                    )
+                    continue
+                jobs.append(self.process(part, doc_title, windows_user, now))
+
+        # The office keeps its own copy of everything that was printed,
+        # whatever the gate decided about sending it. Filed here rather than
+        # inside process() so it happens once per receipt, on every outcome,
+        # and cannot interfere with the decision itself.
+        for job in jobs:
+            filed = file_away(job, self.settings)
+            if filed is not None:
+                self.store.log(job.id, "filed", str(filed))
+
+        return jobs
+
+    def _receipt_groups(self, pdf_path: Path) -> list[list[int]]:
+        """Page groups, one per receipt. Empty when the question is moot.
+
+        Read without OCR on purpose. A scanned batch would have to be rendered
+        twice over -- once to find the boundaries and again to read the pages
+        -- and a scan is held for a person anyway, so the cost buys nothing.
+        """
+        doc = read_pdf(pdf_path)
+        if not doc.has_text_layer or doc.page_count < 2:
+            return []
+        return receipt_groups(doc, self.profile)
+
     def process(
         self,
         pdf_path: Path,
@@ -176,14 +264,14 @@ class Pipeline:
             # The operator supplies the number. Rendering the message preview
             # here means the dialog can show the exact text without repeating
             # any of this work.
-            template = self.templates.get(self.settings.default_template)
+            _, template = self.template_for(job.fields)
             if template is not None:
                 message = render(
                     template,
                     self.settings.template_variables,
                     job.fields,
                     doc_title=job.doc_title,
-                    document_noun=self.settings.document_noun,
+                    document_noun=self.noun_for(job.fields),
                 )
                 job.template_name = template.name
                 job.message_preview = message.preview
@@ -201,12 +289,9 @@ class Pipeline:
             return job
 
         # --- compose ------------------------------------------------------
-        template = self.templates.get(self.settings.default_template)
+        wanted, template = self.template_for(job.fields)
         if template is None:
-            return self._hold(
-                job,
-                f"Template '{self.settings.default_template}' is not configured.",
-            )
+            return self._hold(job, f"Template '{wanted}' is not configured.")
 
         message = render(
             template,
@@ -214,7 +299,7 @@ class Pipeline:
             job.fields,
             doc_title=job.doc_title,
             extra={"business_name": self.settings.business_name},
-            document_noun=self.settings.document_noun,
+            document_noun=self.noun_for(job.fields),
         )
         job.template_name = template.name
         job.message_preview = message.preview
@@ -325,7 +410,7 @@ class Pipeline:
         self.store.log(job.id, "released", f"operator chose {e164}")
 
         if self.settings.send_mode == "link":
-            template = self.templates.get(self.settings.default_template)
+            _, template = self.template_for(job.fields)
             if template is None:
                 return self._fail(job, "No message is configured.")
             message = render(
@@ -334,17 +419,15 @@ class Pipeline:
                 job.fields,
                 doc_title=job.doc_title,
                 extra={"business_name": self.settings.business_name},
-                document_noun=self.settings.document_noun,
+                document_noun=self.noun_for(job.fields),
             )
             job.template_name = template.name
             job.message_preview = message.preview
             return self._prepare_link(job, message)
 
-        template = self.templates.get(self.settings.default_template)
+        wanted, template = self.template_for(job.fields)
         if template is None:
-            return self._fail(
-                job, f"Template '{self.settings.default_template}' is not configured."
-            )
+            return self._fail(job, f"Template '{wanted}' is not configured.")
 
         message = render(
             template,
@@ -352,7 +435,7 @@ class Pipeline:
             job.fields,
             doc_title=job.doc_title,
             extra={"business_name": self.settings.business_name},
-            document_noun=self.settings.document_noun,
+            document_noun=self.noun_for(job.fields),
         )
         job.template_name = template.name
         job.message_preview = message.preview
@@ -446,7 +529,7 @@ def build_default(settings: Settings | None = None) -> Pipeline:
     p = paths()
     p.ensure()
     store = Store(p.db)
-    templates = TemplateStore(p.templates)
+    templates = TemplateStore(p.templates, settings.business_name)
     profile = DocumentProfile.load(p.profile)
 
     return Pipeline(settings, store, build_sender(settings), templates, profile)

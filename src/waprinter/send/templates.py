@@ -111,60 +111,156 @@ CHITS_DETAILS_BODY = (
     "Payment Mode: {{payment_mode}}"
 )
 
-DEFAULT_TEMPLATES = [
-    MessageTemplate(
-        name="chits_details",
-        language="en",
-        body=CHITS_DETAILS_BODY,
-        parameter_format="named",
-        # Left pending on purpose: the sender refuses a template it has not
-        # been told is approved, so nothing goes out until someone has checked
-        # this against the Business Manager.
-        status="pending",
-        category="UTILITY",
-    ),
-    MessageTemplate(
-        name="chit_receipt",
-        language="en",
-        body=CHIT_RECEIPT_BODY,
-        footer="Regards,\nSrinidhi Chit Funds",
-        # Link mode sends free text, so nothing needs Meta's approval. The same
-        # wording has to be submitted as a template before the Cloud API can
-        # use it.
-        status="approved",
-        category="UTILITY",
-    ),
-    MessageTemplate(
-        name="invoice_document",
-        language="en",
-        body=(
-            "Hello {{1}}, thank you for your business.\n\n"
-            "Your invoice {{2}} for ₹{{3}} is attached.\n\n"
-            "Please reach out if you have any questions."
+# The removal notice and removal letter. Same rule as the receipt above: this
+# wording has to stay identical to what Meta approved, because only the
+# parameters travel with the send -- a body that has drifted changes nothing
+# for the member but makes the operator's preview a lie. `waprinter templates
+# --sync` is the authority on both the wording and the status.
+#
+# The business's own name is a `{business}` slot rather than one client's
+# registered name typed into the source. It is filled from Settings.
+# business_name when the built-in copies are built, so a second client does
+# not receive a notice signed by the first. Note that it is deliberately NOT
+# a {{variable}}: Meta's approved body carries this as static text, and a
+# placeholder here would add a parameter to the send that the approved
+# template has no slot for, which Meta rejects outright.
+REMOVAL_NOTICE_BODY = (
+    "Dear {{customer_name}},\n\n"
+    "This is to inform you that a Removal Notice has been issued by "
+    "{business}.\n"
+    "Please find your removal notice attached as a PDF for your reference.\n\n"
+    "Notice No.: {{notice_no}}\n"
+    "Date: {{date}}\n\n"
+    "Kindly review the attached document for further details.\n\n"
+    "Regards,\n"
+    "{business}."
+)
+
+REMOVAL_LETTER_BODY = (
+    "Dear {{customer_name}},\n\n"
+    "This is to inform you that a Removal Letter has been issued by "
+    "{business}.\n"
+    "Please find your removal letter attached as a PDF.\n\n"
+    "Letter No.: {{letter_no}}\n"
+    "Date: {{date}}\n\n"
+    "Kindly review the attached document for further details.\n\n"
+    "Thank you for your service with {business}."
+)
+
+# The business's own name, wherever it appears as static text in a built-in
+# template. `{business}` is filled by str.replace and never by str.format --
+# formatting would eat the {{...}} Meta placeholders, turning "{{customer_name}}"
+# into "{customer_name}" and breaking every send.
+BUSINESS_SLOT = "{business}"
+
+
+def default_templates(business_name: str) -> list[MessageTemplate]:
+    """The templates a fresh install starts with, in this client's name.
+
+    Built per-install rather than as a module constant, because the wording
+    belongs to the product and the name in it belongs to whoever bought it.
+    One client's registered name typed into the source is how a second client
+    ends up signing off as the first.
+
+    What Meta has approved still outranks all of this: `waprinter templates
+    --sync` replaces these bodies wholesale, and a stored template always wins
+    over a built-in one.
+    """
+
+    def named(body: str) -> str:
+        return body.replace(BUSINESS_SLOT, business_name)
+
+    return [
+        MessageTemplate(
+            name="chits_details",
+            language="en",
+            body=named(CHITS_DETAILS_BODY),
+            parameter_format="named",
+            # Left pending on purpose: the sender refuses a template it has not
+            # been told is approved, so nothing goes out until someone has
+            # checked this against the Business Manager.
+            status="pending",
+            category="UTILITY",
         ),
-        footer="Sunrise Traders",
-        status="pending",
-        category="UTILITY",
-    ),
-]
+        MessageTemplate(
+            name="chit_receipt",
+            language="en",
+            body=named(CHIT_RECEIPT_BODY),
+            footer=f"Regards,\n{business_name}",
+            # Link mode sends free text, so nothing needs Meta's approval. The
+            # same wording has to be submitted as a template before the Cloud
+            # API can use it.
+            status="approved",
+            category="UTILITY",
+        ),
+        MessageTemplate(
+            name="removal_notice",
+            language="en",
+            body=named(REMOVAL_NOTICE_BODY),
+            parameter_format="named",
+            status="approved",
+            category="UTILITY",
+        ),
+        MessageTemplate(
+            name="removal_letter",
+            language="en",
+            body=named(REMOVAL_LETTER_BODY),
+            parameter_format="named",
+            status="approved",
+            category="UTILITY",
+        ),
+        MessageTemplate(
+            name="invoice_document",
+            language="en",
+            body=(
+                "Hello {{1}}, thank you for your business.\n\n"
+                "Your invoice {{2}} for \u20b9{{3}} is attached.\n\n"
+                "Please reach out if you have any questions."
+            ),
+            footer=business_name,
+            status="pending",
+            category="UTILITY",
+        ),
+    ]
 
 
 class TemplateStore:
     """Templates on disk, editable from the local UI."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, business_name: str | None = None):
         self.path = path
+        # Imported here rather than at module scope: config imports nothing
+        # from send, and keeping it that way costs one local import.
+        if business_name is None:
+            from ..config import Settings
+
+            business_name = Settings().business_name
+        self.business_name = business_name
         self._templates: dict[str, MessageTemplate] = {}
         self.load()
 
     def load(self) -> None:
+        """Built-in templates, with whatever this machine has stored over them.
+
+        The stored file used to be the whole truth, which meant a template
+        added in a release never reached a machine that had already printed
+        something -- the same way a new database column never reached one. The
+        first removal notice to hit those installs would have been held with
+        "Template 'removal_notice' is not configured", on every counter at
+        once.
+
+        Stored entries win, always. What Meta reports about a template it has
+        seen -- above all its status -- is worth more than what shipped in the
+        build, so a rejected template is never quietly made approved again.
+        """
+        self._templates = {
+            t.name: t for t in default_templates(self.business_name)
+        }
         if not self.path.exists():
-            self._templates = {t.name: t for t in DEFAULT_TEMPLATES}
             return
         raw = json.loads(self.path.read_text(encoding="utf-8"))
-        self._templates = {
-            item["name"]: MessageTemplate(**item) for item in raw.get("templates", [])
-        }
+        for item in raw.get("templates", []):
+            self._templates[item["name"]] = MessageTemplate(**item)
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
