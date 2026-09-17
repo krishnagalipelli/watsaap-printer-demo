@@ -87,6 +87,37 @@ function Copy-Tesseract {
     }
 }
 
+function Copy-Ucrt {
+    # python38.dll links against the Universal CRT (ucrtbase.dll and the
+    # api-ms-win-crt-* forwarders). Windows 10 and Server ship it, so PyInstaller
+    # treats it as part of the OS and collects none of it -- and a Windows 7
+    # counter without KB2999226 then shows "Error loading Python DLL ...
+    # LoadLibrary: The specified module could not be found" before any of our
+    # code runs. The smoke test below cannot catch that on this runner, which
+    # has the UCRT, so the check here has to be on the files themselves.
+    # Microsoft ships these for app-local deployment in the Windows SDK.
+    $kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Redist'
+    $source = @(Get-ChildItem $kits -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { Join-Path $_.FullName 'ucrt\DLLs\x86' }) +
+        (Join-Path $kits 'ucrt\DLLs\x86') |
+        Where-Object { Test-Path (Join-Path $_ 'ucrtbase.dll') } |
+        Sort-Object -Descending | Select-Object -First 1
+    if (-not $source) {
+        throw "No x86 Universal CRT redistributable under $kits. Install the " +
+              "Windows 10/11 SDK; without it the $Target build cannot start on 7."
+    }
+
+    Write-Host "== Bundling the Universal CRT from $source ==" -ForegroundColor Cyan
+    foreach ($dist in 'dist\waprinter-agent', 'dist\cli\waprinter') {
+        Copy-Item (Join-Path $source '*.dll') $dist -Force
+        foreach ($dll in 'ucrtbase.dll', 'api-ms-win-crt-runtime-l1-1-0.dll') {
+            if (-not (Test-Path (Join-Path $dist $dll))) {
+                throw "Bundling the Universal CRT left no $dll in $dist"
+            }
+        }
+    }
+}
+
 try {
     Write-Host "== Installing build dependencies ($Target) ==" -ForegroundColor Cyan
     if ($Target -eq 'win7-x86') {
@@ -148,6 +179,8 @@ try {
     # from source, and --windowed hides it completely, so the build must not be
     # allowed to call that a success. This exact check would have caught the
     # broken installer that shipped before.
+    if ($Target -eq 'win7-x86') { Copy-Ucrt }
+
     Write-Host '== Smoke testing the frozen executables ==' -ForegroundColor Cyan
     $cliExe   = 'dist\cli\waprinter\waprinter.exe'
     $agentExe = 'dist\waprinter-agent\waprinter-agent.exe'
