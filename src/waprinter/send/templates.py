@@ -18,11 +18,15 @@ refuse to use one that is pending or rejected instead of failing at send time.
 from __future__ import annotations
 
 import json
+import logging
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
+from ..config import atomic_write_text, set_aside_corrupt
 from ..models import ExtractedFields
+
+log = logging.getLogger(__name__)
 
 # Meta templates come in two shapes. The older one numbers its variables
 # ({{1}}, {{2}}); the ones the Business Manager creates now name them
@@ -32,6 +36,121 @@ PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}")
 
 # Meta rejects parameters that are empty or whitespace-only.
 EMPTY_PARAM_FALLBACK = "-"
+
+# How a template variable can be filled, besides naming a field. Written into
+# settings.json by the mapping screen, so plain strings rather than objects:
+#   "customer_id"          the value of a field read off the page
+#   "text:Karimnagar"      the same fixed words on every message
+#   "(blank)"              deliberately nothing; sends as EMPTY_PARAM_FALLBACK
+FIXED_TEXT_PREFIX = "text:"
+LEAVE_BLANK = "(blank)"
+
+# The template the shipped numbered entries of Settings.template_variables
+# were written for. Its body is "Dear {{1}}, ... payment to {{2}} ... Receipt
+# No.: {{3}}", so {{2}} is the business name there -- and nothing says what
+# {{2}} is anywhere else. invoice_document's {{2}} is the invoice number.
+SHARED_MAP_WRITTEN_FOR = "chit_receipt"
+
+
+def shared_variables_for(
+    template: "MessageTemplate",
+    template_variables: dict[str, str],
+    default_template: str,
+) -> dict[str, str]:
+    """The part of the install's shared variable map that fits `template`.
+
+    Named entries always fit: "receipt_no" means the receipt number in any
+    template that uses the name. Numbered entries do not. "{{2}}" is only a
+    position, and the shared map's positions describe one template's body.
+    Applied to every numbered template they filled invoice_document as "Your
+    invoice <business name> for ₹<invoice number>" -- and sent it.
+
+    So numbered entries go only to the template they were written for: the
+    chit receipt while they are as shipped, or this install's own default
+    template once someone has changed them -- then they were edited for it.
+    """
+    from ..config import Settings
+
+    named = {k: v for k, v in template_variables.items() if not k.isdigit()}
+    numbered = {k: v for k, v in template_variables.items() if k.isdigit()}
+    shipped = {k: v for k, v in Settings().template_variables.items() if k.isdigit()}
+    written_for = (
+        default_template.split("@", 1)[0]
+        if numbered != shipped
+        else SHARED_MAP_WRITTEN_FOR
+    )
+    if template.name == written_for:
+        return {**named, **numbered}
+    return named
+
+
+def variable_map(template: "MessageTemplate", settings) -> dict[str, str]:
+    """How this install fills this template's variables.
+
+    Its own mapping from the setup screen when it has one; otherwise the
+    shared template_variables, as far as they fit it.
+    """
+    own = settings.template_mappings.get(template.name)
+    if own is not None:
+        return dict(own)
+    return shared_variables_for(
+        template, settings.template_variables, settings.default_template
+    )
+
+
+def unfilled_variables(
+    template: "MessageTemplate",
+    mapping: dict[str, str],
+    known_fields: set[str],
+) -> list[str]:
+    """Variables with nothing that could ever fill them.
+
+    Not "blank on this print" -- that is `RenderedMessage.missing`, and can
+    change from one print to the next. These are empty on every print: a
+    numbered variable nobody mapped, a named one whose name is no field this
+    install reads, or a mapping to a field that no longer exists. Sending
+    anyway puts "-" where a receipt number or an amount belongs.
+    """
+    unfilled = []
+    for variable in template.placeholders:
+        source = mapping.get(variable)
+        if source is None:
+            source = variable if template.named else ""
+        if source == LEAVE_BLANK or source.startswith(FIXED_TEXT_PREFIX):
+            continue
+        if not source or source not in known_fields:
+            unfilled.append(variable)
+    return unfilled
+
+
+def unfilled_reason(template: "MessageTemplate", unfilled: list[str]) -> str:
+    slots = ", ".join("{{%s}}" % v for v in unfilled)
+    return (
+        f"The '{template.name}' message has {slots} with nothing to fill "
+        f"{'it' if len(unfilled) == 1 else 'them'}. Open Setup → Fill in "
+        f"messages and choose what goes in each."
+    )
+
+
+# What Meta calls a status, in words for the screen.
+STATUS_WORDS = {
+    "approved": "approved",
+    "pending": "waiting for Meta's approval",
+    "rejected": "rejected by Meta",
+    "paused": "paused by Meta",
+    "disabled": "disabled by Meta",
+    "missing": "not on WhatsApp",
+}
+# It also rejects a newline, a tab, or more than four consecutive spaces
+# inside a parameter (error 132018). Page text arrives with all three -- a
+# row joins its columns with runs of spaces -- so every value is flattened to
+# single spaces before it goes anywhere near the send.
+_PARAM_WHITESPACE = re.compile(r"\s+")
+
+
+def clean_parameter(value: str) -> str:
+    """One template parameter as Meta will accept it."""
+    return _PARAM_WHITESPACE.sub(" ", value).strip()
 
 # What to call the attached PDF when the client has not said. Deliberately the
 # generic word: naming a receipt "Invoice" is worse than naming it nothing.
@@ -57,6 +176,19 @@ class MessageTemplate:
     # templates must carry a parameter_name on every body parameter; sending
     # them positionally is rejected with error 132000.
     parameter_format: str = "positional"
+    # Example values Meta holds for each body variable, keyed like
+    # `placeholders`. Shown beside the mapping so whoever fills a template in
+    # can see what {{id}} was meant to hold when it was written.
+    examples: dict[str, str] = field(default_factory=dict)
+    # DOCUMENT, IMAGE, TEXT, VIDEO -- or blank for no header. Only a document
+    # header can carry the PDF, and saying which other kind a template has is
+    # the difference between "cannot be used" and knowing why.
+    header_format: str = ""
+
+    @property
+    def ref(self) -> str:
+        """The key this exact template is stored under: name and language."""
+        return f"{self.name}@{self.language}"
 
     @property
     def named(self) -> bool:
@@ -187,10 +319,15 @@ def default_templates(business_name: str) -> list[MessageTemplate]:
             language="en",
             body=named(CHIT_RECEIPT_BODY),
             footer=f"Regards,\n{business_name}",
-            # Link mode sends free text, so nothing needs Meta's approval. The
-            # same wording has to be submitted as a template before the Cloud
-            # API can use it.
-            status="approved",
+            # Pending, like every built-in: the Cloud API sender refuses a
+            # template nobody has confirmed against the Business Manager, and
+            # `waprinter templates --sync` is what confirms it. This one used
+            # to ship as "approved" so that link mode -- which sends free text
+            # and needs no approval -- did not report itself not ready. That
+            # made the same install look ready to send by API before Meta had
+            # seen the template at all. Readiness now asks for approval only
+            # where the API is actually used.
+            status="pending",
             category="UTILITY",
         ),
         MessageTemplate(
@@ -198,7 +335,7 @@ def default_templates(business_name: str) -> list[MessageTemplate]:
             language="en",
             body=named(REMOVAL_NOTICE_BODY),
             parameter_format="named",
-            status="approved",
+            status="pending",
             category="UTILITY",
         ),
         MessageTemplate(
@@ -206,7 +343,7 @@ def default_templates(business_name: str) -> list[MessageTemplate]:
             language="en",
             body=named(REMOVAL_LETTER_BODY),
             parameter_format="named",
-            status="approved",
+            status="pending",
             category="UTILITY",
         ),
         MessageTemplate(
@@ -225,9 +362,21 @@ def default_templates(business_name: str) -> list[MessageTemplate]:
 
 
 class TemplateStore:
-    """Templates on disk, editable from the local UI."""
+    """Templates on disk, editable from the local UI.
 
-    def __init__(self, path: Path, business_name: str | None = None):
+    Keyed by name *and* language. Meta allows one name in several languages
+    -- "member_statement" in English and in Telugu -- and keying by name
+    alone meant the second one fetched silently replaced the first. A
+    reference in settings may still be a bare name; `get` resolves it to the
+    preferred language when there is more than one.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        business_name: str | None = None,
+        language: str = "en",
+    ):
         self.path = path
         # Imported here rather than at module scope: config imports nothing
         # from send, and keeping it that way costs one local import.
@@ -236,6 +385,8 @@ class TemplateStore:
 
             business_name = Settings().business_name
         self.business_name = business_name
+        self.language = language
+        self.refreshed_at = ""
         self._templates: dict[str, MessageTemplate] = {}
         self.load()
 
@@ -254,24 +405,97 @@ class TemplateStore:
         build, so a rejected template is never quietly made approved again.
         """
         self._templates = {
-            t.name: t for t in default_templates(self.business_name)
+            t.ref: t for t in default_templates(self.business_name)
         }
+        self.refreshed_at = ""
         if not self.path.exists():
             return
-        raw = json.loads(self.path.read_text(encoding="utf-8"))
-        for item in raw.get("templates", []):
-            self._templates[item["name"]] = MessageTemplate(**item)
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            items = raw.get("templates", []) if isinstance(raw, dict) else None
+            if items is None:
+                raise ValueError("not a JSON object")
+        except (OSError, ValueError) as exc:
+            # The same rule as settings.json: a file that cannot be read is
+            # set aside, not allowed to stop the agent starting. The built-in
+            # copies are all pending, so nothing is sent on their say-so.
+            moved = set_aside_corrupt(self.path)
+            log.error(
+                "could not read %s (%s); using the built-in templates%s",
+                self.path,
+                exc,
+                f", the file was moved to {moved.name}" if moved else "",
+            )
+            return
+        self.refreshed_at = str(raw.get("refreshed_at") or "")
+        known = set(MessageTemplate.__dataclass_fields__)
+        for item in items:
+            if not isinstance(item, dict) or not item.get("name"):
+                log.warning("skipping a template entry with no name in %s", self.path)
+                continue
+            # Unknown keys are dropped rather than passed to the constructor:
+            # a file written by a newer build, or edited by hand, used to
+            # raise TypeError here and take the agent down at startup.
+            fields = {k: v for k, v in item.items() if k in known}
+            if not isinstance(fields.get("examples", {}), dict):
+                fields.pop("examples")
+            template = MessageTemplate(**fields)
+            self._templates[template.ref] = template
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"templates": [asdict(t) for t in self._templates.values()]}
-        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        payload = {
+            "refreshed_at": self.refreshed_at,
+            "templates": [asdict(t) for t in self._templates.values()],
+        }
+        atomic_write_text(self.path, json.dumps(payload, indent=2))
 
-    def get(self, name: str) -> MessageTemplate | None:
-        return self._templates.get(name)
+    def get(self, ref: str) -> MessageTemplate | None:
+        """A template by "name@language", or by bare name.
+
+        A bare name with several languages resolves to this store's preferred
+        language, then to an approved one, then to whichever comes first.
+        """
+        if not ref:
+            return None
+        if ref in self._templates:
+            return self._templates[ref]
+        if "@" in ref:
+            return None
+        matches = [t for t in self._templates.values() if t.name == ref]
+        if len(matches) <= 1:
+            return matches[0] if matches else None
+        for template in matches:
+            if template.language == self.language:
+                return template
+        approved = [t for t in matches if t.usable]
+        return (approved or matches)[0]
+
+    def ref_for(self, template: MessageTemplate) -> str:
+        """The shortest reference that picks out exactly this template."""
+        same_name = [t for t in self._templates.values() if t.name == template.name]
+        return template.name if len(same_name) == 1 else template.ref
 
     def put(self, template: MessageTemplate) -> None:
-        self._templates[template.name] = template
+        self._templates[template.ref] = template
+        self.save()
+
+    def apply_refresh(self, fetched: list[MessageTemplate], when: str = "") -> None:
+        """Make the store say what Meta says, all at once.
+
+        Every template Meta returned replaces ours. Every one it did not is
+        kept -- a setting may still name it, and the words are worth keeping
+        -- but marked "missing", which is not usable. Adding them one at a
+        time used to leave a template deleted in the Business Manager looking
+        approved here for ever, and the first send under it failed at Meta.
+        """
+        from datetime import datetime
+
+        fresh = {t.ref: t for t in fetched}
+        for ref, template in self._templates.items():
+            if ref not in fresh:
+                fresh[ref] = replace(template, status="missing")
+        self._templates = fresh
+        self.refreshed_at = when or datetime.now().isoformat(timespec="seconds")
         self.save()
 
     def all(self) -> list[MessageTemplate]:
@@ -290,6 +514,9 @@ class RenderedMessage:
     preview: str = ""       # what the customer will actually read
     filename: str = "document.pdf"
     missing: list[str] = field(default_factory=list)  # variables with no value
+    # Variables with nothing mapped to them at all -- a setup problem, as
+    # opposed to a field that came out blank on this one print.
+    unmapped: list[str] = field(default_factory=list)
 
 
 def render(
@@ -313,12 +540,24 @@ def render(
     values = {**fields.as_template_vars(), **(extra or {})}
     parameters: list[str] = []
     missing: list[str] = []
+    unmapped: list[str] = []
 
     for token in template.placeholders:
-        field_name = variable_map.get(token) or (token if template.named else "")
-        value = (values.get(field_name) or "").strip()
+        source = variable_map.get(token)
+        if source is None:
+            source = token if template.named else ""
+        if source == LEAVE_BLANK:
+            # Chosen on purpose, so neither missing nor a reason to hold.
+            parameters.append(EMPTY_PARAM_FALLBACK)
+            continue
+        if source.startswith(FIXED_TEXT_PREFIX):
+            value = clean_parameter(source[len(FIXED_TEXT_PREFIX):])
+        else:
+            value = clean_parameter(values.get(source) or "")
+        if not source:
+            unmapped.append(token)
         if not value:
-            missing.append(field_name or f"{{{{{token}}}}}")
+            missing.append(source or f"{{{{{token}}}}}")
             value = EMPTY_PARAM_FALLBACK
         parameters.append(value)
 
@@ -340,6 +579,7 @@ def render(
         preview=preview,
         filename=_filename(fields, doc_title, document_noun),
         missing=missing,
+        unmapped=unmapped,
     )
 
 

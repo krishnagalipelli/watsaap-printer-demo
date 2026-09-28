@@ -288,6 +288,7 @@ def extract_fields(
     country_code: str = "91",
     ocr: OcrSettings | None = None,
     profile: DocumentProfile | None = None,
+    forced_kind=None,
 ) -> ExtractedFields:
     """Read a captured PDF into the fields the pipeline needs.
 
@@ -309,7 +310,9 @@ def extract_fields(
 
     # What kind of paperwork this is decides how the rest of it is read: a
     # removal notice heads its address block "To,", not "Received from".
-    kind = profile.kind_of(" ".join(row.text for row in doc.rows))
+    kind = forced_kind or profile.kind_of(doc)
+    classification_error = ("Conflicting document headings. Choose the document type before sending."
+                            if len(profile.title_matches(doc)) > 1 else "")
     profile = profile.for_kind(kind)
 
     candidates = find_candidates(doc, excluded_numbers, country_code, profile)
@@ -328,12 +331,12 @@ def extract_fields(
         # read it. The second pass runs at a higher resolution, so the common
         # failure is a title the first read missed entirely and the second one
         # found: that shows up here as a disagreement and is held.
-        second = profile.kind_of(" ".join(row.text for row in verification.rows))
+        second = profile.kind_of(verification)
         kind_verified = (second.name if second else None) == (
             kind.name if kind else None
         )
 
-    return ExtractedFields(
+    fields = ExtractedFields(
         candidates=candidates,
         invoice_number=_document_number(doc, profile),
         customer_name=_customer_name(doc, profile),
@@ -343,8 +346,28 @@ def extract_fields(
         payment_mode=_payment_mode(doc, profile),
         document_kind=kind.name if kind else None,
         document_kind_verified=kind_verified,
+        classification_error=classification_error,
         page_count=doc.page_count,
         has_text_layer=doc.has_text_layer,
         used_ocr=doc.used_ocr,
         ocr_error=doc.ocr_error,
     )
+    apply_taught_fields(fields, doc, profile.rules_for(kind))
+    return fields
+
+
+def apply_taught_fields(fields: ExtractedFields, doc, rules) -> None:
+    """Put what the taught rules read onto `fields`.
+
+    A taught value for a built-in field replaces the built-in guess: someone
+    pointed at the exact spot on this layout, which beats a heuristic written
+    for every layout at once. Everything else goes into `extra`, where a
+    template mapping can reach it by name.
+    """
+    from .rules import BUILTIN_FIELDS, apply_rules
+
+    for name, value in apply_rules(doc, rules).items():
+        if name in BUILTIN_FIELDS:
+            setattr(fields, name, value)
+        else:
+            fields.extra[name] = value

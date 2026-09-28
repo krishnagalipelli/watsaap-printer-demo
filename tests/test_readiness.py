@@ -34,9 +34,46 @@ class TestProblems:
         found = " ".join(
             problems(
                 Settings(
-                    own_numbers=["9845012345"], default_template="invoice_document"
+                    own_numbers=["9845012345"],
+                    default_template="invoice_document",
+                    send_mode="api",
                 ),
                 templates,
             )
         )
         assert "not yet approved" in found
+
+    def test_link_mode_does_not_need_metas_approval(self, templates):
+        # A wa.me link carries the text itself and a person presses send; no
+        # template is involved on that route, so "pending" is not a problem.
+        template = templates.get("chit_receipt")
+        template.status = "pending"
+        templates.put(template)
+        found = " ".join(
+            problems(
+                Settings(
+                    own_numbers=["9845012345"],
+                    default_template="chit_receipt",
+                    send_mode="link",
+                ),
+                templates,
+            )
+        )
+        assert "approved" not in found
+
+    def test_every_document_kinds_message_is_checked(self, templates):
+        # A removal notice held with "Template 'removal_notce' is not
+        # configured" is the same failure as a receipt held that way, and used
+        # to be invisible here until the first notice was printed.
+        found = " ".join(
+            problems(
+                Settings(
+                    own_numbers=["9845012345"],
+                    default_template="invoice_document",
+                    send_mode="api",
+                    document_templates={"removal_notice": "removal_notce"},
+                ),
+                templates,
+            )
+        )
+        assert "'removal_notce' is not configured" in found

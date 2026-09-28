@@ -45,26 +45,106 @@ def document_of(job: PrintJob) -> str:
 
 @dataclass(frozen=True)
 class DeviceState:
-    """The line under the title, like a printer's own ready/offline state."""
+    """Where the printer stands, like a printer's own ready/offline light.
 
-    text: str
+    `label` is the word in the header's badge and `detail` the sentence beside
+    it; `summary` is the line on the side bar's mode card.
+    """
+
+    label: str
+    detail: str
     tone: str
+    summary: str = ""
+
+    @property
+    def text(self) -> str:
+        return f"{self.label} — {self.detail}" if self.detail else self.label
 
 
 def device_state(settings: Settings, waiting: int, problems: list[str]) -> DeviceState:
     if settings.dry_run:
-        return DeviceState("Test mode — documents are read but nothing is sent", "warn")
+        return DeviceState("Test mode", "documents are read but nothing is sent", "warn",
+                           "No messages are being sent.")
     if problems:
-        return DeviceState(f"Not ready — {problems[0]}", "bad")
+        return DeviceState("Not ready", problems[0], "bad",
+                           "Nothing can be sent until setup is finished.")
     # Link mode is a working state, but not an automatic one: nothing goes out
     # until a person presses send in WhatsApp. A bare "Ready" here reads as
     # "receipts are going out on their own", which is how an operator ends up
     # believing a message was delivered that is still sitting on their screen.
     if settings.send_mode == "link":
-        return DeviceState("Ready — WhatsApp opens for you to press send", "warn")
+        return DeviceState("Ready", "WhatsApp opens for you to press send", "warn",
+                           "Someone presses send in WhatsApp for each document.")
     if waiting:
-        return DeviceState(f"Ready — {waiting} document(s) need attention", "warn")
-    return DeviceState("Ready", "ok")
+        return DeviceState("Ready", f"{waiting} document(s) need attention", "warn",
+                           "Printed documents are sent on their own.")
+    return DeviceState("Ready", "", "ok", "Printed documents are sent on their own.")
+
+
+def header_line(state: DeviceState) -> str:
+    """The sentence beside the header's badge.
+
+    One line, so only the first sentence: the rest of a long problem is on
+    the Status page, next to the button that fixes it.
+    """
+    text = (state.detail or state.summary).split(". ")[0].rstrip(".")
+    return f"{text[:1].upper()}{text[1:]}." if text else ""
+
+
+@dataclass(frozen=True)
+class SetupNeed:
+    """What stops sending, gathered under the setup step that fixes it: one
+    card on the Status page."""
+
+    page: str
+    title: str
+    action: str
+    lines: tuple[str, ...]
+
+    @property
+    def tag(self) -> str:
+        # Waiting on Meta is not something anyone here can do more about.
+        if all("approved by Meta" in line for line in self.lines):
+            return "Pending approval"
+        return "Required"
+
+
+# Which setup step fixes each problem send/readiness.py can report, found by
+# the words it uses. First match wins.
+_FIXED_BY = (
+    ("connect", ("phone number id", "access token")),
+    ("templates", ("approved by meta", "is not configured")),
+    ("messages", ("nothing to fill", "no message yet")),
+    ("preferences", ("own numbers",)),
+)
+SETUP_ACTIONS = {
+    "connect": "Open setup",
+    "templates": "View templates",
+    "messages": "Fill in messages",
+    "preferences": "Open counter settings",
+}
+
+
+def fixed_by(problem: str) -> str:
+    """The setup page that fixes `problem`. Connect, if nothing says otherwise."""
+    lowered = problem.lower()
+    for page, words in _FIXED_BY:
+        if any(word in lowered for word in words):
+            return page
+    return "connect"
+
+
+def setup_needs(problems: list[str]) -> list[SetupNeed]:
+    from .setupmodel import STEP_TITLES
+
+    titles = dict(STEP_TITLES)
+    grouped: dict[str, list[str]] = {}
+    for problem in problems:
+        grouped.setdefault(fixed_by(problem), []).append(problem)
+    return [
+        SetupNeed(page, titles[page], SETUP_ACTIONS[page], tuple(lines))
+        for page, lines in grouped.items()
+    ]
 
 
 @dataclass(frozen=True)
@@ -85,10 +165,9 @@ def counters_for_today(store, settings: Settings, now: datetime | None = None) -
     counts = store.status_counts(midnight)
     return Counters(
         printed=sum(counts.values()),
-        # A test send counts here so the panel means something before go-live;
-        # the label changes rather than the number.
-        sent=counts.get(JobStatus.SENT, 0) + counts.get(JobStatus.DRY_RUN, 0),
-        waiting=counts.get(JobStatus.AWAITING, 0) + counts.get(JobStatus.HELD, 0),
+        sent=counts.get(JobStatus.DRY_RUN if settings.dry_run else JobStatus.SENT, 0),
+        waiting=sum(counts.get(s, 0) for s in
+                    (JobStatus.AWAITING, JobStatus.HELD, JobStatus.READY, JobStatus.FAILED)),
         failed=counts.get(JobStatus.FAILED, 0),
     )
 
@@ -98,7 +177,7 @@ def sent_caption(settings: Settings) -> str:
 
 
 def history_row(job: PrintJob) -> tuple[str, str, str, str, str]:
-    """One line of the Recent tab."""
+    """One line of the Recent documents table."""
     label, _tone = label_of(job)
     return (
         job.created_at.strftime("%d %b %H:%M"),

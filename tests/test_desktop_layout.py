@@ -56,7 +56,8 @@ def window(tmp_path_factory):
         store.close()
         pytest.skip("no display")
 
-    win.tabs.select(win.settings_tab)
+    # The counter settings are a page of the setup view now, not a tab.
+    win.show_setup("preferences")
     # Map the window before anything measures it. update_idletasks() runs the
     # geometry calculations but not the map, and Windows gives an unmapped
     # window no real geometry at all -- the canvas reports a width of 1, so
@@ -228,6 +229,70 @@ def test_typing_a_number_survives_the_refresh_timer(window):
         window.refresh()
 
 
+def test_failed_jobs_have_a_retry_action_and_cancel_keeps_them(window, monkeypatch):
+    from waprinter.models import JobStatus
+    from waprinter.ui import desktop
+
+    job = _held_job(window)
+    job.status = JobStatus.FAILED
+    job.error = "The response was lost. Check WhatsApp before sending again."
+    job.recipient = "+919876543210"
+    window.pipeline.store.upsert(job)
+    prompts = []
+    monkeypatch.setattr(desktop.messagebox, "askyesno", lambda *a, **k: prompts.append(a) or False)
+    try:
+        window.refresh()
+        buttons = [w for w in _descendants(window.queue_body)
+                   if w.winfo_class() == "TButton" and w.cget("text") == "Retry…"]
+        assert len(buttons) == 1
+        buttons[0].invoke()
+        assert prompts and "Check WhatsApp" in prompts[0][1]
+        assert window.pipeline.store.get(job.id).status == JobStatus.FAILED
+        assert job.id not in window._sending
+    finally:
+        window.pipeline.store.conn.execute("DELETE FROM jobs WHERE id = ?", (job.id,))
+        window.pipeline.store.conn.commit()
+        window.refresh()
+
+
+def test_older_queue_jobs_can_be_loaded_without_losing_typed_numbers(window):
+    from dataclasses import replace
+    from datetime import timedelta
+
+    first = _held_job(window)
+    second = replace(first, id="older-queue-job", created_at=first.created_at - timedelta(seconds=1))
+    window.pipeline.store.upsert(second)
+    window._queue_limit = 1
+    try:
+        window.refresh()
+        window._queue_rows[first.id].insert(0, "98765")
+        assert second.id not in window._queue_rows
+        more = [w for w in _descendants(window.queue_body)
+                if w.winfo_class() == "TButton" and w.cget("text").startswith("Show more")]
+        assert len(more) == 1
+        more[0].invoke()
+        assert second.id in window._queue_rows
+        assert window._queue_rows[first.id].get() == "98765"
+    finally:
+        window._queue_limit = 200
+        window.pipeline.store.conn.execute("DELETE FROM jobs WHERE id IN (?, ?)", (first.id, second.id))
+        window.pipeline.store.conn.commit()
+        window.refresh()
+
+
+def test_configuration_button_is_labelled_as_a_check(window, monkeypatch):
+    from waprinter.ui import desktop
+
+    found = [w for w in _descendants(window.root)
+             if w.winfo_class() == "TButton" and w.cget("text") == "Check configuration"]
+    assert len(found) == 1
+    reports = []
+    monkeypatch.setattr("waprinter.send.readiness.problems", lambda *a: [])
+    monkeypatch.setattr(desktop.messagebox, "showinfo", lambda *a, **k: reports.append(a))
+    found[0].invoke()
+    assert reports and "nothing was sent" in reports[0][1]
+
+
 def test_a_batch_print_does_not_open_a_chat_per_receipt(window, monkeypatch):
     """One receipt goes straight to its chat; ten receipts must not.
 
@@ -269,124 +334,368 @@ def test_a_batch_print_does_not_open_a_chat_per_receipt(window, monkeypatch):
         window.refresh()
 
 
-class TestTheDocumentsGroup:
-    """Which message each kind of paperwork goes out under, on the page.
+@pytest.fixture
+def sync_tasks(monkeypatch):
+    """Run setup's background work inline, so a test can see its result."""
+    from waprinter.ui import setup
 
-    Before this there was no way to see it from the app at all: the Settings
-    tab showed `default_template` and nothing else, so an engineer over
-    AnyDesk had to open settings.json to find out whether a removal notice
-    was pointing at a template Meta had rejected -- or that it was pointing at
-    a typo, which holds every notice at the counter.
-    """
+    def run(self, name, work, done):
+        try:
+            result = work()
+        except Exception as exc:
+            result = exc
+        done(result)
+        return True
 
-    @pytest.fixture
-    def form(self, window):
-        """Restores the window's settings afterwards.
+    monkeypatch.setattr(setup.Tasks, "run", run)
 
-        The window is module-scoped because a second Tk() segfaults on macOS,
-        so a test that writes to it has to put it back.
-        """
-        s = window.settings
-        before = (dict(s.document_templates), dict(s.document_nouns))
-        window._load_settings_into_form()
-        yield window
-        s.document_templates, s.document_nouns = before
-        window._load_settings_into_form()
 
-    def _kinds(self, window):
-        return [k.name for k in window.pipeline.profile.document_kinds]
+@pytest.fixture
+def restore(window):
+    """Put the window's settings back. The window is module-scoped because a
+    second Tk() segfaults on macOS, so a test that writes to it must undo it."""
+    from copy import deepcopy
 
-    def test_every_document_the_profile_knows_has_a_row(self, window):
-        for kind in self._kinds(window):
-            assert f"doc_template:{kind}" in window.fields
-            assert f"doc_noun:{kind}" in window.fields
+    before = deepcopy(window.settings)
+    yield window
+    for name in before.__dataclass_fields__:
+        setattr(window.settings, name, getattr(before, name))
+    window.settings.save()
+    window.show_setup("preferences")
 
-    def test_a_row_is_labelled_in_words_not_in_settings_keys(self, window):
-        labels = {
-            w.cget("text")
-            for w in _descendants(window.settings_tab)
-            if isinstance(w, tk.Widget) and "text" in w.keys()
-        }
+
+def _messages(window):
+    window.show_setup("messages")
+    return window.setup_view.pages["messages"]
+
+
+def _choose(box, predicate):
+    values = list(box.cget("values"))
+    index = next(i for i, v in enumerate(values) if predicate(v))
+    box.current(index)
+    box.event_generate("<<ComboboxSelected>>")
+    return values[index]
+
+
+class TestSetupIsItsOwnPlace:
+    """The clerk has three pages; everything that changes what members
+    receive is behind Setup, optionally behind a PIN."""
+
+    def test_the_side_bar_offers_the_counter_pages_then_setup(self, window):
+        labels = [str(b.cget("text")).split(" (")[0] for b in window.nav_buttons.values()]
+        assert labels == ["Status", "Needs attention", "Recent documents",
+                          "Setup", "Message templates"]
+
+    def test_the_counter_pages_do_not_show_setup(self, window):
+        window.show_counter()
+        try:
+            assert not window.in_setup
+            assert not window.setup_view.winfo_ismapped()
+            window.show_view("recent")
+            assert window.nav_buttons["recent"].cget("style") == "NavOn.TButton"
+            assert window.nav_buttons["status"].cget("style") == "Nav.TButton"
+        finally:
+            window.show_setup("preferences")
+
+    def test_message_templates_opens_that_setup_step(self, window):
+        window.show_counter()
+        window.nav_buttons["templates"].invoke()   # no PIN is set here
+        assert window.in_setup and window.setup_view.current == "templates"
+        assert window.nav_buttons["templates"].cget("style") == "NavOn.TButton"
+        window.show_setup("preferences")
+        assert window.nav_buttons["setup"].cget("style") == "NavOn.TButton"
+
+    def test_every_step_opens(self, window):
+        for key, _title in __import__("waprinter.ui.setupmodel", fromlist=["x"]).STEP_TITLES:
+            window.show_setup(key)
+            window.root.update_idletasks()
+            assert window.setup_view.current == key
+        window.show_setup("preferences")
+
+    def test_a_pin_keeps_setup_closed(self, restore, monkeypatch):
+        from waprinter.ui import desktop
+        from waprinter.ui.setupmodel import hash_pin
+
+        restore.show_counter()
+        restore.settings.setup_pin = hash_pin("4321")
+        errors = []
+        monkeypatch.setattr(desktop.messagebox, "showerror", lambda *a, **k: errors.append(a))
+        monkeypatch.setattr(desktop.simpledialog, "askstring", lambda *a, **k: "1111")
+        assert restore.open_setup() is False
+        assert errors and not restore.in_setup
+
+        monkeypatch.setattr(desktop.simpledialog, "askstring", lambda *a, **k: "4321")
+        assert restore.open_setup() is True
+        assert restore.in_setup
+
+
+class TestFillInMessages:
+    def test_every_document_type_is_offered_in_words(self, window):
+        page = _messages(window)
+        labels = list(page.kind_box.cget("values"))
+        assert labels[0] == "Receipts"
         assert "Removal notice" in labels
         assert "removal_notice" not in labels
 
-    def test_the_stored_mapping_is_shown(self, form):
-        form.settings.document_templates = {"removal_notice": "rn_v2"}
-        form.settings.document_nouns = {"removal_notice": "Notice"}
+    def test_the_saved_choice_is_shown(self, restore):
+        restore.settings.document_templates = {"removal_notice": "removal_notice"}
+        restore.settings.document_nouns = {"removal_notice": "Notice"}
+        page = _messages(restore)
+        page.select_kind("removal_notice")
+        assert page.template_ref() == "removal_notice"
+        assert page.noun.get() == "Notice"
 
-        form._load_settings_into_form()
+    def test_a_saved_template_that_is_not_here_is_shown_not_hidden(self, restore):
+        restore.settings.document_templates = {"removal_notice": "removal_notce"}
+        page = _messages(restore)
+        page.select_kind("removal_notice")
+        assert page.template_ref() == "removal_notce"
+        assert "not on this computer" in page.template_box.get()
 
-        assert form.fields["doc_template:removal_notice"].get() == "rn_v2"
-        assert form.fields["doc_noun:removal_notice"].get() == "Notice"
+    def test_choosing_none_leaves_no_mapping(self, restore, monkeypatch):
+        """An empty map is a real answer, and the gate reads it."""
+        from waprinter.ui import setup
 
-    def test_what_is_typed_is_what_is_stored(self, form, monkeypatch):
-        from waprinter.ui import desktop
+        monkeypatch.setattr(setup.messagebox, "showinfo", lambda *a, **k: None)
+        restore.settings.document_templates = {"removal_notice": "removal_notice"}
+        page = _messages(restore)
+        page.select_kind("removal_notice")
+        _choose(page.template_box, lambda v: v.startswith("— none"))
+        page.noun.set("")
+        page.save()
+        assert "removal_notice" not in restore.settings.document_templates
 
-        monkeypatch.setattr(desktop.messagebox, "askyesno", lambda *a, **k: True)
-        form.fields["doc_template:removal_letter"].set("removal_letter")
-        form.fields["doc_noun:removal_letter"].set("Removal Letter")
+    def test_choices_are_fixed_and_carry_their_status(self, window):
+        page = _messages(window)
+        page.select_kind("removal_notice")
+        assert str(page.template_box.cget("state")) == "readonly"
+        assert any("waiting for Meta's approval" in v for v in page.template_box.cget("values"))
 
-        form.apply_settings()
-
-        assert form.settings.document_templates["removal_letter"] == "removal_letter"
-        assert form.settings.document_nouns["removal_letter"] == "Removal Letter"
-
-    def test_blank_rows_do_not_become_a_mapping(self, form):
-        """An empty map is a real answer, and the gate reads it.
-
-        A client who only sends receipts must be able to say so. If Apply
-        wrote a row back for every kind the profile knows, they never could,
-        and every unidentifiable scan would start being held on their counter.
-        """
-        for kind in self._kinds(form):
-            form.fields[f"doc_template:{kind}"].set("")
-            form.fields[f"doc_noun:{kind}"].set("")
-
-        form.apply_settings()
-
-        assert form.settings.document_templates == {}
-        assert form.settings.document_nouns == {}
-
-    def test_a_typo_is_caught_before_it_reaches_the_counter(self, form, monkeypatch):
-        from waprinter.ui import desktop
-
-        asked = {}
-        monkeypatch.setattr(
-            desktop.messagebox,
-            "askyesno",
-            lambda title, message, **k: asked.setdefault("message", message) and False,
-        )
-        form.fields["doc_template:removal_notice"].set("removal_notce")
-
-        form.apply_settings()
-
-        assert "removal_notce" in asked["message"]
-        assert "not on this computer" in asked["message"]
-
-    def test_declining_the_warning_changes_nothing(self, form, monkeypatch):
-        from waprinter.ui import desktop
-
-        monkeypatch.setattr(desktop.messagebox, "askyesno", lambda *a, **k: False)
-        before = dict(form.settings.document_templates)
-        form.fields["doc_template:removal_notice"].set("removal_notce")
-
-        form.apply_settings()
-
-        assert form.settings.document_templates == before
-
-    def test_an_unapproved_message_is_named_with_its_status(self, form, monkeypatch):
-        """Not only "unknown" -- a template Meta rejected is on the computer
-        and would still never send."""
-        from waprinter.ui import desktop
+    def test_an_unapproved_template_is_named_and_declining_changes_nothing(
+        self, restore, monkeypatch
+    ):
+        from waprinter.ui import setup
 
         asked = {}
-        monkeypatch.setattr(
-            desktop.messagebox,
-            "askyesno",
-            lambda title, message, **k: asked.setdefault("message", message) and False,
+        monkeypatch.setattr(setup.messagebox, "askyesno",
+                            lambda title, message, **k: asked.setdefault("m", message) and False)
+        restore.settings.send_mode = "api"
+        before = dict(restore.settings.document_templates)
+        page = _messages(restore)
+        page.select_kind("removal_notice")
+        _choose(page.template_box, lambda v: v.startswith("removal_notice"))
+        assert "waiting for Meta's approval" in page.status.cget("text")
+        page.save()
+        assert "Save anyway" in asked["m"]
+        assert restore.settings.document_templates == before
+
+    def test_a_variable_is_mapped_to_a_taught_field(self, restore, monkeypatch):
+        """The case this screen exists for: the template says {{id}}, the
+        page says "Cust ID", and the two are joined here."""
+        from waprinter.extract.profile import FieldRule
+        from waprinter.send.templates import MessageTemplate
+        from waprinter.ui import setup
+
+        monkeypatch.setattr(setup.messagebox, "showinfo", lambda *a, **k: None)
+        restore.pipeline.templates.put(MessageTemplate(
+            name="member_statement", body="Dear {{name}}, statement for {{id}} from {{branch}}.",
+            status="approved", parameter_format="named",
+        ))
+        restore.pipeline.profile.field_rules["_default"] = [
+            FieldRule(name="customer_id", label="Cust ID", kind="code"),
+        ]
+        try:
+            page = _messages(restore)
+            page.select_kind("_default")
+            _choose(page.template_box, lambda v: v.startswith("member_statement"))
+            mapping = page.mapping()
+            assert mapping["name"] == "customer_name"
+            assert mapping["id"] == "customer_id"          # suggested from shared words
+            source, fixed, *_ = page._rows["branch"]
+            source.set("Fixed text…")
+            fixed.set("Karimnagar")
+            page.update_preview()
+            assert "Karimnagar" in page.preview.get("1.0", "end")
+            page.save()
+            saved = restore.settings.template_mappings["member_statement"]
+            assert saved == {"name": "customer_name", "id": "customer_id",
+                             "branch": "text:Karimnagar"}
+            assert restore.settings.default_template == "member_statement"
+        finally:
+            restore.pipeline.profile.field_rules.pop("_default", None)
+
+    def test_a_numbered_template_is_not_offered_the_receipts_numbers(self, restore):
+        """What running the agent turned up: invoice_document was filled from
+        the chit receipt's positions, and read "Your invoice Srinidhi Chit
+        Funds for ₹INV-2291"."""
+        restore.settings.default_template = "invoice_document"
+        page = _messages(restore)
+        page.select_kind("_default")
+        assert page.mapping() == {"1": "customer_name", "2": "invoice_number",
+                                  "3": "total_amount"}
+        assert "Srinidhi Chit Funds for" not in page.preview.get("1.0", "end")
+
+    def test_the_status_page_says_an_unfillable_message_before_any_print(self, restore):
+        from waprinter.config import Settings
+
+        restore.settings.default_template = "invoice_document"
+        restore.settings.template_variables = Settings().template_variables
+        restore.settings.template_mappings = {}
+        # Saved, as provision.json or a hand edit would: refresh() re-reads
+        # settings.json before it decides what the Status tab says.
+        restore.settings.save()
+        restore.show_counter()
+        restore.refresh()
+        text = " ".join(str(w.cget("text")) for w in _descendants(restore.problems_box)
+                        if w.winfo_class() == "TLabel")
+        assert "'invoice_document' message has {{1}}, {{2}}, {{3}}" in text
+        assert restore.problems_box.winfo_manager() == "pack"
+        # ...on a card that leads to the step that fixes it.
+        links = [str(w.cget("text")) for w in _descendants(restore.problems_box)
+                 if w.winfo_class() == "TButton"]
+        assert "Fill in messages" in links
+
+    def test_an_unfilled_variable_cannot_be_saved(self, restore, monkeypatch):
+        from waprinter.send.templates import MessageTemplate
+        from waprinter.ui import setup
+
+        errors = []
+        monkeypatch.setattr(setup.messagebox, "showerror", lambda *a, **k: errors.append(a))
+        restore.pipeline.templates.put(MessageTemplate(
+            name="odd_one", body="Hi {{zzz_unknowable}}", status="approved",
+            parameter_format="named",
+        ))
+        page = _messages(restore)
+        page.select_kind("_default")
+        _choose(page.template_box, lambda v: v.startswith("odd_one"))
+        page._rows["zzz_unknowable"][0].set("")
+        page.save()
+        assert errors and "{{zzz_unknowable}} is not filled in" in errors[0][1]
+        assert "odd_one" not in restore.settings.template_mappings
+
+
+class TestConnect:
+    def test_a_token_finds_the_number_and_saving_stores_the_ids(
+        self, restore, monkeypatch, sync_tasks
+    ):
+        from waprinter.send.meta_account import BusinessAccount, Connection, PhoneNumber
+
+        stored = {}
+        monkeypatch.setattr("waprinter.send.meta_account.inspect",
+                            lambda token, version, account: Connection(
+                                valid=True,
+                                accounts=[BusinessAccount("555", "Srinidhi", [
+                                    PhoneNumber("111", "+91 87822 51999", "Srinidhi Chit Funds")])]))
+        monkeypatch.setattr("waprinter.secrets.save_token", lambda t: stored.setdefault("token", t))
+        monkeypatch.setattr("waprinter.send.sync.sync_templates", lambda *a, **k: 3)
+
+        restore.show_setup("connect")
+        page = restore.setup_view.pages["connect"]
+        page.token.set("EAAG" + "x" * 60)
+        page.look_up()
+        assert "+91 87822 51999" in page.numbers.get()
+        assert "does not expire" in page.result.cget("text")
+
+        page.save()
+        assert stored["token"] == "EAAG" + "x" * 60
+        assert restore.settings.phone_number_id == "111"
+        assert restore.settings.business_account_id == "555"
+        assert "Loaded 3 template(s)" in page.result.cget("text")
+
+
+class TestTeaching:
+    def test_a_new_type_is_taught_by_clicking_and_saved(self, restore, monkeypatch,
+                                                        sync_tasks, tmp_path):
+        """Upload a sample, click the value beside "Cust ID", call it
+        Customer ID, save: the type and the field are in profile.json."""
+        import fitz
+
+        from waprinter.config import paths
+        from waprinter.extract.profile import DocumentProfile
+        from waprinter.ui import setup, teach
+
+        sample = tmp_path / "statement.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((60, 70), "MEMBER STATEMENT", fontsize=16)
+        page.insert_text((60, 110), "Cust ID :", fontsize=10)
+        page.insert_text((140, 110), "SCF-00418", fontsize=10)
+        page.insert_text((60, 130), "Name", fontsize=10)
+        page.insert_text((140, 130), "ANITHA RAMESH", fontsize=10)
+        doc.save(sample)
+
+        monkeypatch.setattr(setup.messagebox, "showinfo", lambda *a, **k: None)
+        saved_as = []
+        documents = restore.setup_view.pages["documents"]
+        window = teach.TeachWindow(
+            restore.setup_view, sample, None,
+            on_saved=lambda key: (saved_as.append(key), documents.taught(key)),
         )
-        form.fields["doc_template:removal_notice"].set("chits_details")  # pending
+        try:
+            assert window.title_var.get() == "MEMBER STATEMENT"
+            window.name_var.set("Member statement")
+            rows = window._rows
+            row = next(r for r in rows if "SCF-00418" in r.text)
+            index = [w.text for w in row.words].index("SCF-00418")
+            from waprinter.extract.rules import Selection
 
-        form.apply_settings()
+            window.selection = Selection(window.doc.pages[0], row, index, index)
+            window._show_selection(guess=True)
+            assert "Cust ID" in window.found_label.cget("text")
+            window.field_var.set("Customer ID")
+            window.add_field()
+            assert window.tree.set("customer_id", "reads") == "SCF-00418"
+            errors = []
+            monkeypatch.setattr(teach.messagebox, "showerror", lambda *a, **k: errors.append(a))
+            window.save()
+            assert errors and "at least 3" in errors[-1][1]
+            assert not saved_as
+            from waprinter.validation import Sample
+            from test_teaching import statement
+            window.validation_samples = [Sample(sample, "member_statement", {"customer_id": "SCF-00418"}, "")]
+            for number in (7, 991):
+                extra = statement(tmp_path / f"extra-{number}.pdf", cust_id=f"SCF-{number}")
+                window.validation_samples.append(Sample(extra, "member_statement", {"customer_id": f"SCF-{number}"}, "+919000012345"))
+            window.save()
+        finally:
+            if window.winfo_exists():
+                window.close()
 
-        assert "not approved by Meta" in asked["message"]
+        assert saved_as == ["member_statement"]
+        profile = DocumentProfile.load(paths().profile)
+        assert [k.name for k in profile.custom_kinds] == ["member_statement"]
+        assert profile.custom_kinds[0].match == ["MEMBER STATEMENT"]
+        assert profile.rules_for("member_statement")[0].label == "Cust ID"
+        assert (paths().samples / "member_statement.pdf").exists()
+        # And the hand-over lands on the mapping page with the new type chosen.
+        assert restore.setup_view.current == "messages"
+        assert restore.setup_view.pages["messages"].kind_key() == "member_statement"
+
+        from waprinter import teaching
+
+        teaching.remove_kind("member_statement")
+        restore.pipeline.reload_profile(force=True)
+
+
+def test_review_samples_collects_corrected_expectations(window, tmp_path, sync_tasks):
+    from test_teaching import statement
+    from waprinter.config import Settings
+    from waprinter.extract.profile import DocumentKind, DocumentProfile
+    from waprinter.ui.validation import ReviewSamples
+    from waprinter.validation import Reader
+
+    profile = DocumentProfile(custom_kinds=[DocumentKind('statement', ['MEMBER STATEMENT'])])
+    pdfs = [statement(tmp_path / f'review-{i}.pdf', cust_id=f'SCF-{i}') for i in range(3)]
+    reviewed = []
+    dialog = ReviewSamples(window.root, pdfs, 'statement', profile, Settings(), Reader(), reviewed.extend)
+    try:
+        assert not reviewed
+        for number in range(3):
+            assert dialog.index == number
+            dialog.entries['recipient'].set('9876543210')
+            dialog.accept()
+        assert len(reviewed) == 3
+        assert all(s.recipient == '+919876543210' for s in reviewed)
+    finally:
+        if dialog.winfo_exists():
+            dialog.destroy()

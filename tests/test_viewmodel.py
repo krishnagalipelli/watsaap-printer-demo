@@ -74,6 +74,90 @@ class TestDeviceState:
         assert state.tone == "warn"
 
 
+class TestHeader:
+    """The header badge is one word; the line beside it one sentence."""
+
+    def test_the_badge_is_the_state_and_the_line_says_why(self):
+        state = vm.device_state(Settings(dry_run=True), 0, [])
+        assert state.label == "Test mode"
+        assert vm.header_line(state) == "Documents are read but nothing is sent."
+
+    def test_a_long_problem_is_cut_to_its_first_sentence(self):
+        state = vm.device_state(Settings(dry_run=False), 0, [
+            "The WhatsApp phone number ID is not set. Open Setup → Connect "
+            "WhatsApp and choose the number to send from."])
+        assert vm.header_line(state) == "The WhatsApp phone number ID is not set."
+
+    def test_plain_ready_still_says_something(self):
+        state = vm.device_state(Settings(dry_run=False, send_mode="api"), 0, [])
+        assert vm.header_line(state) == "Printed documents are sent on their own."
+
+    @pytest.mark.parametrize("settings, waiting, problems", [
+        (Settings(dry_run=True), 0, []),
+        (Settings(dry_run=False), 0, ["No access token is stored."]),
+        (Settings(dry_run=False, send_mode="link"), 0, []),
+        (Settings(dry_run=False, send_mode="api"), 2, []),
+        (Settings(dry_run=False, send_mode="api"), 0, []),
+    ])
+    def test_every_state_has_a_line_for_the_mode_card(self, settings, waiting, problems):
+        assert vm.device_state(settings, waiting, problems).summary
+
+
+class TestSetupNeeds:
+    """Each problem that stops sending is a card leading to the step that
+    fixes it -- which only helps if it leads to the right one."""
+
+    @pytest.mark.parametrize("problem, page", [
+        ("The WhatsApp phone number ID is not set. Open Setup → Connect "
+         "WhatsApp and choose the number to send from.", "connect"),
+        ("No access token is stored.", "connect"),
+        ("The stored access token is only 12 characters. Meta's tokens are "
+         "far longer, so this one was probably not pasted in full.", "connect"),
+        ("Message 'invoice_document' is pending, not yet approved by Meta.", "templates"),
+        ("Message 'receipt_msg' is not configured.", "templates"),
+        ("The 'invoice_document' message has {{1}}, {{2}} with nothing to fill "
+         "them. Open Setup → Fill in messages and choose what goes in each.", "messages"),
+        ("Member statement documents have no message yet. Open Setup → Fill "
+         "in messages.", "messages"),
+        ("Your own numbers are not listed, so a number printed in your "
+         "letterhead could be treated as a customer.", "preferences"),
+    ])
+    def test_each_problem_leads_to_its_step(self, problem, page):
+        assert vm.fixed_by(problem) == page
+
+    def test_what_readiness_reports_is_all_recognised(self):
+        """Guards the word lists against a rewording in send/readiness.py.
+
+        A fresh install has most of them at once. None may fall through to
+        the default, which would send the clerk to the wrong step.
+        """
+        from waprinter.send.readiness import problems
+
+        found = problems(Settings(dry_run=False, send_mode="api", own_numbers=[]))
+        assert len(found) >= 3
+        for problem in found:
+            lowered = problem.lower()
+            assert any(word in lowered for _page, words in vm._FIXED_BY for word in words), problem
+
+    def test_problems_are_grouped_by_step_in_the_order_they_came(self):
+        needs = vm.setup_needs([
+            "Your own numbers are not listed.",
+            "The WhatsApp phone number ID is not set.",
+            "No access token is stored.",
+        ])
+        assert [n.page for n in needs] == ["preferences", "connect"]
+        assert [n.title for n in needs] == ["Counter settings", "Connect WhatsApp"]
+        assert len(needs[1].lines) == 2
+
+    def test_waiting_on_meta_is_tagged_as_such(self):
+        [need] = vm.setup_needs(["Message 'a' is pending, not yet approved by Meta.",
+                                 "Message 'b' is pending, not yet approved by Meta."])
+        assert need.tag == "Pending approval"
+        assert need.action == "View templates"
+        [need] = vm.setup_needs(["Message 'a' is not configured."])
+        assert need.tag == "Required"
+
+
 class TestCounters:
     def test_it_counts_the_day(self, pipeline, make_invoice):
         pipeline.process(make_invoice())

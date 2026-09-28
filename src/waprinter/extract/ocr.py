@@ -130,3 +130,20 @@ def ocr_page(
         )
     except Exception as exc:  # pymupdf raises library-specific errors
         raise OcrUnavailable(f"OCR failed: {exc}") from exc
+
+
+def smoke_test() -> bool:
+    """Exercise the actual OCR engine from a raster, without customer data."""
+    import re
+
+    settings = OcrSettings()
+    with pymupdf.open() as source:
+        page = source.new_page(width=600, height=200)
+        page.insert_text((40, 90), "Mobile 9876543210", fontsize=28)
+        image = page.get_pixmap(matrix=pymupdf.Matrix(2, 2))
+        with pymupdf.open() as scanned:
+            raster = scanned.new_page(width=600, height=200)
+            raster.insert_image(raster.rect, pixmap=image)
+            result = ocr_page(raster, settings)
+            text = raster.get_text(textpage=result)
+            return "9876543210" in re.sub(r"\D", "", text)

@@ -159,7 +159,7 @@ class TestAutomaticHolds:
 
     @needs_tesseract
     def test_an_unidentifiable_scan_is_held_where_other_messages_exist(
-        self, pipeline, make_invoice
+        self, pipeline, make_invoice, monkeypatch
     ):
         """Trusting OCR with a number is not trusting it with the document.
 
@@ -168,6 +168,8 @@ class TestAutomaticHolds:
         payment" over a removal notice is worse than sending nothing -- so the
         fallback is not taken silently, however much the number is trusted.
         """
+        from waprinter.extract.profile import DocumentProfile
+        monkeypatch.setattr(DocumentProfile, "kind_of", lambda self, doc: None)
         pipeline.settings.ocr_silent_send = True
         job = run(pipeline, make_invoice, InvoiceSpec(raster=True))
 
@@ -272,3 +274,104 @@ class TestTokenValidation:
         settings = Settings(own_numbers=["9999999999"], phone_number_id="123")
         found = problems(settings)
         assert any("Ctrl+V" in p for p in found), found
+
+
+class TestWhatTheQueueSendsIsGuardedToo:
+    """release() is the operator's path, and it used to skip two guards.
+
+    The gate only sees a recipient it found itself, so in confirmation mode
+    there is no dedupe at all: the same receipt released twice to the same
+    number went out twice. And a sender that raised, rather than answered,
+    left the job at QUEUED -- a status no screen lists -- so the receipt
+    simply vanished.
+    """
+
+    def test_a_reprint_released_to_the_same_number_is_suppressed(
+        self, confirm_pipeline, make_invoice
+    ):
+        first = run(confirm_pipeline, make_invoice, InvoiceSpec(customer_phone=None))
+        assert confirm_pipeline.release(first.id, "9876543210").status is JobStatus.DRY_RUN
+
+        again = run(confirm_pipeline, make_invoice, InvoiceSpec(customer_phone=None))
+        released = confirm_pipeline.release(again.id, "9876543210")
+
+        assert released.status is JobStatus.DUPLICATE
+        assert "Already sent to +919876543210" in released.hold_reason
+
+    def test_the_same_receipt_to_a_different_number_still_goes(
+        self, confirm_pipeline, make_invoice
+    ):
+        # The operator typed the wrong number first time; the correction is
+        # a different recipient and must not be treated as a reprint.
+        first = run(confirm_pipeline, make_invoice, InvoiceSpec(customer_phone=None))
+        confirm_pipeline.release(first.id, "9876543210")
+        again = run(confirm_pipeline, make_invoice, InvoiceSpec(customer_phone=None))
+        assert confirm_pipeline.release(again.id, "9876543211").status is JobStatus.DRY_RUN
+
+    def test_a_reprint_outside_the_window_goes_again(
+        self, confirm_pipeline, make_invoice
+    ):
+        first = run(confirm_pipeline, make_invoice, InvoiceSpec(customer_phone=None))
+        confirm_pipeline.release(first.id, "9876543210")
+        later = datetime.now() + timedelta(
+            hours=confirm_pipeline.settings.dedupe_window_hours + 1
+        )
+        again = run(confirm_pipeline, make_invoice, InvoiceSpec(customer_phone=None))
+        assert (
+            confirm_pipeline.release(again.id, "9876543210", now=later).status
+            is JobStatus.DRY_RUN
+        )
+
+    def test_a_sender_that_raises_fails_the_job_rather_than_losing_it(
+        self, pipeline, make_invoice
+    ):
+        class Boom:
+            def send(self, *a, **k):
+                raise OSError("the PDF vanished under us")
+
+        pipeline.sender = Boom()
+        job = run(pipeline, make_invoice)
+
+        assert job.status is JobStatus.FAILED
+        assert "vanished" in job.error
+        assert pipeline.store.get(job.id).status is JobStatus.FAILED
+
+    def test_a_sender_that_raises_on_release_fails_the_job_too(
+        self, confirm_pipeline, make_invoice
+    ):
+        class Boom:
+            def send(self, *a, **k):
+                raise RuntimeError("unexpected response shape")
+
+        job = run(confirm_pipeline, make_invoice, InvoiceSpec(customer_phone=None))
+        confirm_pipeline.sender = Boom()
+        released = confirm_pipeline.release(job.id, "9876543210")
+
+        assert released.status is JobStatus.FAILED
+        assert "unexpected response" in released.error
+
+    def test_the_dialog_preview_is_the_message_that_is_sent(
+        self, confirm_pipeline, make_invoice
+    ):
+        """The confirmation dialog used to render without the business name.
+
+        The operator checked a preview reading "to -." and the member got a
+        different message. Now there is one compose path.
+        """
+        confirm_pipeline.settings.default_template = "chit_receipt"
+        # All six of chit_receipt's variables. Mapping only the first three
+        # used to send the rest as "-"; now such a message is held.
+        confirm_pipeline.settings.template_variables = {
+            "1": "customer_name",
+            "2": "business_name",
+            "3": "invoice_number",
+            "4": "invoice_date",
+            "5": "total_amount",
+            "6": "payment_mode",
+        }
+        job = run(confirm_pipeline, make_invoice, InvoiceSpec(customer_phone=None))
+        assert confirm_pipeline.settings.business_name in job.message_preview
+        assert " to -." not in job.message_preview
+
+        sent = confirm_pipeline.release(job.id, "9876543210")
+        assert sent.message_preview == job.message_preview

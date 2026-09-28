@@ -72,7 +72,7 @@ class ExtractedFields:
     amount_words: str | None = None
     payment_mode: str | None = None
     # Which kind of paperwork this is -- "removal_notice", "removal_letter",
-    # None for the ordinary receipt. Decides which approved template it goes
+    # "receipt" for a positively identified receipt; None when unknown. Decides which template it goes
     # out under, so a member is never sent the receipt wording over a notice.
     document_kind: str | None = None
     # Whether the kind above was actually confirmed. A page with a text layer
@@ -82,7 +82,12 @@ class ExtractedFields:
     # is held: it picks the approved template, so getting it wrong writes to
     # the right member with the wrong words.
     document_kind_verified: bool = True
+    classification_error: str = ""
     page_count: int = 0
+    # Values read by fields someone taught from a sample PDF -- "customer_id",
+    # "chit_group" -- keyed by the name they chose. Built-in fields above can
+    # also be taught, in which case the taught value replaces the guess.
+    extra: dict[str, str] = field(default_factory=dict)
     has_text_layer: bool = True   # False => the ERP printed a raster
     used_ocr: bool = False        # a raster page that OCR managed to read
     ocr_error: str | None = None  # why OCR could not run, when it was needed
@@ -105,6 +110,9 @@ class ExtractedFields:
             "total_amount": self.total_amount or "",
             "amount_words": self.amount_words or "",
             "payment_mode": self.payment_mode or "",
+            # Taught fields last, so a taught value is what a template gets
+            # even where its name matches a built-in one.
+            **{k: v or "" for k, v in self.extra.items()},
         }
 
 

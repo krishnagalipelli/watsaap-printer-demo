@@ -8,6 +8,8 @@ five o'clock on a Friday.
 from __future__ import annotations
 
 import logging
+import functools
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -20,12 +22,21 @@ from .extract.profile import DocumentProfile
 from .extract.split import receipt_groups, segment_path, write_segment
 from .models import JobStatus, PrintJob
 from .rules import Decision, evaluate
-from .rules.gate import _excluded_numbers, dedupe_key
+from .rules.gate import dedupe_key, excluded_numbers
 from .send.base import Sender
-from .send.templates import TemplateStore, render
+from .send.templates import RenderedMessage, TemplateStore, render
 from .store import Store
 
 log = logging.getLogger(__name__)
+
+
+def _processing(method):
+    """One document operation at a time, also excluding installation."""
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self.operation_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
 
 
 class Pipeline:
@@ -44,13 +55,38 @@ class Pipeline:
         # What this client's paperwork calls things. Defaults cover every layout
         # seen so far; a profile.json overrides key by key.
         self.profile = profile or DocumentProfile()
-        # What the two shared files looked like when we last read them.
+        # How many sends are with the sender right now, on any thread. The
+        # agent asks before installing an update: a queue send runs on a
+        # worker thread the watcher's own busy flag knows nothing about.
+        self._in_flight = 0
+        self._in_flight_lock = threading.Lock()
+        # Shared by capture, queue sends, settings commits and the updater.
+        # Reentrant because process_document() calls process() for each part.
+        self.operation_lock = threading.RLock()
+        self.update_lock = threading.Lock()
+        # What the shared files looked like when we last read them.
         self._stamps: dict[str, int | None] = {
             "settings": self._stamp(paths().settings),
             "templates": self._stamp(self.templates.path),
+            "profile": self._stamp(paths().profile),
         }
 
+    @property
+    def busy(self) -> bool:
+        """Whether any send is in progress."""
+        with self._in_flight_lock:
+            return self._in_flight > 0
+
     def reload_if_changed(self) -> bool:
+        # Refresh runs on the UI thread; do not freeze it behind a network send.
+        if not self.operation_lock.acquire(blocking=False):
+            return False
+        try:
+            return self._reload_if_changed()
+        finally:
+            self.operation_lock.release()
+
+    def _reload_if_changed(self) -> bool:
         """Pick up settings and templates written by another process.
 
         The CLI and the window are two processes over the same two files.
@@ -93,9 +129,11 @@ class Pipeline:
                 try:
                     self.rebuild_sender()
                     log.info("settings changed on disk; sender re-wired")
-                except Exception:
-                    # Leave the old sender in place rather than lose the
-                    # ability to send at all.
+                except Exception as exc:
+                    from .send.unavailable import UnavailableSender
+
+                    # Never keep a test sender after importing live settings.
+                    self.sender = UnavailableSender(str(exc))
                     log.exception("could not re-wire the sender after a reload")
 
         if self._stamp(templates_path) != self._stamps.get("templates"):
@@ -107,7 +145,30 @@ class Pipeline:
             except Exception:
                 log.exception("could not re-read templates.json")
 
+        if self.reload_profile():
+            changed = True
+
         return changed
+
+    def reload_profile(self, force: bool = False) -> bool:
+        """Pick up document types and fields taught since the last read.
+
+        Replaced rather than updated in place: extraction reads
+        `self.profile` once per document, so a print already under way keeps
+        the profile it started with.
+        """
+        profile_path = paths().profile
+        stamp = self._stamp(profile_path)
+        if not force and stamp == self._stamps.get("profile"):
+            return False
+        self._stamps["profile"] = stamp
+        try:
+            self.profile = DocumentProfile.load(profile_path)
+        except Exception:
+            log.exception("could not re-read profile.json")
+            return False
+        log.info("document profile changed on disk; reloaded")
+        return True
 
     @staticmethod
     def _stamp(path: Path) -> int | None:
@@ -127,16 +188,51 @@ class Pipeline:
         """
         self.sender = build_sender(self.settings)
 
+    def apply_settings(self, settings: Settings) -> None:
+        """Commit validated settings and their sender together, while idle."""
+        if not self.operation_lock.acquire(blocking=False):
+            raise RuntimeError("A document or update is in progress. Apply again when it finishes.")
+        try:
+            sender = build_sender(settings)
+            settings.save()
+            for name in settings.__dataclass_fields__:
+                setattr(self.settings, name, getattr(settings, name))
+            self.sender = sender
+            self._stamps["settings"] = self._stamp(paths().settings)
+        finally:
+            self.operation_lock.release()
+
+    def fields_for_kind(self, pdf_path, document_kind):
+        from .extract import extract_fields
+        selected = next((k for k in self.profile.all_kinds if k.name == document_kind), None)
+        if selected is None:
+            raise ValueError("Choose a known document type before sending.")
+        fields = extract_fields(pdf_path, profile=self.profile.for_kind(selected),
+                                ocr=self.settings.ocr(),
+                                country_code=self.settings.default_country_code,
+                                forced_kind=selected)
+        if not fields.readable:
+            raise ValueError(fields.ocr_error or "Document could not be read.")
+        fields.document_kind_verified = True
+        fields.classification_error = ""
+        return fields
+
     def template_for(self, fields) -> tuple[str, object | None]:
         """The approved template this document goes out under, and its name.
 
         A removal notice is not a receipt and must not borrow its wording, so
-        the kind read off the page picks the template. Anything unrecognised
-        keeps default_template, which is every receipt.
+        the kind read off the page picks the template. Recognised non-receipt
+        kinds require a mapping; unrecognised documents keep default_template.
         """
-        name = self.settings.document_templates.get(
-            fields.document_kind or ""
-        ) or self.settings.default_template
+        kind = fields.document_kind
+        if fields.classification_error or (kind is None and self.settings.document_templates):
+            return "Choose the document type before selecting a message", None
+        name = self.settings.document_templates.get(kind or "")
+        if not name and kind not in (None, "", "receipt"):
+            # A recognised notice must never inherit receipt wording just
+            # because an older installation has an empty mapping.
+            return f"{kind.replace('_', ' ').capitalize()} — choose a message in Messages", None
+        name = name or self.settings.default_template
         return name, self.templates.get(name)
 
     def noun_for(self, fields) -> str:
@@ -146,6 +242,83 @@ class Pipeline:
             or self.settings.document_noun
         )
 
+    def compose(self, job: PrintJob) -> tuple[str, RenderedMessage | None]:
+        """The message this job goes out as, and the template name wanted.
+
+        The one place the template is rendered. It used to be rendered in
+        four places with slightly different arguments, and the copy behind
+        the confirmation dialog left out the business name -- so the operator
+        checked a preview reading "Thank you for your payment to -." and the
+        member received a different message.
+
+        Returns (name, None) when the template is not configured.
+        """
+        wanted, template = self.template_for(job.fields)
+        if template is None:
+            return wanted, None
+        message = render(
+            template,
+            self.variable_map_for(template),
+            job.fields,
+            doc_title=job.doc_title,
+            extra={"business_name": self.settings.business_name},
+            document_noun=self.noun_for(job.fields),
+        )
+        job.template_name = template.name
+        job.message_preview = message.preview
+        return wanted, message
+
+    def variable_map_for(self, template) -> dict[str, str]:
+        """How this template's variables are filled.
+
+        Its own mapping from the setup screen when it has one, otherwise the
+        shared template_variables -- as far as they fit it. The shared
+        numbered entries were written for one template's body and used to be
+        applied to every numbered template, which sent invoice_document as
+        "Your invoice <business name> for ₹<invoice number>".
+        """
+        from .send.templates import variable_map
+
+        return variable_map(template, self.settings)
+
+    def unfilled_reason(self, template) -> str:
+        """Why this template cannot be filled on any print, or "".
+
+        Checked before anything is sent or handed to WhatsApp. A variable
+        with no source is empty on every print, so the choice is between
+        holding the document and sending "-" -- or, before the shared map
+        was narrowed, sending another field's value in its place.
+        """
+        from .extract.rules import known_fields
+        from .send.templates import unfilled_reason, unfilled_variables
+
+        unfilled = unfilled_variables(
+            template, self.variable_map_for(template), known_fields(self.profile)
+        )
+        return unfilled_reason(template, unfilled) if unfilled else ""
+
+    def missing_required(self, message: RenderedMessage) -> list[str]:
+        """Mapped values this print did not supply, for templates set up on
+        the mapping screen. Empty for everything else.
+
+        A template someone mapped by hand says which values belong in the
+        message. Sending "Member ID: -" to a member is the silent failure the
+        mapping exists to prevent, so the document waits for a person
+        instead. Templates with no mapping keep the old behaviour.
+        """
+        if message.template.name not in self.settings.template_mappings:
+            return []
+        from .extract.rules import display_name
+
+        names = []
+        for source in message.missing:
+            if source.startswith("{{"):
+                names.append(source)
+            else:
+                names.append(display_name(source).lower())
+        return names
+
+    @_processing
     def process_document(
         self,
         pdf_path: Path,
@@ -172,22 +345,14 @@ class Pipeline:
             log.exception("could not split %s; processing it whole", pdf_path)
             groups = []
 
-        if len(groups) < 2:
+        parts = self._write_segments(pdf_path, groups) if len(groups) >= 2 else []
+        if not parts:
             jobs = [self.process(pdf_path, doc_title, windows_user, now)]
         else:
-            log.info("%s holds %d receipts; splitting", pdf_path, len(groups))
-            jobs = []
-            for index, pages in enumerate(groups, start=1):
-                try:
-                    part = write_segment(
-                        pdf_path, pages, segment_path(pdf_path, index)
-                    )
-                except Exception:
-                    log.exception(
-                        "could not write receipt %d of %s", index, pdf_path
-                    )
-                    continue
-                jobs.append(self.process(part, doc_title, windows_user, now))
+            log.info("%s holds %d receipts; splitting", pdf_path, len(parts))
+            jobs = [
+                self.process(part, doc_title, windows_user, now) for part in parts
+            ]
 
         # The office keeps its own copy of everything that was printed,
         # whatever the gate decided about sending it. Filed here rather than
@@ -199,6 +364,37 @@ class Pipeline:
                 self.store.log(job.id, "filed", str(filed))
 
         return jobs
+
+    @staticmethod
+    def _write_segments(pdf_path: Path, groups: list[list[int]]) -> list[Path]:
+        """Every receipt of a batch as its own file, or nothing at all.
+
+        All or nothing on purpose. A segment that failed to write used to be
+        skipped with a log line, and the subscriber on those pages never got
+        a job -- their receipt was the one print in the run that vanished. If
+        any part cannot be written, the whole document is processed as one
+        job instead: it is held, because it carries several numbers, and a
+        held batch is a nuisance where a dropped receipt is a loss.
+        """
+        written: list[Path] = []
+        for index, pages in enumerate(groups, start=1):
+            try:
+                written.append(
+                    write_segment(pdf_path, pages, segment_path(pdf_path, index))
+                )
+            except Exception:
+                log.exception(
+                    "could not write receipt %d of %s; processing it whole",
+                    index,
+                    pdf_path,
+                )
+                for part in written:
+                    try:
+                        part.unlink()
+                    except OSError:
+                        pass
+                return []
+        return written
 
     def _receipt_groups(self, pdf_path: Path) -> list[list[int]]:
         """Page groups, one per receipt. Empty when the question is moot.
@@ -212,6 +408,7 @@ class Pipeline:
             return []
         return receipt_groups(doc, self.profile)
 
+    @_processing
     def process(
         self,
         pdf_path: Path,
@@ -237,7 +434,7 @@ class Pipeline:
         try:
             job.fields = extract_fields(
                 pdf_path,
-                excluded_numbers=_excluded_numbers(self.settings),
+                excluded_numbers=excluded_numbers(self.settings),
                 country_code=self.settings.default_country_code,
                 ocr=self.settings.ocr(),
                 profile=self.profile,
@@ -264,17 +461,12 @@ class Pipeline:
             # The operator supplies the number. Rendering the message preview
             # here means the dialog can show the exact text without repeating
             # any of this work.
-            _, template = self.template_for(job.fields)
-            if template is not None:
-                message = render(
-                    template,
-                    self.settings.template_variables,
-                    job.fields,
-                    doc_title=job.doc_title,
-                    document_noun=self.noun_for(job.fields),
-                )
-                job.template_name = template.name
-                job.message_preview = message.preview
+            _wanted, message = self.compose(job)
+            unfilled = self.unfilled_reason(message.template) if message else ""
+            if unfilled:
+                # Asking for a number would be asking for nothing: the
+                # message cannot go out until setup fills it in.
+                return self._hold(job, unfilled)
             job.status = JobStatus.AWAITING
             job.hold_reason = outcome.reason
             self.store.upsert(job)
@@ -289,20 +481,20 @@ class Pipeline:
             return job
 
         # --- compose ------------------------------------------------------
-        wanted, template = self.template_for(job.fields)
-        if template is None:
+        wanted, message = self.compose(job)
+        if message is None:
             return self._hold(job, f"Template '{wanted}' is not configured.")
-
-        message = render(
-            template,
-            self.settings.template_variables,
-            job.fields,
-            doc_title=job.doc_title,
-            extra={"business_name": self.settings.business_name},
-            document_noun=self.noun_for(job.fields),
-        )
-        job.template_name = template.name
-        job.message_preview = message.preview
+        unfilled = self.unfilled_reason(message.template)
+        if unfilled:
+            return self._hold(job, unfilled)
+        required = self.missing_required(message)
+        if required:
+            return self._hold(
+                job,
+                f"Could not read {', '.join(required)} from this print, and the "
+                f"'{message.template.name}' message needs it. Check the PDF; "
+                f"sending it from here fills the gap with \"-\".",
+            )
 
         # --- link mode ----------------------------------------------------
         if self.settings.send_mode == "link":
@@ -316,16 +508,40 @@ class Pipeline:
             )
 
         # --- send ---------------------------------------------------------
+        return self._send(job, message, now)
+
+    def _send(self, job: PrintJob, message: RenderedMessage, now: datetime) -> PrintJob:
+        """Hand one composed job to the sender and record what came back.
+
+        The sender is wrapped, because an exception out of it used to leave
+        the job at QUEUED for ever: that status is shown nowhere -- not in the
+        queue, not counted as waiting -- so a receipt whose upload raised on
+        an unreadable file or an unexpected response simply disappeared.
+        """
         job.status = JobStatus.QUEUED
         self.store.upsert(job)
 
-        result = self.sender.send(job.recipient, pdf_path, message)
-        if result.ok:
-            job.status = (
-                JobStatus.DRY_RUN if self.settings.dry_run else JobStatus.SENT
+        with self._in_flight_lock:
+            self._in_flight += 1
+        try:
+            result = self.sender.send(job.recipient, job.pdf_path, message)
+        except Exception as exc:
+            log.exception("sender raised for job %s", job.id)
+            return self._fail(
+                job,
+                f"Sending failed unexpectedly ({type(exc).__name__}: {exc}). "
+                f"Check WhatsApp before sending it again.",
+                retryable=False,
             )
+        finally:
+            with self._in_flight_lock:
+                self._in_flight -= 1
+
+        if result.ok:
+            job.status = JobStatus.DRY_RUN if self.settings.dry_run else JobStatus.SENT
             job.wamid = result.wamid
             job.sent_at = now
+            job.error = None
             self.store.upsert(job)
             self.store.log(job.id, "sent", f"{job.recipient} {result.wamid}")
             return job
@@ -370,12 +586,14 @@ class Pipeline:
         self.store.log(job.id, "link:opened", job.recipient)
         return job
 
+    @_processing
     def release(
         self,
         job_id: str,
         recipient: str,
         customer_name: str | None = None,
         now: datetime | None = None,
+        document_kind: str | None = None,
     ) -> PrintJob:
         """Send a job to a recipient the operator supplied.
 
@@ -385,6 +603,11 @@ class Pipeline:
 
         `customer_name` overrides whatever was extracted, so the message that
         goes out matches the preview the operator was looking at.
+
+        A reprint is caught here as well as at the gate. The gate only sees
+        the recipient it found itself, and in confirmation mode it finds none,
+        so the same receipt released twice to the same number used to go out
+        twice. It comes back as DUPLICATE, exactly as an automatic send would.
         """
         from .extract.phone import parse_typed_number
 
@@ -392,7 +615,7 @@ class Pipeline:
         job = self.store.get(job_id)
         if job is None:
             raise KeyError(f"No such job: {job_id}")
-        if job.status in (JobStatus.SENT, JobStatus.DRY_RUN):
+        if job.status == JobStatus.SENT or (job.status == JobStatus.DRY_RUN and self.settings.dry_run):
             raise ValueError(f"Job {job_id} was already sent to {job.recipient}")
 
         # Passed through with separators intact so a landline is rejected here
@@ -401,58 +624,77 @@ class Pipeline:
         if e164 is None:
             raise ValueError(f"'{recipient}' is not a valid mobile number")
 
+        if document_kind is not None:
+            job.fields = self.fields_for_kind(job.pdf_path, document_kind)
+        if job.fields.classification_error or (
+            job.fields.document_kind is None and self.settings.document_templates
+        ):
+            raise ValueError("Choose the document type before sending this document.")
+
+        # Refused before anything about the job changes. Typing a number
+        # cannot fill a variable the message has no source for, and the
+        # queue shows this reason where the operator can read it.
+        _wanted, template = self.template_for(job.fields)
+        if template is not None:
+            unfilled = self.unfilled_reason(template)
+            if unfilled:
+                raise ValueError(unfilled)
+
         if customer_name:
             job.fields.customer_name = customer_name
 
         job.recipient = e164
         job.hold_reason = None
         job.dedupe_key = dedupe_key(job.fields, e164)
-        self.store.log(job.id, "released", f"operator chose {e164}")
+        self.store.log(job.id, "released", f"operator chose {e164}; document type {job.fields.document_kind or 'default'}")
 
-        if self.settings.send_mode == "link":
-            _, template = self.template_for(job.fields)
-            if template is None:
-                return self._fail(job, "No message is configured.")
-            message = render(
-                template,
-                self.settings.template_variables,
-                job.fields,
-                doc_title=job.doc_title,
-                extra={"business_name": self.settings.business_name},
-                document_noun=self.noun_for(job.fields),
-            )
-            job.template_name = template.name
-            job.message_preview = message.preview
-            return self._prepare_link(job, message)
-
-        wanted, template = self.template_for(job.fields)
-        if template is None:
-            return self._fail(job, f"Template '{wanted}' is not configured.")
-
-        message = render(
-            template,
-            self.settings.template_variables,
-            job.fields,
-            doc_title=job.doc_title,
-            extra={"business_name": self.settings.business_name},
-            document_noun=self.noun_for(job.fields),
+        prior = self.store.find_duplicate(
+            job.dedupe_key, self.settings.dedupe_window_hours, now=now,
+            dry_run=self.settings.dry_run, send_mode=self.settings.send_mode,
         )
-        job.template_name = template.name
-        job.message_preview = message.preview
-        job.status = JobStatus.QUEUED
-        self.store.upsert(job)
-
-        result = self.sender.send(e164, job.pdf_path, message)
-        if result.ok:
-            job.status = JobStatus.DRY_RUN if self.settings.dry_run else JobStatus.SENT
-            job.wamid = result.wamid
-            job.sent_at = now
-            job.error = None
+        if prior is not None and prior.id != job.id:
+            job.status = JobStatus.DUPLICATE
+            job.hold_reason = (
+                f"Already sent to {e164} at {prior.sent_at:%d %b %H:%M}. "
+                f"Reprint suppressed."
+            )
             self.store.upsert(job)
-            self.store.log(job.id, "sent", f"{e164} {result.wamid}")
+            self.store.log(job.id, "gate:duplicate", job.hold_reason)
             return job
 
-        return self._fail(job, result.error or "Send failed", retryable=result.retryable)
+        wanted, message = self.compose(job)
+        if message is None:
+            return self._hold(job, f"Template '{wanted}' is not configured.")
+
+        if self.settings.send_mode == "link":
+            return self._prepare_link(job, message)
+
+        return self._send(job, message, now)
+
+    def recover_interrupted(self) -> list[PrintJob]:
+        """Put back on the queue whatever was mid-send when we last stopped.
+
+        Called once, by the process that owns the spool folder, at startup.
+        Not from the CLI: a CLI run beside a live agent would see the agent's
+        current send as interrupted and pull it out from under it.
+
+        Held rather than failed. Whether the message reached Meta is
+        unknown, and that is a question for a person with WhatsApp open, not
+        a retry loop.
+        """
+        recovered = []
+        for job in self.store.interrupted():
+            job.status = JobStatus.HELD
+            job.hold_reason = (
+                "The app stopped while this was being sent, so it may or may "
+                "not have arrived. Check WhatsApp before sending it again."
+            )
+            self.store.upsert(job)
+            self.store.log(job.id, "recovered", "interrupted send")
+            recovered.append(job)
+        if recovered:
+            log.warning("%d send(s) were interrupted; held for review", len(recovered))
+        return recovered
 
     def defer(self, job_id: str) -> PrintJob:
         """Operator closed the dialog without sending. Keep it in the queue."""
@@ -487,6 +729,7 @@ class Pipeline:
 
     def _fail(self, job: PrintJob, error: str, retryable: bool = False) -> PrintJob:
         job.status = JobStatus.FAILED
+        job.hold_reason = None
         job.error = error
         self.store.upsert(job)
         self.store.log(job.id, "failed", f"{error} (retryable={retryable})")
@@ -512,7 +755,7 @@ def build_sender(settings: Settings) -> Sender:
     token = load_token()
     if not token:
         raise RuntimeError(
-            "No WhatsApp access token stored. Add one in Settings, or turn "
+            "No WhatsApp access token stored. Connect WhatsApp in Setup, or turn "
             "dry-run back on."
         )
     return WhatsAppCloudSender(
@@ -529,7 +772,22 @@ def build_default(settings: Settings | None = None) -> Pipeline:
     p = paths()
     p.ensure()
     store = Store(p.db)
-    templates = TemplateStore(p.templates, settings.business_name)
+    templates = TemplateStore(
+        p.templates, settings.business_name, settings.template_language
+    )
     profile = DocumentProfile.load(p.profile)
 
-    return Pipeline(settings, store, build_sender(settings), templates, profile)
+    try:
+        sender = build_sender(settings)
+    except Exception as exc:
+        # Test mode is off and the real sender cannot be built -- no token,
+        # usually. Raising here stopped the agent starting at all, with a
+        # crash box at every logon and no prints captured. Start anyway:
+        # every send fails with this reason, the status line reports it, and
+        # rebuild_sender() puts the real one in once it is fixed.
+        from .send.unavailable import UnavailableSender
+
+        log.error("cannot send until this is fixed: %s", exc)
+        sender = UnavailableSender(str(exc))
+
+    return Pipeline(settings, store, sender, templates, profile)

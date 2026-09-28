@@ -16,6 +16,7 @@ from tkinter import ttk
 from typing import Callable
 
 from ..models import PrintJob
+from . import theme
 from .result import describe, needs_action
 
 WIDTH = 340
@@ -24,9 +25,9 @@ TASKBAR_ALLOWANCE = 64
 AUTO_CLOSE_MS = 5000
 
 TONES = {
-    "ok": ("#0f7b43", "✓"),
-    "bad": ("#b3261e", "!"),
-    "wait": ("#a35a00", "i"),
+    "ok": (theme.MINT, "✓"),
+    "bad": (theme.DANGER, "!"),
+    "wait": (theme.WARM, "i"),
 }
 
 
@@ -54,29 +55,32 @@ class Notification:
         # A notification, not a window to manage.
         self.win.overrideredirect(True)
 
-        outer = tk.Frame(self.win, bg=accent)      # coloured edge
-        outer.pack(fill="both", expand=True)
-        body = tk.Frame(outer, bg="white", padx=15, pady=12)
-        body.pack(fill="both", expand=True, padx=(4, 1), pady=1)
+        # A hairline round the whole panel, and a coloured edge on the left.
+        border = tk.Frame(self.win, bg=theme.LINE)
+        border.pack(fill="both", expand=True)
+        outer = tk.Frame(border, bg=accent)
+        outer.pack(fill="both", expand=True, padx=(0, 1), pady=1)
+        body = tk.Frame(outer, bg=theme.PAPER, padx=16, pady=14)
+        body.pack(fill="both", expand=True, padx=(4, 0))
 
-        head = tk.Frame(body, bg="white")
+        head = tk.Frame(body, bg=theme.PAPER)
         head.pack(fill="x")
         tk.Label(
-            head, text=glyph, bg=accent, fg="white", width=2,
-            font=("Segoe UI", 10, "bold"),
-        ).pack(side="left", padx=(0, 9), ipady=1)
+            head, text=glyph, bg=accent, fg=theme.CARD, width=2,
+            font=theme.BOLD,
+        ).pack(side="left", padx=(0, 10), ipady=1)
         tk.Label(
-            head, text=headline, bg="white", fg="#1a1a1a", anchor="w",
-            font=("Segoe UI", 10, "bold"),
+            head, text=headline, bg=theme.PAPER, fg=theme.INK, anchor="w",
+            font=theme.CARD_TITLE,
         ).pack(side="left")
 
         tk.Label(
-            body, text=detail, bg="white", fg="#444", anchor="w",
-            justify="left", wraplength=WIDTH - 46, font=("Segoe UI", 9),
-        ).pack(fill="x", pady=(6, 0))
+            body, text=detail, bg=theme.PAPER, fg=theme.SUBTLE, anchor="w",
+            justify="left", wraplength=WIDTH - 46, font=theme.BODY,
+        ).pack(fill="x", pady=(8, 0))
 
         if actionable:
-            row = tk.Frame(body, bg="white")
+            row = tk.Frame(body, bg=theme.PAPER)
             row.pack(fill="x", pady=(10, 0))
             ttk.Button(row, text="Dismiss", width=10, command=self.close).pack(
                 side="right"
@@ -84,12 +88,12 @@ class Notification:
             if job.chat_url and on_whatsapp is not None:
                 # The one button that matters in link mode.
                 ttk.Button(
-                    row, text="Open WhatsApp", width=15, command=self._whatsapp
+                    row, text="Open WhatsApp", width=15, style="Mint.TButton",
+                    command=self._whatsapp,
                 ).pack(side="right", padx=(0, 6))
             elif on_open is not None:
-                ttk.Button(row, text="Open", width=10, command=self._open).pack(
-                    side="right", padx=(0, 6)
-                )
+                ttk.Button(row, text="Open", width=10, style="Mint.TButton",
+                           command=self._open).pack(side="right", padx=(0, 6))
         else:
             self.win.after(AUTO_CLOSE_MS, self.close)
 

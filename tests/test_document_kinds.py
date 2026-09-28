@@ -57,13 +57,42 @@ class TestRecognisingTheDocument:
         assert job.fields.document_kind == "removal_letter"
 
     def test_a_receipt_is_still_just_a_receipt(self, link_pipeline, receipt):
-        """No kind, and therefore the default template. Unchanged behaviour."""
+        """Positive receipt evidence retains the default receipt template."""
         job = link_pipeline.process_document(receipt())[0]
-        assert job.fields.document_kind is None
+        assert job.fields.document_kind == "receipt"
         assert job.template_name == "chit_receipt"
 
 
 class TestSendingItUnderTheRightTemplate:
+    def test_all_three_reach_the_sender_with_separate_templates(self, link_pipeline, receipt, notice, letter):
+        from waprinter.models import SendResult, JobStatus
+
+        sent = []
+
+        class RecordingSender:
+            def send(self, recipient, pdf_path, message):
+                sent.append(message.template.name)
+                return SendResult(ok=True)
+
+        link_pipeline.settings.send_mode = "api"
+        link_pipeline.sender = RecordingSender()
+        jobs = [link_pipeline.process_document(make())[0] for make in (receipt, notice, letter)]
+        assert all(j.status == JobStatus.DRY_RUN for j in jobs)
+        assert sent == ["chit_receipt", "removal_notice", "removal_letter"]
+
+    def test_an_unmapped_notice_is_held_instead_of_borrowing_receipt_words(self, link_pipeline, notice):
+        from waprinter.models import JobStatus
+
+        link_pipeline.settings.document_templates = {}
+        job = link_pipeline.process_document(notice())[0]
+        assert job.status == JobStatus.HELD
+        assert "choose a message" in job.hold_reason
+        assert job.chat_url is None
+        # Queue release must obey the same routing rule.
+        released = link_pipeline.release(job.id, "+919876500011")
+        assert released.status != JobStatus.READY
+        assert released.template_name is None
+
     def test_a_notice_goes_out_as_a_notice(self, link_pipeline, notice):
         job = link_pipeline.process_document(notice())[0]
 

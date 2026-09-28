@@ -23,9 +23,14 @@ defaults, key by key, so a client override never has to restate the whole thing.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
+
+from ..config import atomic_write_text
+
+log = logging.getLogger(__name__)
 
 # --- built-in defaults ------------------------------------------------------
 
@@ -118,6 +123,59 @@ NOT_A_NAME_PREFIXES = [
 ]
 
 
+# How a taught value is read. Chosen when the field is taught, from what the
+# sample value looks like, and changeable there.
+FIELD_KINDS = ("text", "code", "date", "amount", "phone")
+
+# Where the value sits relative to its label.
+FIELD_WHERE = ("right", "below")
+
+# The rules for documents no title identifies. On this client that is every
+# receipt: the chit software prints only the filled-in fields, so a receipt
+# straight off the printer carries no title to recognise it by. The scan-only
+# "receipt" kind shares these rules, because it is the same paper.
+DEFAULT_KIND = "_default"
+
+
+@dataclass
+class FieldRule:
+    """One value someone taught the reader to find, from a sample PDF.
+
+    Stored as the label printed beside the value rather than where it sat on
+    the page. A position is exact for the sample and wrong the moment a
+    longer name wraps a line or the software shifts a block by a few points;
+    "the value after Cust ID" survives all of that.
+
+    `kind` decides how much of what follows the label is the value: the rest
+    of that column for text, one token shaped like `pattern` for a code, the
+    first date or amount otherwise. A `phone` rule is different in kind: it
+    never becomes a template value, it only tells the recipient scorer that
+    this label means "customer mobile". The gate still decides who is sent to.
+
+    With no label, `pattern` alone finds the value -- for identifiers such as
+    "CR1747/26" that stand on the page with nothing beside them.
+    """
+
+    name: str
+    label: str = ""
+    kind: str = "text"
+    pattern: str = ""
+    where: str = "right"
+
+    def __post_init__(self) -> None:
+        self.name = str(self.name).strip()
+        self.label = str(self.label or "").strip()
+        if self.kind not in FIELD_KINDS:
+            self.kind = "text"
+        if self.where not in FIELD_WHERE:
+            self.where = "right"
+        self.pattern = str(self.pattern or "")
+        if self.pattern:
+            # A pattern that does not compile would raise on every print.
+            # Refuse it here, where it is typed, instead.
+            re.compile(self.pattern)
+
+
 @dataclass
 class DocumentKind:
     """One kind of paperwork, recognised by what is printed at the top of it.
@@ -139,8 +197,7 @@ class DocumentKind:
     customer_anchors: list[str] = field(default_factory=list)
 
 
-# Recognised in order, so put the specific before the general. A document
-# matching nothing here is read exactly as it always was.
+# Titles outrank body wording; conflicting titles are held for review.
 DOCUMENT_KINDS = [
     DocumentKind(
         name="receipt",
@@ -206,6 +263,13 @@ class DocumentProfile:
     not_a_name_prefixes: list[str] = field(
         default_factory=lambda: list(NOT_A_NAME_PREFIXES)
     )
+    # Document types someone taught from a sample, checked *before* the
+    # built-in ones: a taught title is specific, and a scan of the new
+    # document may well also carry "received from" somewhere.
+    custom_kinds: list[DocumentKind] = field(default_factory=list)
+    # Taught fields, per document type. DEFAULT_KIND holds the ones for
+    # documents no title identifies -- every receipt, on this client.
+    field_rules: dict[str, list[FieldRule]] = field(default_factory=dict)
 
     # -- compiled forms, built once per profile ---------------------------
 
@@ -216,29 +280,113 @@ class DocumentProfile:
             k if isinstance(k, DocumentKind) else DocumentKind(**k)
             for k in self.document_kinds
         ]
+        self.custom_kinds = [
+            k if isinstance(k, DocumentKind) else DocumentKind(**k)
+            for k in self.custom_kinds
+        ]
+        self.field_rules = {
+            str(kind): [
+                r if isinstance(r, FieldRule) else FieldRule(**r) for r in rules
+            ]
+            for kind, rules in (self.field_rules or {}).items()
+        }
         self._compile()
 
-    def kind_of(self, text: str) -> DocumentKind | None:
-        """Which kind of paperwork this is, from the words printed on it."""
-        lowered = text.lower()
-        for kind in self.document_kinds:
-            if any(phrase.lower() in lowered for phrase in kind.match):
-                return kind
-        return None
+    @property
+    def all_kinds(self) -> list[DocumentKind]:
+        """Every document type this profile knows."""
+        return [*self.custom_kinds, *self.document_kinds]
+
+    def title_matches(self, document) -> list[DocumentKind]:
+        """Whole headings on page one, never incidental body mentions.
+
+        Accept text too for callers without geometry. On a PDF only the top
+        45% is considered. Two matching headings are ambiguous, independent
+        of the order the types were saved in.
+        """
+        if isinstance(document, str):
+            lines = document.splitlines()
+        else:
+            if not document.pages:
+                return []
+            page = document.pages[0]
+            lines = [line.text for line in page.lines if line.y0 <= page.height * .45]
+        found = {}
+        for kind, patterns in self._title_patterns:
+            if any(pattern.search(line) for pattern in patterns for line in lines):
+                found[kind.name] = kind
+        return list(found.values())
+
+    def kind_of(self, document) -> DocumentKind | None:
+        """Identify a heading first, then require positive receipt evidence."""
+        matches = self.title_matches(document)
+        if matches:
+            return matches[0] if len(matches) == 1 else None
+        text = document if isinstance(document, str) else "\n".join(
+            row.text for row in document.rows)
+        # A known non-receipt phrase without a readable heading is unsafe to
+        # reinterpret as a receipt, even when the body mentions a payment.
+        if any(re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", text, re.I)
+               for kind in self.all_kinds if kind.name != "receipt"
+               for phrase in kind.match if phrase):
+            return None
+        receipt = next((k for k in self.all_kinds if k.name == "receipt"), None)
+        if receipt is None:
+            return None
+        payment_words = (re.search(r"\breceived (?:with thanks )?from\b", text, re.I)
+                         and re.search(r"\ban amount of rupees\b", text, re.I))
+        # The untitled chit form has an identifier plus an amount in words
+        # and a customer anchor. A random unknown page is not a receipt.
+        chit = (re.search(r"\bCR\d{1,8}/\d{2,4}\b", text, re.I)
+                and any(p.search(text) for p in self.amount_words_res)
+                and self.customer_anchor_re.search(text))
+        return receipt if payment_words or chit else None
+
+    @staticmethod
+    def rules_key(kind: DocumentKind | str | None) -> str:
+        """The field_rules key for a kind. Receipts share the default's."""
+        name = kind.name if isinstance(kind, DocumentKind) else (kind or "")
+        return DEFAULT_KIND if name in ("", "receipt", DEFAULT_KIND) else name
+
+    def rules_for(self, kind: DocumentKind | str | None) -> list[FieldRule]:
+        """The taught fields that apply to one kind of document."""
+        return list(self.field_rules.get(self.rules_key(kind), []))
 
     def for_kind(self, kind: DocumentKind | None) -> "DocumentProfile":
         """This profile as it applies to one kind of document.
 
         Only the lists a kind actually overrides are replaced, so a removal
         notice still reads dates, amounts and phone labels the same way
-        everything else does.
+        everything else does. A taught mobile-number label joins the phone
+        labels here, so the scorer treats it like "Mobile:" -- a stronger
+        reason to trust a number, never an instruction to send to it.
         """
-        if kind is None or not kind.customer_anchors:
+        changes: dict = {}
+        if kind is not None and kind.customer_anchors:
+            changes["customer_anchors"] = list(kind.customer_anchors)
+        taught_phone = [
+            r.label for r in self.rules_for(kind) if r.kind == "phone" and r.label
+        ]
+        new_labels = [l for l in taught_phone if l.lower() not in
+                      {p.lower() for p in self.phone_labels}]
+        if new_labels:
+            changes["phone_labels"] = [*self.phone_labels, *new_labels]
+        if not changes:
             return self
-        clone = replace(self, customer_anchors=list(kind.customer_anchors))
-        return clone
+        return replace(self, **changes)
 
     def _compile(self) -> None:
+        self._title_patterns = []
+        for kind in self.all_kinds:
+            phrases = list(kind.match)
+            if kind.name == "receipt":
+                phrases = [p for p in phrases if p.lower() not in
+                           ("received from", "an amount of rupees")]
+                phrases += ["receipt", "payment receipt", "tax invoice", "invoice"]
+            patterns = [re.compile(r"^\s*" + r"\s+".join(re.escape(w) for w in phrase.split())
+                                   + r"(?:\s*$|\s*[.!](?:\s|\.|$))", re.I)
+                        for phrase in phrases if phrase.strip()]
+            self._title_patterns.append((kind, patterns))
         # A label only counts when it sits immediately before the value, which
         # is what the trailing \s*$ enforces: callers match against the text to
         # the left of a number, so "GSTIN: 29AA...   9876543210" does not let
@@ -322,15 +470,86 @@ class DocumentProfile:
             return cls()
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("profile.json is not a JSON object")
         except (OSError, ValueError):
             # A malformed profile must not stop the printer working.
+            log.exception("could not read %s; using the built-in profile", path)
             return cls()
         known = set(cls.__dataclass_fields__)
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        values = {k: v for k, v in raw.items() if k in known}
+        # Taught entries are checked one at a time. Dropping the whole file
+        # over one bad rule would also drop every taught document *type*, and
+        # a notice nobody recognises goes out under the receipt's message.
+        values["custom_kinds"] = _valid_kinds(values.get("custom_kinds"))
+        values["field_rules"] = _valid_rules(values.get("field_rules"))
+        try:
+            return cls(**values)
+        except (TypeError, ValueError, re.error):
+            log.exception("%s has an unusable entry; using the built-in lists", path)
+            return cls(
+                custom_kinds=values["custom_kinds"], field_rules=values["field_rules"]
+            )
 
     def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+        atomic_write_text(path, json.dumps(self.to_dict(), indent=2))
+
+    @staticmethod
+    def write_taught(
+        path: Path,
+        custom_kinds: list[DocumentKind],
+        field_rules: dict[str, list[FieldRule]],
+    ) -> None:
+        """Store taught types and fields, leaving everything else in the file.
+
+        Only these two keys are written. Saving the whole profile would copy
+        every built-in list into profile.json, and a later release's improved
+        defaults would then never reach this machine -- the same trap the
+        template and settings merges exist to avoid.
+        """
+        raw: dict = {}
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    raw = loaded
+            except (OSError, ValueError):
+                log.warning("replacing unreadable %s with taught fields only", path)
+        raw["custom_kinds"] = [asdict(k) for k in custom_kinds]
+        raw["field_rules"] = {
+            key: [asdict(r) for r in rules] for key, rules in field_rules.items() if rules
+        }
+        atomic_write_text(path, json.dumps(raw, indent=2))
+
+
+def _valid_kinds(items: object) -> list[DocumentKind]:
+    kinds: list[DocumentKind] = []
+    for item in items if isinstance(items, list) else []:
+        try:
+            kind = item if isinstance(item, DocumentKind) else DocumentKind(**item)
+            if not kind.name or not any(str(m).strip() for m in kind.match):
+                raise ValueError("a taught document type needs a name and a title")
+            kinds.append(kind)
+        except (TypeError, ValueError) as exc:
+            log.warning("ignoring taught document type %r: %s", item, exc)
+    return kinds
+
+
+def _valid_rules(items: object) -> dict[str, list[FieldRule]]:
+    rules: dict[str, list[FieldRule]] = {}
+    for key, entries in (items.items() if isinstance(items, dict) else []):
+        kept: list[FieldRule] = []
+        for entry in entries if isinstance(entries, list) else []:
+            try:
+                rule = entry if isinstance(entry, FieldRule) else FieldRule(**entry)
+                if not rule.name or not (rule.label or rule.pattern):
+                    raise ValueError("a taught field needs a name and a label or pattern")
+                kept.append(rule)
+            except (TypeError, ValueError, re.error) as exc:
+                log.warning("ignoring taught field %r for %s: %s", entry, key, exc)
+        if kept:
+            rules[str(key)] = kept
+    return rules
 
 
 def _alt(words: list[str]) -> str:

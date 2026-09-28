@@ -1,13 +1,15 @@
 """The application window.
 
-A printer properties sheet, not a dashboard: a device status line at the top, a
-Test send button where "Print Test Page" would be, tabs, and grouped settings
-with Apply. Native ttk widgets, so it looks like the rest of Windows rather than
-like a web page in a frame.
+A side bar on the left and one page at a time beside it. The counter clerk
+needs three pages -- Status, Needs attention, Recent documents -- and those
+are all the side bar opens without a PIN. Setup and Message templates, which
+decide what members receive, swap the setup screens (ui/setup.py) into the same
+place, optionally behind a PIN, rather than opening a second window.
 
-Everything the operator reads comes from ui/viewmodel.py, which is where the
-wording and the status labels live and where they are tested. This file is
-widgets and wiring only.
+The look -- ink on paper, one mint accent -- is ui/theme.py. Everything the
+operator reads comes from ui/viewmodel.py, which is where the wording and the
+status labels live and where they are tested. This file is widgets and wiring
+only.
 """
 
 from __future__ import annotations
@@ -17,12 +19,15 @@ import queue
 import threading
 import tkinter as tk
 import webbrowser
+from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .. import __version__
 from ..archive import folder_for
 from ..models import JobStatus
+from . import icons, theme
 from . import viewmodel as vm
 from .notification import Notification
 
@@ -30,6 +35,8 @@ log = logging.getLogger(__name__)
 
 REFRESH_MS = 2000
 POLL_MS = 400
+SIDEBAR_WIDTH = 224
+PAGE_PADDING = (32, 26, 32, 28)
 
 # Settings that are a fixed choice rather than free text: the plain-English
 # label the operator picks, paired with the value stored in settings.json.
@@ -38,12 +45,25 @@ SEND_MODES = [
     ("Open WhatsApp for me to send", "link"),
 ]
 
-TONE_COLOURS = {
-    "ok": "#0f7b43",
-    "warn": "#a35a00",
-    "bad": "#b3261e",
-    "muted": "#5c5c5c",
-}
+# The side bar: (key, label, icon). The counter's own pages, then the two
+# ways into setup.
+COUNTER_PAGES = [
+    ("status", "Status", "activity"),
+    ("attention", "Needs attention", "alert"),
+    ("recent", "Recent documents", "file"),
+]
+SETUP_LINKS = [
+    ("setup", "Setup", "settings"),
+    ("templates", "Message templates", "clipboard"),
+]
+
+HISTORY_COLUMNS = [
+    ("time", "Time", 100),
+    ("status", "Status", 120),
+    ("sent_to", "Sent to", 130),
+    ("document", "Document", 120),
+    ("detail", "Detail", 200),
+]
 
 
 class DesktopWindow:
@@ -61,15 +81,24 @@ class DesktopWindow:
         self._notifications: list[Notification] = []
         self._queue_rows: dict[str, ttk.Entry] = {}
         self._queue_shown: tuple | None = None
-
+        self._queue_limit = 200
+        self._setup_shown = False
+        self._view = "status"
+        self._recent_shown: tuple | None = None
+        self._needs_shown: tuple | None = None
+        # Jobs whose send is running on a worker thread right now.
+        self._sending: set[str] = set()
         self.root = tk.Tk()
         self.root.title("WhatsApp Printer")
-        self.root.geometry("820x660")
-        self.root.minsize(700, 560)
-        self._use_native_theme()
+        self._size_window()
+        theme.apply(self.root)
 
+        self._build_sidebar()
+        ttk.Separator(self.root, orient="vertical").pack(side="left", fill="y")
+        self.main = ttk.Frame(self.root)
+        self.main.pack(side="left", fill="both", expand=True)
         self._build_header()
-        self._build_tabs()
+        self._build_pages()
 
         # Closing the window leaves the app running: prints still have to be
         # captured. Only Exit actually quits.
@@ -77,127 +106,288 @@ class DesktopWindow:
 
         self.root.after(POLL_MS, self._pump)
         self.root.after(REFRESH_MS, self._refresh)
-        self.refresh()
+        self.show_view("status")
         self._load_settings_into_form()
 
     # -- chrome ------------------------------------------------------------
 
-    def _use_native_theme(self) -> None:
-        style = ttk.Style(self.root)
-        for candidate in ("vista", "winnative", "aqua", "clam"):
-            if candidate in style.theme_names():
-                style.theme_use(candidate)
-                break
-        style.configure("Big.TLabel", font=("Segoe UI", 18, "bold"))
-        style.configure("Head.TLabel", font=("Segoe UI", 12, "bold"))
-        style.configure("Hint.TLabel", foreground=TONE_COLOURS["muted"])
+    def _size_window(self) -> None:
+        """As roomy as the design wants, but never past the edge of a small
+        counter screen: some of them are still 1024 x 768."""
+        width = min(1120, self.root.winfo_screenwidth() - 40)
+        height = min(740, self.root.winfo_screenheight() - 90)
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(min(960, width), min(600, height))
+
+    def _icon(self, name: str, colour: str, size: int = 16, **gap) -> object:
+        return icons.icon(self.root, name, colour, size, **gap)
+
+    def _build_sidebar(self) -> None:
+        side = ttk.Frame(self.root, width=theme.px(self.root, SIDEBAR_WIDTH))
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
+
+        # The mode card first, at the bottom, so a short window squeezes the
+        # gap above it rather than the card.
+        foot = ttk.Frame(side, padding=16)
+        foot.pack(side="bottom", fill="x")
+        ttk.Separator(side).pack(side="bottom", fill="x")
+        mode = ttk.Frame(foot, style="Mode.TFrame", padding=14)
+        mode.pack(fill="x")
+        ttk.Label(mode, text="CURRENT MODE", style="ModeEyebrow.TLabel").pack(anchor="w")
+        self.mode_title = ttk.Label(mode, style="Mode.TLabel", compound="left")
+        self.mode_title.pack(anchor="w", pady=(8, 0))
+        self.mode_detail = ttk.Label(mode, style="ModeHint.TLabel", justify="left")
+        self.mode_detail.pack(anchor="w", fill="x", pady=(4, 0))
+        theme.autowrap(self.mode_detail)
+
+        brand = ttk.Frame(side, padding=(18, 24, 12, 26))
+        brand.pack(fill="x")
+        row = ttk.Frame(brand)
+        row.pack(fill="x")
+        size = theme.px(self.root, 30)
+        mark = tk.Canvas(row, width=size, height=size, highlightthickness=0,
+                         borderwidth=0, background=theme.MINT)
+        mark.create_image(size // 2, size // 2, image=self._icon("printer", theme.CARD))
+        mark.pack(side="left")
+        ttk.Label(row, text="WhatsApp Printer", style="Brand.TLabel").pack(
+            side="left", padx=(10, 0))
+        theme.eyebrow(brand, f"Operations / v{__version__}").pack(
+            anchor="w", padx=(size + 10, 0), pady=(8, 0))
+
+        nav = ttk.Frame(side, padding=(12, 0))
+        nav.pack(fill="x")
+        self.nav_buttons: dict[str, ttk.Button] = {}
+        self._nav_icons: dict[str, str] = {}
+        for key, label, name in COUNTER_PAGES:
+            self._nav_button(nav, key, label, name)
+        theme.eyebrow(nav, "Configuration").pack(anchor="w", padx=10, pady=(24, 6))
+        for key, label, name in SETUP_LINKS:
+            self._nav_button(nav, key, label, name)
+
+    def _nav_button(self, parent, key: str, label: str, icon_name: str) -> None:
+        button = ttk.Button(parent, text=label, style="Nav.TButton", compound="left",
+                            command=lambda: self._go(key))
+        button.pack(fill="x", pady=1)
+        self.nav_buttons[key] = button
+        self._nav_icons[key] = icon_name
+
+    def _mark_nav(self) -> None:
+        """Light up the side bar entry for whatever is showing."""
+        if self._setup_shown:
+            active = "templates" if self.setup_view.current == "templates" else "setup"
+        else:
+            active = self._view
+        for key, button in self.nav_buttons.items():
+            on = key == active
+            button.configure(
+                style="NavOn.TButton" if on else "Nav.TButton",
+                image=self._icon(self._nav_icons[key], theme.INK if on else theme.SUBTLE,
+                                 after=10),
+            )
 
     def _build_header(self) -> None:
-        header = ttk.Frame(self.root, padding=(16, 12))
+        header = ttk.Frame(self.main, padding=(PAGE_PADDING[0], 12, 24, 12))
         header.pack(fill="x")
+        # Packed before the text, so a long line is what gets clipped.
+        ttk.Button(
+            header, text="Check configuration", style="Mint.TButton", compound="left",
+            image=self._icon("refresh", theme.CARD, 14, after=7), command=self.test_send,
+        ).pack(side="right")
+        self.mode_chip = ttk.Label(header, style="Chip.TLabel")
+        self.mode_chip.pack(side="left")
+        self.state_label = ttk.Label(header, style="Hint.TLabel")
+        self.state_label.pack(side="left", padx=(12, 12))
+        ttk.Separator(self.main).pack(fill="x")
 
-        ttk.Label(header, text="🖨", font=("Segoe UI", 22)).pack(side="left", padx=(0, 12))
+    def _build_pages(self) -> None:
+        from .setup import SetupView
 
-        text = ttk.Frame(header)
-        text.pack(side="left", fill="x", expand=True)
-        ttk.Label(text, text="WhatsApp Printer", style="Head.TLabel").pack(anchor="w")
-        self.state_label = ttk.Label(text, text="", style="Hint.TLabel")
-        self.state_label.pack(anchor="w")
+        self.pages_area = ttk.Frame(self.main)
+        self.pages_area.pack(fill="both", expand=True)
 
-        ttk.Button(header, text="Test send", command=self.test_send).pack(side="right")
-        ttk.Separator(self.root).pack(fill="x")
+        self.views: dict[str, ttk.Frame] = {}
+        for key in ("status", "attention"):
+            outer = ttk.Frame(self.pages_area)
+            page = ttk.Frame(theme.scrollable(outer), padding=PAGE_PADDING)
+            page.pack(fill="both", expand=True)
+            self.views[key] = outer
+            setattr(self, f"{key}_page", page)
+        # Recent is one long table with its own scroll bar, so the page itself
+        # does not scroll: two scroll bars side by side is one too many.
+        self.views["recent"] = ttk.Frame(self.pages_area, padding=PAGE_PADDING)
+        self.recent_page = self.views["recent"]
 
-    def _build_tabs(self) -> None:
-        self.tabs = ttk.Notebook(self.root, padding=8)
-        self.tabs.pack(fill="both", expand=True)
-
-        self.status_tab = ttk.Frame(self.tabs, padding=12)
-        self.queue_tab = ttk.Frame(self.tabs, padding=12)
-        self.recent_tab = ttk.Frame(self.tabs, padding=12)
-        self.settings_tab = ttk.Frame(self.tabs, padding=12)
-
-        self.tabs.add(self.status_tab, text="Status")
-        self.tabs.add(self.queue_tab, text="Needs attention")
-        self.tabs.add(self.recent_tab, text="Recent")
-        self.tabs.add(self.settings_tab, text="Settings")
+        # Built now but not shown: the setup view replaces the counter's pages
+        # when Setup is chosen. The counter settings form is one of its
+        # pages, and keeps the name it had when it was a tab.
+        self.setup_view = SetupView(self.pages_area, self)
+        self.settings_tab = self.setup_view.pages["preferences"].frame
 
         self._build_status()
         self._build_queue()
         self._build_recent()
         self._build_settings()
 
-    # -- status tab --------------------------------------------------------
+    # -- navigation ----------------------------------------------------------
+
+    def _go(self, key: str) -> None:
+        """What a side bar entry does."""
+        if key in {k for k, _label, _icon in COUNTER_PAGES}:
+            self.show_view(key)
+            return
+        current = self.setup_view.current
+        page = "templates" if key == "templates" else (
+            current if current and current != "templates" else "connect")
+        if self._setup_shown:
+            self.setup_view.show_page(page)   # past the PIN already
+        else:
+            self.open_setup(page)
+
+    def show_view(self, key: str) -> None:
+        """Show one of the counter's own pages, leaving setup if it is open."""
+        if self._setup_shown:
+            self.setup_view.pack_forget()
+            self._setup_shown = False
+        for name, frame in self.views.items():
+            if name != key:
+                frame.pack_forget()
+        self.views[key].pack(fill="both", expand=True)
+        self._view = key
+        self._mark_nav()
+        self.refresh()
+
+    # -- status page ---------------------------------------------------------
 
     def _build_status(self) -> None:
-        counters = ttk.Frame(self.status_tab)
-        counters.pack(fill="x", pady=(0, 14))
+        page = self.status_page
+        theme.page_title(page, "Overview / 01", "Status",
+                         "What this printer has handled today.")
 
+        # Four counts in a row, divided by hairlines: the rules are the wash
+        # showing through one-pixel gaps between the tiles.
+        self.tiles = tk.Frame(page, background=theme.WASH)
+        self.tiles.pack(fill="x")
         self.counter_values: dict[str, ttk.Label] = {}
         self.counter_captions: dict[str, ttk.Label] = {}
-        for key, caption in (
+        keys = (
             ("sent", "sent today"),
             ("printed", "documents printed"),
             ("waiting", "need attention"),
             ("failed", "failed"),
-        ):
-            cell = ttk.Frame(counters, relief="solid", borderwidth=1, padding=(14, 10))
-            cell.pack(side="left", fill="both", expand=True, padx=(0, 8))
-            value = ttk.Label(cell, text="0", style="Big.TLabel")
-            value.pack(anchor="w")
-            label = ttk.Label(cell, text=caption, style="Hint.TLabel")
+        )
+        for column, (key, caption) in enumerate(keys):
+            tile = ttk.Frame(self.tiles, padding=(18, 14, 18, 16))
+            tile.grid(row=0, column=column, sticky="nsew", pady=1,
+                      padx=(1, 1 if column == len(keys) - 1 else 0))
+            self.tiles.columnconfigure(column, weight=1, uniform="tile")
+            label = theme.eyebrow(tile, caption)
             label.pack(anchor="w")
+            value = ttk.Label(tile, text="00", style="Big.TLabel")
+            value.pack(anchor="w", pady=(12, 0))
             self.counter_values[key] = value
             self.counter_captions[key] = label
 
-        self.problems_box = ttk.LabelFrame(
-            self.status_tab, text="Before this can send", padding=12
-        )
-        self.problems_label = ttk.Label(
-            self.problems_box, text="", justify="left", wraplength=720,
-            foreground=TONE_COLOURS["warn"],
-        )
-        self.problems_label.pack(anchor="w")
+        # Shown only while something stops sending: one card per setup step
+        # that has something left to do.
+        self.problems_box = ttk.Frame(page)
+        head = theme.section_head(self.problems_box, "Before this can send")
+        ttk.Label(head, text="SETUP REQUIRED", style="WarnTag.TLabel").pack(side="right")
+        self.needs_grid = ttk.Frame(self.problems_box)
+        self.needs_grid.pack(fill="x")
+        self.needs_grid.columnconfigure((0, 1), weight=1, uniform="need")
 
-        how = ttk.LabelFrame(self.status_tab, text="How to use", padding=12)
-        how.pack(fill="x", pady=(0, 12))
-        ttk.Label(how, text=vm.HOW_TO_USE, justify="left", wraplength=720).pack(anchor="w")
+        import sys
+        if sys.platform == "win32" and sys.getwindowsversion().major < 10:
+            from ..config import paths
+            capture = theme.card(page, "PDF folder capture", padding=14)
+            capture.pack(fill="x", pady=(16, 0))
+            ttk.Label(capture, text=f"Export each document as a PDF into {paths().spool}.\n"
+                      "Use a new filename each time. The app reads and moves it automatically.",
+                      wraplength=650).pack(anchor="w")
+            ttk.Button(capture, text="Open PDF folder", command=lambda: webbrowser.open(paths().spool.as_uri())).pack(anchor="w", pady=(6, 0))
 
-        updates = ttk.LabelFrame(self.status_tab, text="This installation", padding=12)
-        updates.pack(fill="x")
-        row = ttk.Frame(updates)
-        row.pack(fill="x")
-        self.version_label = ttk.Label(row, text=f"Version {__version__}")
+        self.activity_box = ttk.Frame(page)
+        self.activity_box.pack(fill="x", pady=(30, 0))
+        head = theme.section_head(self.activity_box, "Recent activity")
+        ttk.Button(
+            head, text="View all", style="Link.TButton", compound="right",
+            image=self._icon("arrow", theme.INK, 14, before=6),
+            command=lambda: self.show_view("recent"),
+        ).pack(side="right")
+        self.activity = self._history_table(self.activity_box, height=5)
+        # Before the first print the table would be empty, which says
+        # nothing; say how to use the printer instead.
+        self.activity_empty = theme.card(self.activity_box, "Nothing printed yet", padding=18)
+        theme.autowrap(ttk.Label(self.activity_empty, text=("Export a PDF into the WhatsApp PDF folder to begin." if sys.platform == "win32" and sys.getwindowsversion().major < 10 else vm.HOW_TO_USE),
+                                 style="Hint.TLabel", justify="left")).pack(fill="x")
+
+        ttk.Separator(page).pack(fill="x", pady=(36, 14))
+        foot = ttk.Frame(page)
+        foot.pack(fill="x")
+        self.version_label = ttk.Label(
+            foot, text=f"WhatsApp Printer · Version {__version__}", style="Small.TLabel")
         self.version_label.pack(side="left")
         self.update_button = ttk.Button(
-            row, text="Check for updates", command=self.check_updates
+            foot, text="Check for updates", style="Link.TButton", command=self.check_updates
         )
         self.update_button.pack(side="right")
-        self.update_status = ttk.Label(updates, text="", style="Hint.TLabel")
-        self.update_status.pack(anchor="w", pady=(6, 0))
+        self.update_status = ttk.Label(foot, text="", style="Small.TLabel")
+        self.update_status.pack(side="right", padx=(0, 12))
 
-    # -- queue tab ---------------------------------------------------------
+    def _history_table(self, parent, height: int) -> ttk.Treeview:
+        table = ttk.Treeview(parent, columns=[c for c, _h, _w in HISTORY_COLUMNS],
+                             show="headings", height=height, selectmode="browse")
+        theme.headings(table, HISTORY_COLUMNS)
+        # Only the rows that mean something different from the rest are
+        # coloured: failures, and what was ignored.
+        table.tag_configure("bad", foreground=theme.DANGER)
+        table.tag_configure("muted", foreground=theme.SUBTLE)
+        return table
+
+    def _render_needs(self, problems: list[str]) -> None:
+        needs = tuple(vm.setup_needs(problems))
+        if needs == self._needs_shown:
+            return
+        self._needs_shown = needs
+        for child in self.needs_grid.winfo_children():
+            child.destroy()
+        if not needs:
+            self.problems_box.pack_forget()
+            return
+        for index, need in enumerate(needs):
+            box = theme.card(self.needs_grid, padding=18)
+            box.grid(row=index // 2, column=index % 2, sticky="nsew", pady=(0, 12),
+                     padx=(0, 12) if index % 2 == 0 else 0)
+            top = ttk.Frame(box)
+            top.pack(fill="x", pady=(0, 12))
+            ttk.Label(top, image=self._icon("dot", theme.WARM, 12)).pack(side="left")
+            ttk.Label(top, text=need.tag.upper(),
+                      style="OkTag.TLabel" if need.tag == "Required" else "MutedTag.TLabel",
+                      ).pack(side="right")
+            ttk.Label(box, text=need.title, style="Head.TLabel").pack(anchor="w")
+            for line in need.lines:
+                theme.autowrap(ttk.Label(box, text=line, style="Hint.TLabel", justify="left")
+                               ).pack(fill="x", anchor="w", pady=(4, 0))
+            ttk.Button(
+                box, text=need.action, style="Link.TButton", compound="right",
+                image=self._icon("arrow", theme.INK, 14, before=6),
+                command=lambda page=need.page: self.open_setup(page),
+            ).pack(anchor="w", pady=(14, 0))
+        self.problems_box.pack(fill="x", pady=(30, 0), before=self.activity_box)
+
+    # -- needs attention page ------------------------------------------------
 
     def _build_queue(self) -> None:
-        canvas = tk.Canvas(self.queue_tab, highlightthickness=0)
-        scroll = ttk.Scrollbar(self.queue_tab, orient="vertical", command=canvas.yview)
-        self.queue_body = ttk.Frame(canvas)
-        self.queue_body.bind(
-            "<Configure>",
-            lambda _e: canvas.configure(scrollregion=canvas.bbox("all")),
-        )
-        window = canvas.create_window((0, 0), window=self.queue_body, anchor="nw")
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
-        canvas.configure(yscrollcommand=scroll.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-
-        self.queue_empty = ttk.Label(
-            self.queue_body,
-            text="Nothing waiting.\n\nDocuments appear here only when the "
-                 "customer's number could not be read off the page.",
-            style="Hint.TLabel",
-            justify="left",
-        )
+        page = self.attention_page
+        _title, self.attention_detail = theme.page_title(
+            page, "Operations / 02", "Needs attention", "")
+        self.queue_body = ttk.Frame(page)
+        self.queue_body.pack(fill="x")
+        # The same problems as the Status page, as a numbered list: the
+        # operator who comes here because nothing is sending should find why.
+        self.checklist_box = ttk.Frame(page)
+        self._checklist_shown: tuple | None = None
 
     @staticmethod
     def _queue_signature(jobs) -> tuple:
@@ -212,8 +402,9 @@ class DesktopWindow:
         )
 
     def _render_queue(self) -> None:
-        jobs = self.pipeline.store.pending()
-        signature = self._queue_signature(jobs)
+        jobs = self.pipeline.store.pending(limit=self._queue_limit)
+        total = self.pipeline.store.pending_count()
+        signature = (self._queue_signature(jobs), tuple(sorted(self._sending)), total)
 
         # refresh() runs on a two-second timer. Rebuilding these rows destroys
         # the Entry the operator is typing a number into, which is the same
@@ -241,18 +432,20 @@ class DesktopWindow:
             child.destroy()
         self._queue_rows.clear()
 
+        self.attention_detail.configure(
+            text=f"{total} document(s) could not go out on their own. Check the "
+                 f"number, then send or discard each one."
+            if total else "Failed sends and documents waiting for review appear here."
+        )
         if not jobs:
-            ttk.Label(
-                self.queue_body,
-                text="Nothing waiting.\n\nDocuments appear here only when the "
-                     "customer's number could not be read off the page.",
-                style="Hint.TLabel",
-                justify="left",
-            ).pack(anchor="w", pady=20)
+            self._all_clear()
             return
 
         for job in jobs:
             self._queue_row(job, drafts.get(job.id))
+        if total > len(jobs):
+            ttk.Button(self.queue_body, text=f"Show more ({total - len(jobs)} remaining)",
+                       command=self._more_pending).pack(pady=8)
 
         if focused_job in self._queue_rows:
             entry = self._queue_rows[focused_job]
@@ -260,25 +453,58 @@ class DesktopWindow:
             if caret is not None:
                 entry.icursor(caret)
 
-    def _queue_row(self, job, draft: str | None = None) -> None:
-        box = ttk.LabelFrame(self.queue_body, text=vm.document_of(job), padding=10)
-        box.pack(fill="x", pady=(0, 8))
+    def _all_clear(self) -> None:
+        ttk.Separator(self.queue_body).pack(fill="x")
+        row = ttk.Frame(self.queue_body, padding=(0, 16))
+        row.pack(fill="x")
+        size = theme.px(self.root, 30)
+        badge = tk.Canvas(row, width=size, height=size, highlightthickness=0,
+                          borderwidth=0, background=theme.WASH)
+        badge.create_image(size // 2, size // 2, image=self._icon("check", theme.MINT))
+        badge.pack(side="left")
+        ttk.Label(row, text="Nothing needs attention. No failed documents or "
+                            "delivery problems.").pack(side="left", padx=(12, 0))
+        ttk.Separator(self.queue_body).pack(fill="x")
 
-        ttk.Label(box, text=vm.queue_caption(job), style="Hint.TLabel").pack(anchor="w")
-        ttk.Label(
-            box, text=job.hold_reason or job.error or "", justify="left",
-            wraplength=640, foreground=TONE_COLOURS["warn"],
-        ).pack(anchor="w", pady=(4, 8))
+    def _more_pending(self) -> None:
+        self._queue_limit += 200
+        self._queue_shown = None
+        self._render_queue()
+
+    def _queue_row(self, job, draft: str | None = None) -> None:
+        box = theme.card(self.queue_body, padding=18)
+        box.pack(fill="x", pady=(0, 12))
+
+        top = ttk.Frame(box)
+        top.pack(fill="x")
+        ttk.Label(top, text=vm.document_of(job), style="Head.TLabel").pack(side="left")
+        label, tone = vm.label_of(job)
+        ttk.Label(top, text=label.upper(), style=f"{tone.title()}Tag.TLabel").pack(
+            side="right")
+        ttk.Label(box, text=vm.queue_caption(job), style="MonoHint.TLabel").pack(
+            anchor="w", pady=(2, 0))
+        reason = job.error or job.hold_reason or ""
+        if reason:
+            theme.autowrap(ttk.Label(box, text=reason, style="Warn.TLabel", justify="left")
+                           ).pack(fill="x", anchor="w", pady=(10, 0))
 
         row = ttk.Frame(box)
-        row.pack(fill="x")
+        row.pack(fill="x", pady=(14, 0))
         entry = ttk.Entry(row, width=22)
         entry.insert(0, draft if draft is not None else (job.recipient or ""))
         entry.pack(side="left")
         self._queue_rows[job.id] = entry
-        ttk.Button(
-            row, text="Send", command=lambda j=job.id, e=entry: self.send_job(j, e.get())
-        ).pack(side="left", padx=6)
+        sending = job.id in self._sending
+        send = ttk.Button(
+            row,
+            text="Sending…" if sending else ("Retry…" if job.status == JobStatus.FAILED else "Send"),
+            style="Mint.TButton",
+            command=lambda j=job.id, e=entry: self.send_job(j, e.get()),
+        )
+        send.pack(side="left", padx=(8, 6))
+        if sending:
+            send.state(["disabled"])
+            entry.state(["disabled"])
         if job.chat_url:
             ttk.Button(
                 row,
@@ -289,87 +515,115 @@ class DesktopWindow:
             row, text="View PDF", command=lambda j=job.id: self.open_pdf(j)
         ).pack(side="left")
         ttk.Button(
-            row, text="Discard", command=lambda j=job.id: self.discard_job(j)
+            row, text="Discard", style="Link.TButton",
+            command=lambda j=job.id: self.discard_job(j),
         ).pack(side="right")
 
-    # -- recent tab --------------------------------------------------------
+    def _render_checklist(self, problems: list[str]) -> None:
+        shown = tuple(problems)
+        if shown == self._checklist_shown:
+            return
+        self._checklist_shown = shown
+        for child in self.checklist_box.winfo_children():
+            child.destroy()
+        if not problems:
+            self.checklist_box.pack_forget()
+            return
+        theme.section_head(self.checklist_box,
+                           f"Setup checklist / {len(problems):02d} items")
+        box = theme.card(self.checklist_box, padding=0)
+        box.pack(fill="x")
+        for number, problem in enumerate(problems, 1):
+            if number > 1:
+                ttk.Separator(box).pack(fill="x")
+            row = ttk.Frame(box, padding=(18, 12))
+            row.pack(fill="x")
+            ttk.Label(row, text=f"{number:02d}", style="MonoHint.TLabel").pack(
+                side="left", anchor="n", pady=(1, 0))
+            page = vm.fixed_by(problem)
+            ttk.Button(
+                row, text=vm.SETUP_ACTIONS[page], style="Link.TButton", compound="right",
+                image=self._icon("arrow", theme.INK, 14, before=6),
+                command=lambda p=page: self.open_setup(p),
+            ).pack(side="right", anchor="n")
+            theme.autowrap(ttk.Label(row, text=problem, justify="left")).pack(
+                side="left", fill="x", expand=True, padx=14)
+        self.checklist_box.pack(fill="x", pady=(30, 0))
+
+    # -- recent documents page -----------------------------------------------
 
     def _build_recent(self) -> None:
-        columns = ("time", "status", "sent_to", "document", "detail")
-        self.recent = ttk.Treeview(
-            self.recent_tab, columns=columns, show="headings", height=18
-        )
-        for column, heading, width in (
-            ("time", "Time", 110),
-            ("status", "Status", 110),
-            ("sent_to", "Sent to", 140),
-            ("document", "Document", 140),
-            ("detail", "Detail", 260),
-        ):
-            self.recent.heading(column, text=heading)
-            self.recent.column(column, width=width, anchor="w")
+        page = self.recent_page
+        theme.page_title(page, "Operations / 03", "Recent documents",
+                         "The last 80 documents this printer handled, newest first.")
+        bar = ttk.Frame(page)
+        bar.pack(fill="x", pady=(0, 10))
+        self.recent_count = theme.eyebrow(bar, "")
+        self.recent_count.pack(side="left")
+        self.recent_date = ttk.Label(bar, style="Small.TLabel")
+        self.recent_date.pack(side="right")
 
-        scroll = ttk.Scrollbar(
-            self.recent_tab, orient="vertical", command=self.recent.yview
-        )
+        holder = ttk.Frame(page)
+        holder.pack(fill="both", expand=True)
+        self.recent = self._history_table(holder, height=12)
+        scroll = ttk.Scrollbar(holder, orient="vertical", command=self.recent.yview)
         self.recent.configure(yscrollcommand=scroll.set)
         self.recent.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
     def _render_recent(self) -> None:
-        self.recent.delete(*self.recent.get_children())
-        for job in self.pipeline.store.recent(80):
-            self.recent.insert("", "end", values=vm.history_row(job))
+        rows = tuple(
+            (vm.history_row(job), vm.label_of(job)[1])
+            for job in self.pipeline.store.recent(80)
+        )
+        # Redraw only when something changed. This runs every two seconds,
+        # and rebuilding the list threw the scroll position back to the top
+        # while the operator was reading further down it.
+        if rows == self._recent_shown:
+            return
+        self._recent_shown = rows
+        for table, shown in ((self.recent, rows), (self.activity, rows[:5])):
+            table.delete(*table.get_children())
+            for values, tone in shown:
+                table.insert("", "end", values=values, tags=(tone,))
+        self.recent_count.configure(
+            text=f"{len(rows)} record{'' if len(rows) == 1 else 's'}".upper())
+        self.recent_date.configure(text=datetime.now().strftime("%d %b"))
+        if rows:
+            self.activity_empty.pack_forget()
+            self.activity.configure(height=min(5, len(rows)))
+            self.activity.pack(fill="x")
+        else:
+            self.activity.pack_forget()
+            self.activity_empty.pack(fill="x")
 
-    # -- settings tab ------------------------------------------------------
+    # -- counter settings (a setup page) ---------------------------------------
 
     def _build_settings(self) -> None:
         self.fields: dict[str, tk.Variable] = {}
         # For fields whose stored value is not what the operator reads.
         self.choices: dict[str, list[tuple[str, str]]] = {}
 
-        # Apply belongs to the tab, not to the scrolling content. The groups
+        # Apply belongs to the page, not to the scrolling content. The groups
         # below run past the bottom edge on a laptop screen, and a button that
         # has scrolled out of sight reads as a button that is not there — an
         # operator typed a whole page of settings, pressed Test send, and was
         # told the fields were empty.
         buttons = ttk.Frame(self.settings_tab)
-        buttons.pack(side="bottom", fill="x", pady=(8, 0))
-        ttk.Button(buttons, text="Apply", command=self.apply_settings).pack(
-            side="right"
-        )
+        buttons.pack(side="bottom", fill="x", pady=(12, 0))
+        ttk.Button(buttons, text="Apply", style="Mint.TButton",
+                   command=self.apply_settings).pack(side="right")
 
-        body = self._scrollable(self.settings_tab)
+        body = theme.scrollable(self.settings_tab)
 
-        account = ttk.LabelFrame(body, text="WhatsApp account", padding=12)
-        account.pack(fill="x", pady=(0, 10))
-        self._entry(account, "phone_number_id", "Phone number ID",
-                    "Meta Business → WhatsApp → API Setup.")
-        self._entry(account, "own_numbers", "Our own numbers",
+        business = self._group(body, "Your business")
+        self._entry(business, "business_name", "Business name",
+                    "Used where a message names the business.")
+        self._entry(business, "own_numbers", "Our own numbers",
                     "Comma separated. Never treated as a customer, so the number "
                     "on your own letterhead cannot be sent its own receipt.")
-        self._entry(account, "default_template", "Message",
-                    "An approved template name. Meta requires this for messages "
-                    "you start.")
-        self._entry(account, "document_noun", "Attachment name",
-                    "What your paperwork is called. Names the PDF on the "
-                    "customer's phone: Receipt-CR1747-26.pdf.")
 
-        documents = ttk.LabelFrame(body, text="Documents", padding=12)
-        documents.pack(fill="x", pady=(0, 10))
-        ttk.Label(
-            documents,
-            text="This printer carries more than one kind of paperwork, and a "
-                 "member sent the receipt wording over a removal notice is "
-                 "worse off than one sent nothing. Leave a row blank and that "
-                 "document uses the message above.",
-            style="Hint.TLabel", wraplength=560, justify="left",
-        ).pack(anchor="w", pady=(0, 8))
-        for kind in self.pipeline.profile.document_kinds:
-            self._document_row(documents, kind.name)
-
-        sending = ttk.LabelFrame(body, text="Sending", padding=12)
-        sending.pack(fill="x", pady=(0, 10))
+        sending = self._group(body, "Sending")
         self._choice(
             sending, "send_mode", "After printing", SEND_MODES,
             "Send automatically needs an approved message and a working "
@@ -388,14 +642,12 @@ class DesktopWindow:
         self._entry(sending, "max_sends_per_minute", "Maximum per minute",
                     "Per computer. Stops one runaway batch print.")
 
-        scanned = ttk.LabelFrame(body, text="Scanned documents", padding=12)
-        scanned.pack(fill="x", pady=(0, 10))
+        scanned = self._group(body, "Scanned documents")
         self._check(scanned, "ocr_enabled", "Read documents printed as an image (OCR)")
         self._check(scanned, "ocr_silent_send",
                     "Send to numbers read by OCR without asking")
 
-        receipts = ttk.LabelFrame(body, text="Printed receipts", padding=12)
-        receipts.pack(fill="x", pady=(0, 10))
+        receipts = self._group(body, "Printed receipts")
         self._check(
             receipts,
             "keep_printed_pdfs",
@@ -408,84 +660,35 @@ class DesktopWindow:
             "to keep them inside the program's own folder.",
         )
 
-        install = ttk.LabelFrame(body, text="This computer", padding=12)
-        install.pack(fill="x", pady=(0, 10))
+        install = self._group(body, "This computer")
         self._entry(install, "branch_name", "Branch", "")
         self._entry(install, "device_name", "Computer", "")
         self._entry(install, "update_url", "Update location",
                     "A link to the version file. Leave blank to disable updates.")
 
-    def _scrollable(self, parent: ttk.Frame) -> ttk.Frame:
-        """A vertically scrolling region filling `parent`, returning its content
-        frame. Tk has no scrolling container, so it is a canvas with a frame
-        inside it."""
-        canvas = tk.Canvas(parent, highlightthickness=0, borderwidth=0)
-        bar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=bar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        bar.pack(side="right", fill="y")
+    @staticmethod
+    def _group(parent, title: str) -> ttk.Frame:
+        # The right-hand gap keeps the cards' edge off the scroll bar.
+        group = theme.card(parent, title, padding=(18, 16, 18, 18))
+        group.pack(fill="x", pady=(0, 12), padx=(0, 12))
+        return group
 
-        inner = ttk.Frame(canvas)
-        window = canvas.create_window((0, 0), window=inner, anchor="nw")
-        # The content decides how tall the scroll region is; the canvas decides
-        # how wide the content is, so the groups stretch instead of sitting in
-        # a narrow column.
-        inner.bind(
-            "<Configure>",
-            lambda _e: canvas.configure(scrollregion=canvas.bbox("all")),
-        )
-        canvas.bind(
-            "<Configure>", lambda e: canvas.itemconfigure(window, width=e.width)
-        )
+    @staticmethod
+    def _label(parent, label: str) -> None:
+        ttk.Label(parent, text=label, style="Field.TLabel").pack(anchor="w", pady=(8, 4))
 
-        # Tk delivers the wheel to the widget under the pointer, which is
-        # normally an entry inside the frame rather than the canvas. Bind on
-        # the window and match by widget path, so the wheel still works over a
-        # field but leaves the other tabs' lists alone.
-        def wheel(event: "tk.Event") -> None:
-            path = str(event.widget)
-            if path == str(canvas) or path.startswith(f"{canvas}."):
-                canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-
-        parent.winfo_toplevel().bind("<MouseWheel>", wheel, add="+")
-        return inner
+    @staticmethod
+    def _hint(parent, hint: str) -> None:
+        if hint:
+            theme.autowrap(ttk.Label(parent, text=hint, style="Hint.TLabel", justify="left")
+                           ).pack(fill="x", anchor="w", pady=(4, 0))
 
     def _entry(self, parent, name: str, label: str, hint: str) -> None:
-        row = ttk.Frame(parent)
-        row.pack(fill="x", pady=3)
-        ttk.Label(row, text=label, width=24, anchor="e").pack(side="left", padx=(0, 10))
+        self._label(parent, label)
         var = tk.StringVar()
-        ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+        ttk.Entry(parent, textvariable=var).pack(fill="x")
         self.fields[name] = var
-        if hint:
-            ttk.Label(
-                parent, text=hint, style="Hint.TLabel", wraplength=560, justify="left"
-            ).pack(anchor="w", padx=(184, 0))
-
-    def _document_row(self, parent, kind: str) -> None:
-        """One kind of paperwork: the message it goes out under, and what the
-        attached PDF is called.
-
-        Two boxes on one line rather than two rows, because they are one
-        decision -- a removal notice arriving called "Receipt-RN317-26.pdf" is
-        the same mistake as one worded as a receipt, and the member reads the
-        filename before they open anything.
-
-        The list comes from the profile, so a client who adds a fourth
-        document to profile.json gets a row for it without a new release.
-        """
-        row = ttk.Frame(parent)
-        row.pack(fill="x", pady=3)
-        ttk.Label(
-            row, text=kind.replace("_", " ").capitalize(), width=24, anchor="e"
-        ).pack(side="left", padx=(0, 10))
-        template = tk.StringVar()
-        ttk.Entry(row, textvariable=template).pack(side="left", fill="x", expand=True)
-        ttk.Label(row, text="attached as").pack(side="left", padx=(8, 6))
-        noun = tk.StringVar()
-        ttk.Entry(row, textvariable=noun, width=16).pack(side="left")
-        self.fields[f"doc_template:{kind}"] = template
-        self.fields[f"doc_noun:{kind}"] = noun
+        self._hint(parent, hint)
 
     def _folder(self, parent, name: str, label: str, hint: str) -> None:
         """A path setting, with the two buttons that make it a folder setting.
@@ -494,9 +697,9 @@ class DesktopWindow:
         letter that is not mapped any more, so Browse is the way in and Open is
         how the operator checks it went where they meant.
         """
+        self._label(parent, label)
         row = ttk.Frame(parent)
-        row.pack(fill="x", pady=3)
-        ttk.Label(row, text=label, width=24, anchor="e").pack(side="left", padx=(0, 10))
+        row.pack(fill="x")
         var = tk.StringVar()
         ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
         ttk.Button(
@@ -506,10 +709,7 @@ class DesktopWindow:
             row, text="Open", command=lambda v=var: self._open_folder(v)
         ).pack(side="left", padx=(6, 0))
         self.fields[name] = var
-        if hint:
-            ttk.Label(
-                parent, text=hint, style="Hint.TLabel", wraplength=560, justify="left"
-            ).pack(anchor="w", padx=(184, 0))
+        self._hint(parent, hint)
 
     def _resolved_folder(self, var: "tk.StringVar") -> Path:
         typed = (var.get() or "").strip()
@@ -552,22 +752,17 @@ class DesktopWindow:
         understand — the failure that leaves would be silent, at the worst
         moment.
         """
-        row = ttk.Frame(parent)
-        row.pack(fill="x", pady=3)
-        ttk.Label(row, text=label, width=24, anchor="e").pack(side="left", padx=(0, 10))
+        self._label(parent, label)
         var = tk.StringVar()
         ttk.Combobox(
-            row,
+            parent,
             textvariable=var,
             values=[text for text, _ in options],
             state="readonly",
-        ).pack(side="left", fill="x", expand=True)
+        ).pack(fill="x")
         self.fields[name] = var
         self.choices[name] = options
-        if hint:
-            ttk.Label(
-                parent, text=hint, style="Hint.TLabel", wraplength=560, justify="left"
-            ).pack(anchor="w", padx=(184, 0))
+        self._hint(parent, hint)
 
     def _choice_label(self, name: str, value: str) -> str:
         """The label for a stored value; the first option if it is unknown."""
@@ -587,16 +782,14 @@ class DesktopWindow:
 
     def _check(self, parent, name: str, label: str) -> None:
         var = tk.BooleanVar()
-        ttk.Checkbutton(parent, text=label, variable=var).pack(anchor="w", pady=2)
+        ttk.Checkbutton(parent, text=label, variable=var).pack(anchor="w", pady=(8, 0))
         self.fields[name] = var
 
     def _load_settings_into_form(self) -> None:
         s = self.settings
         values = {
-            "phone_number_id": s.phone_number_id,
+            "business_name": s.business_name,
             "own_numbers": ", ".join(s.own_numbers),
-            "default_template": s.default_template,
-            "document_noun": s.document_noun,
             "dedupe_window_hours": str(s.dedupe_window_hours),
             "max_sends_per_minute": str(s.max_sends_per_minute),
             "branch_name": s.branch_name,
@@ -611,18 +804,11 @@ class DesktopWindow:
             "keep_printed_pdfs": s.keep_printed_pdfs,
             "pdf_folder": s.pdf_folder,
         }
-        # Blank means "nothing special about this document", which is what an
-        # ordinary receipt is: it takes default_template and document_noun.
-        for kind in self.pipeline.profile.document_kinds:
-            values[f"doc_template:{kind.name}"] = s.document_templates.get(
-                kind.name, ""
-            )
-            values[f"doc_noun:{kind.name}"] = s.document_nouns.get(kind.name, "")
         for name, value in values.items():
             self.fields[name].set(value)
 
     def apply_settings(self) -> None:
-        s = self.settings
+        s = deepcopy(self.settings)
         try:
             s.dedupe_window_hours = int(self.fields["dedupe_window_hours"].get())
             s.max_sends_per_minute = int(self.fields["max_sends_per_minute"].get())
@@ -637,56 +823,31 @@ class DesktopWindow:
         was_test = s.dry_run
         was_manual = s.send_mode == "link"
         s.send_mode = self._choice_value("send_mode", s.send_mode)
-        s.phone_number_id = self.fields["phone_number_id"].get().strip()
+        s.business_name = self.fields["business_name"].get().strip() or s.business_name
         s.own_numbers = [
             n.strip() for n in self.fields["own_numbers"].get().split(",") if n.strip()
         ]
-        s.default_template = (
-            self.fields["default_template"].get().strip() or s.default_template
-        )
-        s.document_noun = (
-            self.fields["document_noun"].get().strip() or s.document_noun
-        )
 
-        # Which message each kind of paperwork goes out under. Only what was
-        # actually filled in is stored: an empty map is a real answer -- a
-        # client who sends nothing but receipts -- and it is what the gate
-        # reads to decide whether an unidentifiable scan could be the wrong
-        # document. Writing a row back for every kind would take that away.
-        by_kind: dict[str, str] = {}
-        nouns: dict[str, str] = {}
-        for kind in self.pipeline.profile.document_kinds:
-            name = self.fields[f"doc_template:{kind.name}"].get().strip()
-            noun = self.fields[f"doc_noun:{kind.name}"].get().strip()
-            if name:
-                by_kind[kind.name] = name
-            if noun:
-                nouns[kind.name] = noun
-
-        # A message this computer has never heard of is nearly always a typo,
-        # and one typo holds every notice at the counter with "Template
-        # 'removal_notce' is not configured" -- discovered by an operator, at
-        # the worst moment, with a member waiting. Not always a typo, though:
-        # a template approved in Meta this morning is unknown here until
-        # `waprinter templates --sync` runs. So this asks rather than refuses.
-        problems = []
-        for name in sorted(set(by_kind.values())):
-            template = self.pipeline.templates.get(name)
-            if template is None:
-                problems.append(f"{name} — not on this computer")
-            elif not template.usable:
-                problems.append(f"{name} — {template.status}, not approved by Meta")
-        if problems and not messagebox.askyesno(
-            "WhatsApp Printer",
-            "These messages cannot be sent as things stand:\n\n• "
-            + "\n• ".join(problems)
-            + "\n\nCheck the spelling, or run 'waprinter templates --sync' if "
-            "they were approved recently.\n\nSave anyway?",
-            parent=self.root,
-        ):
-            return
-        s.document_templates = by_kind
-        s.document_nouns = nouns
+        # Switching to automatic sending is when an unapproved message stops
+        # being harmless: link mode never asks Meta, the API always does. So
+        # the check runs here, over every message this counter actually uses,
+        # and asks rather than refuses -- approval may be minutes away.
+        if s.send_mode == "api":
+            problems = []
+            for ref in sorted({s.default_template, *s.document_templates.values()}):
+                template = self.pipeline.templates.get(ref)
+                if template is None:
+                    problems.append(f"{ref} — not on this computer")
+                elif not template.usable:
+                    problems.append(f"{ref} — {template.status}, not approved by Meta")
+            if problems and not messagebox.askyesno(
+                "WhatsApp Printer",
+                "These messages cannot be sent automatically as things stand:\n\n• "
+                + "\n• ".join(problems)
+                + "\n\nRefresh them in Setup → Message templates.\n\nSave anyway?",
+                parent=self.root,
+            ):
+                return
         s.branch_name = self.fields["branch_name"].get().strip()
         s.device_name = self.fields["device_name"].get().strip()
         s.update_url = self.fields["update_url"].get().strip()
@@ -715,28 +876,17 @@ class DesktopWindow:
                 return
         s.keep_printed_pdfs = keep
         s.pdf_folder = folder
-        s.save()
-
-        # Which sender is wired in was decided at startup. Re-decide it now, or
-        # turning test mode off would change only what jobs are *called*: the
-        # dry-run sender would stay in place and receipts would be recorded as
-        # sent while nothing left the machine.
         try:
-            self.pipeline.rebuild_sender()
+            self.pipeline.apply_settings(s)
         except Exception as exc:
-            # Put test mode back rather than leave the app claiming it will
-            # send when it has no way to. Recording a receipt as delivered when
-            # it was not is the one failure the operator cannot recover from.
-            s.dry_run = True
-            s.save()
-            self._load_settings_into_form()
-            self.refresh()
             messagebox.showerror(
                 "WhatsApp Printer",
-                f"Cannot send for real yet, so test mode has been left on.\n\n{exc}",
+                f"Settings could not be applied. Your previous settings are still active.\n\n{exc}",
                 parent=self.root,
             )
             return
+        self.pipeline.templates.business_name = s.business_name
+        self.pipeline.templates.load()
 
         # One dialog, not two: changing both at once is the go-live moment,
         # and two stacked warnings get clicked through as a single reflex.
@@ -763,10 +913,115 @@ class DesktopWindow:
 
     # -- actions -----------------------------------------------------------
 
+    def _show_setup_text(self, title: str, text: str) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.geometry("640x480")
+        dialog.configure(background=theme.PAPER)
+        body = ttk.Frame(dialog, padding=12)
+        body.pack(fill="both", expand=True)
+        view = theme.style_text(tk.Text(body, wrap="word", padx=10, pady=10))
+        scroll = ttk.Scrollbar(body, command=view.yview)
+        view.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        view.pack(fill="both", expand=True)
+        view.insert("1.0", text)
+        view.configure(state="disabled")
+        ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=(0, 12))
+
+    def export_setup(self) -> None:
+        from ..setup_profile import export_setup
+
+        selected = filedialog.asksaveasfilename(parent=self.root, title="Export setup (without the token)",
+                                               initialfile="provision.json", defaultextension=".json",
+                                               filetypes=[("Setup file", "*.json")])
+        if not selected:
+            return
+        try:
+            export_setup(Path(selected), self.settings, self.pipeline.templates,
+                         self.pipeline.profile)
+        except Exception as exc:
+            messagebox.showerror("Export setup", str(exc), parent=self.root)
+            return
+        messagebox.showinfo("Export setup", "Setup exported in test mode. Put provision.json next to the installer, "
+                            "or import it on another counter. Connect WhatsApp there and check a sample PDF "
+                            "of each kind before going live.",
+                            parent=self.root)
+
+    def import_setup(self) -> None:
+        from ..provision import apply
+
+        selected = filedialog.askopenfilename(parent=self.root, title="Import counter setup",
+                                              filetypes=[("Setup file", "*.json")])
+        if not selected:
+            return
+        try:
+            # Keep the source: it may be the engineer's reusable USB copy.
+            result = apply(Path(selected), remove=False)
+            self.pipeline.reload_if_changed()
+            self.pipeline.templates.load()
+            self.pipeline.reload_profile(force=True)
+            # Token-only imports do not change the settings timestamp.
+            try:
+                self.pipeline.rebuild_sender()
+            except Exception as exc:
+                from ..send.unavailable import UnavailableSender
+
+                self.pipeline.sender = UnavailableSender(str(exc))
+                result.warnings.append(str(exc))
+            self._load_settings_into_form()
+            self.refresh()
+            if self.in_setup:
+                self.setup_view.show_page(self.setup_view.current or "share")
+        except Exception as exc:
+            messagebox.showerror("Import setup", str(exc), parent=self.root)
+            return
+        self._show_setup_text("Import setup", result.summary() + "\n\n" + "\n".join(result.warnings))
+
+    # -- setup mode ----------------------------------------------------------
+
+    @property
+    def in_setup(self) -> bool:
+        return self._setup_shown
+
+    def open_setup(self, page: str = "") -> bool:
+        """Swap the counter's pages for the setup screens, after the PIN."""
+        from .setupmodel import check_pin
+
+        if self._setup_shown:
+            self.setup_view.show_page(page or self.setup_view.current or "connect")
+            return True
+        stored = self.settings.setup_pin
+        if stored:
+            pin = simpledialog.askstring("WhatsApp Printer setup", "Setup PIN:",
+                                         show="•", parent=self.root)
+            if pin is None:
+                return False
+            if not check_pin(pin, stored):
+                messagebox.showerror("WhatsApp Printer setup", "That PIN is not right.",
+                                     parent=self.root)
+                return False
+        self.show_setup(page)
+        return True
+
+    def show_setup(self, page: str = "") -> None:
+        """Show the setup screens. No PIN check: callers have done it."""
+        for frame in self.views.values():
+            frame.pack_forget()
+        self.setup_view.pack(fill="both", expand=True)
+        self._setup_shown = True
+        self._load_settings_into_form()
+        self.setup_view.show_page(page or self.setup_view.current or "connect")
+        self._mark_nav()
+
+    def show_counter(self) -> None:
+        """Back to whichever of the counter's pages was showing last."""
+        self.show_view(self._view)
+
     def test_send(self) -> None:
         from ..send.readiness import problems
 
-        outstanding = problems(self.settings, self.pipeline.templates)
+        outstanding = problems(self.settings, self.pipeline.templates, self.pipeline.profile)
         if outstanding:
             messagebox.showerror(
                 "WhatsApp Printer",
@@ -787,16 +1042,107 @@ class DesktopWindow:
                 parent=self.root,
             )
 
-    def send_job(self, job_id: str, recipient: str) -> None:
-        try:
-            job = self.pipeline.release(job_id, recipient)
-        except (KeyError, ValueError) as exc:
-            messagebox.showerror("WhatsApp Printer", str(exc), parent=self.root)
+    def send_job(self, job_id: str, recipient: str, document_kind: str | None = None) -> None:
+        """Send a waiting job to the number in its row.
+
+        The send itself runs on a worker thread. It used to run here, on the
+        thread that owns every widget, and a Meta upload with its retries and
+        timeouts could hold the window frozen for over a minute with no way
+        to tell a stuck app from a slow one.
+        """
+        if job_id in self._sending:
             return
-        if job.status is JobStatus.FAILED:
-            messagebox.showerror(
-                "WhatsApp Printer", job.error or "Send failed", parent=self.root
-            )
+        job = self.pipeline.store.get(job_id)
+        if job is not None and job.status == JobStatus.FAILED:
+            if not messagebox.askyesno(
+                "Retry document",
+                f"{job.error or 'The previous send failed.'}\n\n"
+                "Check WhatsApp first if the previous result was uncertain. "
+                f"Retry this document to {recipient}?",
+                parent=self.root,
+            ):
+                return
+        if job is not None and document_kind is None and (
+            job.fields.classification_error or
+            (job.fields.document_kind is None and self.settings.document_templates)
+        ):
+            self._choose_job_kind(job, recipient)
+            return
+        self._sending.add(job_id)
+        self._queue_shown = None
+        self._render_queue()
+
+        def worker() -> None:
+            try:
+                outcome: object = self.pipeline.release(job_id, recipient, document_kind=document_kind)
+            except Exception as exc:  # anything: the job must not vanish
+                log.exception("send from the queue failed for %s", job_id)
+                outcome = exc
+            self.root.after(0, lambda: self._sent(job_id, outcome))
+
+        threading.Thread(target=worker, name=f"send-{job_id}", daemon=True).start()
+
+    def _choose_job_kind(self, job, recipient):
+        from .setup import Tasks
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Review document type and message")
+        dialog.geometry("620x440")
+        dialog.transient(self.root)
+        ttk.Label(dialog, text="Open the PDF, choose its type, then review the message.",
+                  padding=12).pack(anchor="w")
+        ttk.Button(dialog, text="Open PDF", command=lambda: webbrowser.open(job.pdf_path.resolve().as_uri())).pack()
+        kinds = list(dict.fromkeys(k.name for k in self.pipeline.profile.all_kinds))
+        selected = tk.StringVar()
+        box = ttk.Combobox(dialog, values=kinds, textvariable=selected, state="readonly")
+        box.pack(fill="x", padx=12, pady=8)
+        preview = tk.Text(dialog, height=12, wrap="word", state="disabled")
+        preview.pack(fill="both", expand=True, padx=12)
+        tasks = Tasks(dialog)
+        send = ttk.Button(dialog, text="Confirm type and send", state="disabled")
+        send.pack(pady=12)
+        def refresh(_event=None):
+            chosen = selected.get()
+            send.configure(state="disabled")
+            def work():
+                copy = deepcopy(job)
+                copy.fields = self.pipeline.fields_for_kind(job.pdf_path, chosen)
+                name, message = self.pipeline.compose(copy)
+                if message is None:
+                    raise ValueError(name)
+                if message.missing:
+                    raise ValueError("Message values missing: " + ", ".join(message.missing))
+                return message.preview
+            def done(result):
+                if selected.get() != chosen:
+                    refresh()
+                    return
+                preview.configure(state="normal")
+                preview.delete("1.0", "end")
+                preview.insert("1.0", str(result))
+                preview.configure(state="disabled")
+                if not isinstance(result, Exception):
+                    send.configure(state="normal", command=lambda: (dialog.destroy(), self.send_job(job.id, recipient, chosen)))
+            tasks.run("preview", work, done)
+        box.bind("<<ComboboxSelected>>", refresh)
+
+    def _sent(self, job_id: str, outcome: object) -> None:
+        """Back on the main thread: report what the worker found."""
+        self._sending.discard(job_id)
+        self._queue_shown = None
+        if isinstance(outcome, Exception):
+            messagebox.showerror("WhatsApp Printer", str(outcome), parent=self.root)
+        else:
+            job = outcome
+            if job.status is JobStatus.FAILED:
+                messagebox.showerror(
+                    "WhatsApp Printer", job.error or "Send failed", parent=self.root
+                )
+            elif job.status is JobStatus.DUPLICATE:
+                messagebox.showinfo(
+                    "WhatsApp Printer",
+                    job.hold_reason or "This document was already sent.",
+                    parent=self.root,
+                )
         self.refresh()
 
     def discard_job(self, job_id: str) -> None:
@@ -944,14 +1290,17 @@ class DesktopWindow:
         except Exception:
             log.exception("could not reload settings or templates")
 
-        outstanding = problems(self.settings, self.pipeline.templates)
+        outstanding = problems(self.settings, self.pipeline.templates, self.pipeline.profile)
         counters = vm.counters_for_today(self.pipeline.store, self.settings)
-        waiting = len(self.pipeline.store.pending())
+        waiting = self.pipeline.store.pending_count()
 
         state = vm.device_state(self.settings, waiting, outstanding)
-        self.state_label.configure(
-            text=state.text, foreground=TONE_COLOURS.get(state.tone, "")
-        )
+        self.mode_chip.configure(text=state.label.upper(),
+                                 style=f"{state.tone.title()}Chip.TLabel")
+        self.state_label.configure(text=vm.header_line(state))
+        self.mode_title.configure(
+            text=state.label, image=self._icon("dot", theme.DOTS[state.tone], 12, after=6))
+        self.mode_detail.configure(text=state.summary)
 
         for key, value in (
             ("sent", counters.sent),
@@ -959,18 +1308,16 @@ class DesktopWindow:
             ("waiting", counters.waiting),
             ("failed", counters.failed),
         ):
-            self.counter_values[key].configure(text=str(value))
-        self.counter_captions["sent"].configure(text=vm.sent_caption(self.settings))
+            self.counter_values[key].configure(
+                text=f"{value:02d}", foreground=theme.INK if value else theme.FAINT)
+        self.counter_captions["sent"].configure(text=vm.sent_caption(self.settings).upper())
 
-        if outstanding:
-            self.problems_label.configure(text="• " + "\n• ".join(outstanding))
-            self.problems_box.pack(fill="x", pady=(0, 12), before=None)
-        else:
-            self.problems_box.pack_forget()
+        self.nav_buttons["attention"].configure(
+            text=f"Needs attention ({waiting})" if waiting else "Needs attention")
 
-        self.tabs.tab(1, text=f"Needs attention ({waiting})" if waiting else "Needs attention")
-
+        self._render_needs(outstanding)
         self._render_queue()
+        self._render_checklist(outstanding)
         self._render_recent()
         # The settings form is deliberately NOT reloaded here. refresh() runs
         # on a two-second timer, and reloading would overwrite whatever the
