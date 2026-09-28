@@ -39,7 +39,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import Settings, paths
+from .config import Settings, coerce_setting, paths
 from .secrets import save_token, token_problem
 
 log = logging.getLogger(__name__)
@@ -133,6 +133,31 @@ def apply(
 
     settings = settings if settings is not None else Settings.load()
 
+    # Validate the portable template cache before applying any account changes.
+    template_items = raw.pop("templates", None)
+    imported_templates = None
+    if template_items is not None:
+        from .setup_profile import read_templates
+
+        try:
+            imported_templates = read_templates(template_items)
+        except ValueError as exc:
+            result.warnings.append(f"Invalid templates: {exc}. Setup file left in place.")
+            return result
+
+    document_profile = raw.pop("document_profile", None)
+    taught = None
+    if document_profile is not None:
+        from .setup_profile import read_document_profile
+
+        try:
+            taught = read_document_profile(document_profile)
+        except ValueError as exc:
+            result.warnings.append(
+                f"Invalid document types: {exc}. Setup file left in place."
+            )
+            return result
+
     token = raw.pop(_TOKEN_KEY, None)
     if token is not None:
         problem = token_problem(str(token))
@@ -156,8 +181,31 @@ def apply(
         if key not in known:
             result.warnings.append(f"Ignored unknown setting '{key}'.")
             continue
+        # JSON does not know that "false" is not False. Refuse the value
+        # rather than store it: a string is truthy, so `"dry_run": "false"`
+        # left test mode on, and `"own_numbers": "9876..."` iterated as
+        # characters and excluded nothing.
+        value, problem = coerce_setting(key, value)
+        if problem:
+            result.warnings.append(f"Ignored setting '{key}': {problem}.")
+            continue
         setattr(settings, key, value)
         result.applied.append(key)
+
+    if imported_templates is not None:
+        from .send.templates import TemplateStore
+
+        templates = TemplateStore(paths().templates, settings.business_name)
+        for template in imported_templates:
+            templates.put(template)
+        result.applied.append("templates")
+
+    if taught is not None:
+        from .extract.profile import DocumentProfile
+
+        kinds, rules = taught
+        DocumentProfile.write_taught(paths().profile, kinds, rules)
+        result.applied.append("document types")
 
     if result.applied:
         settings.save()

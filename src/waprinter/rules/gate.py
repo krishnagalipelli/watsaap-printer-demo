@@ -49,7 +49,7 @@ def dedupe_key(fields: ExtractedFields, recipient: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
-def _excluded_numbers(settings: Settings) -> set[str]:
+def excluded_numbers(settings: Settings) -> set[str]:
     """Numbers that may never be treated as a recipient, normalised to E.164."""
     from ..extract.phone import normalize
 
@@ -82,8 +82,17 @@ def evaluate(
             reason=f"Page has no text layer (printed as an image). {detail}",
         )
 
-    excluded = _excluded_numbers(settings)
+    excluded = excluded_numbers(settings)
     candidates = [c for c in fields.candidates if c.e164 not in excluded]
+
+    if fields.classification_error or (fields.document_kind is None and settings.document_templates):
+        strong = [c for c in candidates if c.confidence is Confidence.HIGH]
+        return GateOutcome(
+            Decision.HOLD,
+            recipient=strong[0].e164 if len(strong) == 1 else None,
+            reason=fields.classification_error or
+            "Document type could not be identified. Choose its type before sending.",
+        )
 
     # --- operator confirms every send ------------------------------------
     # Checked before the candidate logic so the outcome does not depend on
@@ -166,32 +175,13 @@ def evaluate(
             f"Check it against the invoice before sending.",
         )
 
-    # --- a scan nobody could identify is not a receipt by default ---------
-    # Only reached with ocr_silent_send on, i.e. where the operator has said
-    # OCR may send without them. That is a judgement about the number; it is
-    # not a licence to guess the document. An unrecognised document falls back
-    # to default_template, which is the receipt -- harmless on an install that
-    # has only the one message, and on an install that also sends removal
-    # notices it is how a member being removed gets thanked for a payment.
-    if (
-        fields.used_ocr
-        and fields.document_kind is None
-        and settings.document_templates
-    ):
-        others = ", ".join(sorted(settings.document_templates)).replace("_", " ")
-        return GateOutcome(
-            Decision.HOLD,
-            recipient=winner.e164,
-            confidence=winner.confidence,
-            reason=f"This scan could not be identified, and this printer also "
-            f"sends {others}. Confirm what it is before it goes out under the "
-            f"{settings.default_template.replace('_', ' ')} message.",
-        )
-
     key = dedupe_key(fields, winner.e164)
 
     # --- reprints ---------------------------------------------------------
-    prior = store.find_duplicate(key, settings.dedupe_window_hours, now=now)
+    prior = store.find_duplicate(
+        key, settings.dedupe_window_hours, now=now,
+        dry_run=settings.dry_run, send_mode=settings.send_mode,
+    )
     if prior:
         return GateOutcome(
             Decision.DUPLICATE,

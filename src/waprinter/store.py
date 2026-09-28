@@ -8,9 +8,11 @@ send, to whom, and why did we think that was right".
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import sqlite3
+import threading
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -128,16 +130,45 @@ def _fields_from_json(raw: str) -> ExtractedFields:
         amount_words=payload.get("amount_words"),
         payment_mode=payload.get("payment_mode"),
         document_kind=payload.get("document_kind"),
+        # Written since the field existed but never read back, so a held scan
+        # reopened from the queue looked verified whatever the two OCR passes
+        # had said about it.
+        document_kind_verified=payload.get("document_kind_verified", True),
+        classification_error=payload.get("classification_error", ""),
         page_count=payload.get("page_count", 0),
+        extra={
+            str(k): str(v)
+            for k, v in (payload.get("extra") or {}).items()
+            if v is not None
+        },
         has_text_layer=payload.get("has_text_layer", True),
         used_ocr=payload.get("used_ocr", False),
         ocr_error=payload.get("ocr_error"),
     )
 
 
+def _locked(method):
+    """Serialise one Store method against the others.
+
+    One connection is shared by the watcher thread and the window's thread.
+    SQLite serialises individual statements, but not a statement and the
+    commit that follows it: the window's commit() could land between the
+    watcher's upsert and its own commit, and the two halves of "a job and its
+    event" went to disk as separate transactions.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class Store:
     def __init__(self, db_path: Path):
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -181,6 +212,7 @@ class Store:
 
     # -- writes ------------------------------------------------------------
 
+    @_locked
     def upsert(self, job: PrintJob) -> None:
         self.conn.execute(
             """
@@ -227,6 +259,7 @@ class Store:
         )
         self.conn.commit()
 
+    @_locked
     def log(self, job_id: str, kind: str, detail: str | None = None) -> None:
         self.conn.execute(
             "INSERT INTO events (job_id, at, kind, detail) VALUES (?,?,?,?)",
@@ -236,10 +269,12 @@ class Store:
 
     # -- reads -------------------------------------------------------------
 
+    @_locked
     def get(self, job_id: str) -> PrintJob | None:
         row = self.conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         return self._row_to_job(row) if row else None
 
+    @_locked
     def by_status(self, status: JobStatus, limit: int = 200) -> list[PrintJob]:
         rows = self.conn.execute(
             "SELECT * FROM jobs WHERE status = ? ORDER BY created_at DESC LIMIT ?",
@@ -247,27 +282,46 @@ class Store:
         ).fetchall()
         return [self._row_to_job(r) for r in rows]
 
+    @_locked
     def pending(self, limit: int = 200) -> list[PrintJob]:
         """Everything waiting on a person.
 
-        Includes AWAITING and READY as well as HELD: if the agent restarts
-        while a dialog or notification is open, that job would otherwise be
-        invisible to everyone.
+        Includes failures for manual retry and review, as well as documents
+        waiting for a recipient or for WhatsApp to be opened.
         """
         rows = self.conn.execute(
             """
-            SELECT * FROM jobs WHERE status IN (?, ?, ?)
+            SELECT * FROM jobs WHERE status IN (?, ?, ?, ?)
             ORDER BY created_at DESC LIMIT ?
             """,
             (
                 str(JobStatus.AWAITING),
                 str(JobStatus.HELD),
                 str(JobStatus.READY),
+                str(JobStatus.FAILED),
                 limit,
             ),
         ).fetchall()
         return [self._row_to_job(r) for r in rows]
 
+    @_locked
+    def pending_count(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE status IN (?, ?, ?, ?)",
+            tuple(str(s) for s in (JobStatus.AWAITING, JobStatus.HELD, JobStatus.READY, JobStatus.FAILED)),
+        ).fetchone()[0]
+
+    @_locked
+    def unresolved_pdf_paths(self) -> set[Path]:
+        """All working files that must survive cleanup, without a UI limit."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT pdf_path FROM jobs WHERE status IN (?, ?, ?, ?, ?, ?)",
+            tuple(str(s) for s in (JobStatus.CAPTURED, JobStatus.QUEUED, JobStatus.AWAITING,
+                                   JobStatus.HELD, JobStatus.READY, JobStatus.FAILED)),
+        ).fetchall()
+        return {Path(row[0]) for row in rows}
+
+    @_locked
     def status_counts(self, since: datetime) -> dict[str, int]:
         """How many jobs landed in each status since `since`."""
         rows = self.conn.execute(
@@ -277,12 +331,14 @@ class Store:
         ).fetchall()
         return {row["status"]: int(row["n"]) for row in rows}
 
+    @_locked
     def recent(self, limit: int = 100) -> list[PrintJob]:
         rows = self.conn.execute(
             "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
         ).fetchall()
         return [self._row_to_job(r) for r in rows]
 
+    @_locked
     def events(self, job_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM events WHERE job_id = ? ORDER BY at", (job_id,)
@@ -290,42 +346,59 @@ class Store:
 
     # -- rules support -----------------------------------------------------
 
+    @_locked
     def find_duplicate(
         self,
         dedupe_key: str,
         window_hours: int,
         now: datetime | None = None,
+        *,
+        dry_run: bool = False,
+        send_mode: str = "api",
     ) -> PrintJob | None:
         """A prior *successful* send of the same invoice to the same recipient.
 
-        Only delivered sends count. A failed or held job must not suppress a
-        genuine retry.
+        Match only the current sending mode. Tests, real API sends and manual
+        WhatsApp handoffs are separate histories; none proves another happened.
         """
         now = now or datetime.now()
         cutoff = (now - timedelta(hours=window_hours)).isoformat()
+        status = (JobStatus.HANDED_OFF if send_mode == "link" else
+                  JobStatus.DRY_RUN if dry_run else JobStatus.SENT)
         row = self.conn.execute(
             """
             SELECT * FROM jobs
-            WHERE dedupe_key = ? AND status IN (?, ?, ?) AND sent_at IS NOT NULL
+            WHERE dedupe_key = ? AND status = ? AND sent_at IS NOT NULL
               AND sent_at >= ?
             ORDER BY sent_at DESC LIMIT 1
             """,
             (
                 dedupe_key,
-                str(JobStatus.SENT),
-                str(JobStatus.DRY_RUN),
-                str(JobStatus.HANDED_OFF),
+                str(status),
                 cutoff,
             ),
         ).fetchone()
         return self._row_to_job(row) if row else None
 
+    @_locked
     def count_sent_since(self, since: datetime) -> int:
         row = self.conn.execute(
             "SELECT COUNT(*) AS n FROM jobs WHERE status = ? AND sent_at >= ?",
             (str(JobStatus.SENT), since.isoformat()),
         ).fetchone()
         return int(row["n"])
+
+    @_locked
+    def interrupted(self) -> list[PrintJob]:
+        """Jobs that were mid-send when the previous process stopped.
+
+        QUEUED is written just before the sender is called and replaced the
+        moment it answers, so a QUEUED row at startup means the answer never
+        came: a crash, a power cut, or a send that raised. Nothing listed
+        those rows -- the queue shows only what waits on a person -- so the
+        receipt was simply gone from every screen.
+        """
+        return self.by_status(JobStatus.QUEUED)
 
     # -- mapping -----------------------------------------------------------
 

@@ -9,7 +9,7 @@ Two ways it runs:
 
 * **Daily, in the background.** Catches the routine version bump without anyone
   thinking about it.
-* **On demand, from the Status tab.** A fix released at eleven in the morning
+* **On demand, from the Status page.** A fix released at eleven in the morning
   should not wait until the next day because a timer says so. The operator (or
   you, over AnyDesk) presses the button and it lands immediately.
 
@@ -17,8 +17,14 @@ Rules that matter more than the mechanism:
 
 * A failed or unreachable check is **never** an error the operator has to care
   about. Printing and sending must carry on regardless.
-* The download is checksum-verified before it is executed. The manifest names
-  the SHA-256; a file that does not match is discarded.
+* The download is checksum-verified before it is executed. The manifest must
+  name the SHA-256; a manifest that does not, or a file that does not match,
+  is refused. A missing hash used to mean "skip the check", which made the
+  one guard rail optional for whoever wrote the manifest.
+* Both the manifest and the installer travel over HTTPS only. A plain http
+  address -- typed into the settings page, or written into settings.json by
+  anything that can reach that folder -- would let whoever sits on the branch
+  network hand every counter an executable of their choosing.
 * Never install while a document is being processed.
 """
 
@@ -38,6 +44,13 @@ import httpx
 from . import __version__
 
 log = logging.getLogger(__name__)
+
+
+def _https_only(url: str, what: str) -> str:
+    """The url, or a ValueError naming what was wrong with it."""
+    if not str(url).lower().startswith("https://"):
+        raise ValueError(f"the {what} address must start with https:// ({url})")
+    return str(url)
 
 CHECK_INTERVAL = timedelta(hours=24)
 TIMEOUT = 20.0
@@ -112,6 +125,16 @@ def check(
     build = build or build_id()
     if not url:
         return CheckResult(message="No update location is configured.", failed=True)
+    try:
+        _https_only(url, "update")
+    except ValueError as exc:
+        log.warning("update check refused: %s", exc)
+        return CheckResult(
+            current=current,
+            message="The update location is not an https:// address, so it was "
+            "not used. Nothing else is affected.",
+            failed=True,
+        )
 
     owned = client is None
     client = client or httpx.Client(timeout=TIMEOUT, follow_redirects=True)
@@ -136,12 +159,15 @@ def check(
             entry = payload
         release = Release(
             version=str(payload["version"]),
-            url=str(entry["url"]),
-            sha256=str(entry.get("sha256", "")),
+            url=_https_only(entry["url"], "installer"),
+            sha256=str(entry.get("sha256") or "").strip().lower(),
             notes=str(payload.get("notes", "")),
         )
+        if not release.sha256:
+            raise ValueError("the manifest names no sha256 for the installer")
     except Exception as exc:
-        # Offline, DNS down, host moved — all the same to the operator.
+        # Offline, DNS down, host moved, or a manifest that is not ours to
+        # trust — all the same to the operator.
         log.info("update check failed: %s", exc)
         return CheckResult(
             current=current,
@@ -164,8 +190,13 @@ def check(
 
 def download(release: Release, client: httpx.Client | None = None) -> Path:
     """Fetch the installer and verify it. Returns the file, or raises."""
+    _https_only(release.url, "installer")
+    if not release.sha256:
+        raise RuntimeError("the manifest names no checksum, so the installer cannot be verified")
     owned = client is None
-    client = client or httpx.Client(timeout=None, follow_redirects=True)
+    # A read timeout rather than none: a stalled download used to hold the
+    # updates thread, or the Check for updates button, indefinitely.
+    client = client or httpx.Client(timeout=httpx.Timeout(TIMEOUT, read=60.0), follow_redirects=True)
     target = Path(tempfile.gettempdir()) / f"WhatsAppPrinter-Setup-{release.version}.exe"
     digest = hashlib.sha256()
     written = 0
@@ -183,7 +214,7 @@ def download(release: Release, client: httpx.Client | None = None) -> Path:
         if owned:
             client.close()
 
-    if release.sha256 and digest.hexdigest().lower() != release.sha256.lower():
+    if digest.hexdigest().lower() != release.sha256.lower():
         # Corrupted, truncated or substituted. Never run it.
         target.unlink(missing_ok=True)
         raise RuntimeError("the downloaded installer did not match its checksum")
@@ -192,10 +223,10 @@ def download(release: Release, client: httpx.Client | None = None) -> Path:
 
 
 def install(installer: Path) -> None:
-    """Run the installer silently and exit so it can replace our files."""
+    """Wait for installation; the caller excludes document work throughout."""
     if sys.platform != "win32":
         raise RuntimeError("Updates can only be installed on Windows.")
-    subprocess.Popen(
+    process = subprocess.Popen(
         [
             str(installer),
             "/VERYSILENT",
@@ -205,6 +236,9 @@ def install(installer: Path) -> None:
         ],
         close_fds=True,
     )
+    code = process.wait()
+    if code != 0:
+        raise RuntimeError(f"Installer exited with code {code}; the update did not complete.")
 
 
 def due(last_check: str | None, now: datetime | None = None) -> bool:

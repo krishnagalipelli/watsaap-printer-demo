@@ -141,3 +141,50 @@ class TestTheSecretItself:
         for path in source_root.rglob("*.py"):
             found = pattern.search(path.read_text(encoding="utf-8"))
             assert not found, f"a Meta access token is committed in {path}"
+
+
+class TestValuesAreCheckedNotJustCopied:
+    """JSON does not know that "false" is not False.
+
+    A string is truthy, so `"dry_run": "false"` left test mode on while the
+    file said otherwise. `"own_numbers": "9876543210"` iterated as characters
+    and excluded nothing, which made the seller's own number a valid
+    recipient. Each is refused, named, and the rest of the file still applies.
+    """
+
+    def test_a_string_where_a_flag_belongs_is_refused(self, written):
+        settings = Settings()
+        result = apply(written({"dry_run": "false", "branch_name": "Karimnagar"}), settings)
+
+        assert settings.dry_run is True
+        assert "dry_run" not in result.applied
+        assert "branch_name" in result.applied
+        assert any("dry_run" in w and "true or false" in w for w in result.warnings)
+
+    def test_a_string_where_a_list_belongs_is_refused(self, written):
+        settings = Settings()
+        apply(written({"own_numbers": "9876543210"}), settings)
+        assert settings.own_numbers == []
+
+    def test_a_string_where_a_number_belongs_is_refused(self, written):
+        settings = Settings()
+        apply(written({"max_sends_per_minute": "10"}), settings)
+        assert settings.max_sends_per_minute == Settings().max_sends_per_minute
+
+    def test_the_right_shapes_still_apply(self, written):
+        settings = Settings()
+        result = apply(
+            written(
+                {
+                    "dry_run": False,
+                    "own_numbers": ["9876543210"],
+                    "max_sends_per_minute": 3,
+                    "document_templates": {"removal_notice": "removal_notice"},
+                }
+            ),
+            settings,
+        )
+        assert result.warnings == []
+        assert settings.dry_run is False
+        assert settings.own_numbers == ["9876543210"]
+        assert settings.max_sends_per_minute == 3

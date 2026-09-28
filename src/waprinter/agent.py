@@ -22,7 +22,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from . import update
+from . import housekeeping, update
 from .capture.spooler import latest_job
 from .capture.watcher import SpoolWatcher
 from .config import Settings, paths
@@ -44,6 +44,9 @@ class Agent:
         self.pipeline = pipeline or build_default(self.settings)
         self.paths = paths()
         self.paths.ensure()
+        # Whatever was mid-send when the last copy stopped goes back on the
+        # queue for a person, before the watcher can add to it.
+        self.pipeline.recover_interrupted()
 
         # Set while a document is being processed, so an update never lands
         # halfway through a send.
@@ -55,6 +58,7 @@ class Agent:
             spool=self.paths.spool,
             inbox=self.paths.inbox,
             on_job=self._handle,
+            operation_lock=self.pipeline.operation_lock,
         )
 
     # -- capture -----------------------------------------------------------
@@ -83,6 +87,14 @@ class Agent:
     # -- updates -----------------------------------------------------------
 
     def check_updates(self, install: bool = True) -> str:
+        if not self.pipeline.update_lock.acquire(blocking=False):
+            return "An update check or installation is already in progress."
+        try:
+            return self._check_updates(install)
+        finally:
+            self.pipeline.update_lock.release()
+
+    def _check_updates(self, install: bool = True) -> str:
         """Look for a newer build. Returns a line for the window to show.
 
         Called both by the daily timer and by the Check for updates button. The
@@ -101,10 +113,10 @@ class Agent:
         if result.failed or not result.available or not install:
             return result.message
 
-        if self._busy.is_set():
+        if self._busy.is_set() or self.pipeline.busy:
             return (
                 f"Version {result.release.version} is ready, but a document is "
-                f"being sent. It will install shortly."
+                f"being sent. Check for updates again when it finishes."
             )
 
         try:
@@ -113,16 +125,34 @@ class Agent:
             log.exception("update download failed")
             return f"Could not download the update: {exc}"
 
+        # A document may have started during download. The same lock covers
+        # the entire installation, not just this check or the process launch.
+        if not self.pipeline.operation_lock.acquire(blocking=False):
+            return (f"Version {result.release.version} is downloaded, but a document is "
+                    "being sent. Check for updates again when it finishes.")
         try:
-            update.install(installer)
-        except Exception as exc:
-            log.exception("update install failed")
-            return f"Could not start the installer: {exc}"
+            try:
+                update.install(installer)
+            except Exception as exc:
+                log.exception("update install failed")
+                return f"Could not complete the installation: {exc}"
+        finally:
+            self.pipeline.operation_lock.release()
 
-        return f"Installing version {result.release.version}. The app will restart."
+        # Returned only after the installer exits successfully.
+        return (
+            f"Installation of version {result.release.version} finished. "
+            f"Restart the app if it has not restarted automatically."
+        )
 
     def _update_loop(self) -> None:
+        """The once-a-day chores: tidy the data folder, then look for a build."""
         while True:
+            try:
+                with self.pipeline.operation_lock:
+                    housekeeping.run(self.paths, self.settings, self.pipeline.store)
+            except Exception:
+                log.exception("housekeeping failed")
             try:
                 if (
                     self.settings.update_check_enabled
@@ -201,7 +231,7 @@ def _show_crash(exc: BaseException, report: Path | None) -> None:
         print(text, file=sys.stderr)
 
 
-def selftest() -> int:
+def selftest(check_ocr: bool = False) -> int:
     """Build everything and exit, without opening a window.
 
     The build runs this against the frozen executable. It catches the failure
@@ -214,6 +244,17 @@ def selftest() -> int:
     pipeline = build_default(settings)
     p = paths()
     p.ensure()
+    # The setup screens are imported lazily, the first time Setup is
+    # pressed. A module the freezer missed would only show there, on a
+    # counter, so import them here where the build can see it fail.
+    try:
+        from .ui import setup as _setup, teach as _teach  # noqa: F401
+        from . import teaching as _teaching  # noqa: F401
+
+        setup_screens = True
+    except Exception:
+        traceback.print_exc()
+        setup_screens = False
     checks = {
         "settings": settings is not None,
         "pipeline": pipeline is not None,
@@ -221,7 +262,11 @@ def selftest() -> int:
         "spool dir": p.spool.is_dir(),
         "gui toolkit": tkinter.TkVersion > 0,
         "updater": update.parse_version("1.2.10") > update.parse_version("1.2.9"),
+        "setup screens": setup_screens,
     }
+    if check_ocr:
+        from .extract.ocr import smoke_test
+        checks["OCR engine and language data"] = smoke_test()
     for name, ok in checks.items():
         print(f"  {'ok  ' if ok else 'FAIL'}  {name}")
     failed = [name for name, ok in checks.items() if not ok]
@@ -237,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         configure_logging(paths().logs)
         if "--selftest" in argv:
-            return selftest()
+            return selftest(check_ocr="--check-ocr" in argv)
         # Before anything reads settings: a fresh install is configured from
         # the provisioning file the installer carried, and then that file is
         # deleted. Nothing is typed at the counter.

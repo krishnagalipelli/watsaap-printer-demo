@@ -17,21 +17,44 @@ log = logging.getLogger(__name__)
 
 
 def configure_logging(log_dir: Path, level: int = logging.INFO) -> None:
+    """Log to a rotating file, and to the console where there is one.
+
+    Safe to call twice: `waprinter -v run` used to set up logging once for
+    -v and again for run, and every line went to the file and the console
+    twice over. Handlers this function added are replaced, not duplicated.
+    """
     log_dir.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger()
+    for existing in list(root.handlers):
+        if getattr(existing, "_waprinter", False):
+            root.removeHandler(existing)
+            existing.close()
+
     handler = logging.handlers.RotatingFileHandler(
         log_dir / "waprinter.log", maxBytes=2_000_000, backupCount=5, encoding="utf-8"
     )
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     )
-    root = logging.getLogger()
+    handler._waprinter = True  # type: ignore[attr-defined]
     root.setLevel(level)
     root.addHandler(handler)
+
+    # httpx writes every request URL at INFO. Meta's token inspection
+    # (debug_token) takes the token as a query parameter, so at the root's
+    # INFO level connecting an account wrote the access token into
+    # waprinter.log in plain text -- a file every user on the counter can
+    # read. Requests are not worth a line each anyway; failures are logged by
+    # the code that makes them. `waprinter doctor` still turns tracing on for
+    # its own calls, which carry the token only in a header.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     # Frozen with --windowed there is no console, and sys.stderr is None. A
     # StreamHandler on it fails on every single log record.
     if sys.stderr is not None:
-        root.addHandler(logging.StreamHandler())
+        console = logging.StreamHandler()
+        console._waprinter = True  # type: ignore[attr-defined]
+        root.addHandler(console)
 
 
 class Runner:
@@ -42,10 +65,12 @@ class Runner:
         self.pipeline = pipeline or build_default(self.settings)
         self.paths = paths()
         self.paths.ensure()
+        self.pipeline.recover_interrupted()
         self.watcher = SpoolWatcher(
             spool=self.paths.spool,
             inbox=self.paths.inbox,
             on_job=self._handle,
+            operation_lock=self.pipeline.operation_lock,
         )
         self._thread: threading.Thread | None = None
 

@@ -49,7 +49,8 @@ class TestCheck:
     def test_it_reports_an_available_update(self):
         respx.get(MANIFEST).mock(
             return_value=httpx.Response(
-                200, json={"version": "9.9.9", "url": "https://example.test/s.exe"}
+                200,
+                json={"version": "9.9.9", "url": "https://example.test/s.exe", "sha256": "aa"},
             )
         )
         result = update.check(MANIFEST, current="1.0.0", build="x64")
@@ -61,12 +62,43 @@ class TestCheck:
     def test_it_reports_being_up_to_date(self):
         respx.get(MANIFEST).mock(
             return_value=httpx.Response(
-                200, json={"version": "1.0.0", "url": "https://example.test/s.exe"}
+                200,
+                json={"version": "1.0.0", "url": "https://example.test/s.exe", "sha256": "aa"},
             )
         )
         result = update.check(MANIFEST, current="1.0.0", build="x64")
         assert not result.available
         assert "Up to date" in result.message
+
+    @respx.mock
+    def test_a_manifest_without_a_checksum_is_refused(self):
+        # A missing hash used to mean "skip the check", which made the one
+        # guard rail on running a downloaded executable optional.
+        respx.get(MANIFEST).mock(
+            return_value=httpx.Response(
+                200, json={"version": "9.9.9", "url": "https://example.test/s.exe"}
+            )
+        )
+        result = update.check(MANIFEST, current="1.0.0", build="x64")
+        assert not result.available
+        assert result.failed
+
+    @respx.mock
+    def test_a_plain_http_installer_address_is_refused(self):
+        respx.get(MANIFEST).mock(
+            return_value=httpx.Response(
+                200,
+                json={"version": "9.9.9", "url": "http://example.test/s.exe", "sha256": "aa"},
+            )
+        )
+        assert not update.check(MANIFEST, current="1.0.0", build="x64").available
+
+    def test_a_plain_http_manifest_address_is_refused(self):
+        # Whoever can edit settings.json, or sit on the branch network, must
+        # not be able to hand every counter an executable.
+        result = update.check("http://example.test/latest.json", current="1.0.0")
+        assert result.failed
+        assert "https" in result.message
 
     @respx.mock
     def test_an_unreachable_server_is_not_an_error_the_operator_owns(self):
@@ -193,6 +225,20 @@ class TestDownload:
         with pytest.raises(RuntimeError, match="checksum"):
             update.download(release)
         assert list(tmp_path.glob("*.exe")) == []
+
+    def test_a_release_without_a_checksum_is_never_fetched(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+        release = update.Release(version="2.0.0", url="https://example.test/s.exe")
+        with pytest.raises(RuntimeError, match="checksum"):
+            update.download(release)
+
+    def test_a_plain_http_release_is_never_fetched(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+        release = update.Release(
+            version="2.0.0", url="http://example.test/s.exe", sha256="00" * 32
+        )
+        with pytest.raises(ValueError, match="https"):
+            update.download(release)
 
 
 class TestDailySchedule:

@@ -1,9 +1,11 @@
 """Access-token storage.
 
-On Windows the token is sealed with DPAPI under the machine scope, so it is
-readable by the service account but not by copying the file to another PC. On a
-dev machine there is no DPAPI, so it falls back to a plain file with an obvious
-name — never use that fallback for a real token.
+On Windows the token is sealed with DPAPI under the machine scope. That ties it
+to this PC -- copying the file elsewhere yields nothing -- but it does not tie
+it to a user: any process on the same machine can unseal it. The agent runs in
+whichever session is signed in, which is why the scope is the machine's and
+not one account's. On a dev machine there is no DPAPI, so it falls back to a
+plain file with an obvious name — never use that fallback for a real token.
 """
 
 from __future__ import annotations

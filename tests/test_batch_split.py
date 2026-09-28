@@ -21,6 +21,7 @@ from pathlib import Path
 import fitz
 import pytest
 from invoice_factory import ChitReceiptSpec, build_chit_receipt
+from waprinter.models import JobStatus
 
 
 @pytest.fixture
@@ -163,3 +164,37 @@ class TestSplittingNeverLosesAPrint:
 
         assert len(jobs) == 1
         assert jobs[0].error is not None
+
+    def test_a_segment_that_cannot_be_written_does_not_drop_a_receipt(
+        self, link_pipeline, receipt, merge, monkeypatch
+    ):
+        """All or nothing.
+
+        A segment that failed to write used to be skipped with a log line,
+        and the subscriber on those pages never got a job. If any part cannot
+        be written the whole document is processed as one job instead --
+        held, because it carries two numbers, but not lost.
+        """
+        from waprinter import pipeline as pipeline_module
+
+        real = pipeline_module.write_segment
+        calls = {"n": 0}
+
+        def flaky(source, pages, destination):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("disk full")
+            return real(source, pages, destination)
+
+        monkeypatch.setattr(pipeline_module, "write_segment", flaky)
+        a = receipt("CHQ6511/26", "SHAHNAVAZDANISH MOHAMMAD", "7032893588")
+        b = receipt("CHQ6512/26", "ANITHA RAMESH", "9000012345")
+        batch = merge(a, b)
+
+        jobs = link_pipeline.process_document(batch)
+
+        assert len(jobs) == 1
+        assert jobs[0].pdf_path == batch
+        assert jobs[0].status is JobStatus.HELD
+        # The part that was written before the failure is cleaned up.
+        assert not list(batch.parent.glob("batch_*-r*.pdf"))

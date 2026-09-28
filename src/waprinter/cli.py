@@ -8,6 +8,8 @@
     waprinter set-token           store the WhatsApp access token
     waprinter provision FILE      configure this install from one file
     waprinter go-live             turn dry-run off, with the checks that implies
+    waprinter connect             store a token and choose the number it reaches
+    waprinter export-setup FILE   write this counter's setup for the others
 """
 
 from __future__ import annotations
@@ -21,7 +23,8 @@ from pathlib import Path
 from .config import Settings, paths
 from .extract import extract_fields
 from .models import Confidence, JobStatus
-from .rules.gate import _excluded_numbers
+from .rules.gate import excluded_numbers
+from .send.sync import _template_from_meta
 from .store import Store
 
 # The precision bar from the project plan: silent sending stays off until
@@ -75,7 +78,7 @@ def cmd_corpus(args: argparse.Namespace) -> int:
     whether silent sending can be switched on.
     """
     settings = Settings.load()
-    excluded = _excluded_numbers(settings)
+    excluded = excluded_numbers(settings)
     directory = Path(args.directory)
     pdfs = sorted(directory.glob("*.pdf"))
     if not pdfs:
@@ -91,12 +94,20 @@ def cmd_corpus(args: argparse.Namespace) -> int:
     scored = 0
     ocr_count = 0
 
+    # The client's own profile.json, exactly as the pipeline reads it. Scoring
+    # with the built-in defaults measured a different extractor from the one
+    # that would actually send, and the precision bar meant nothing.
+    from .extract.profile import DocumentProfile
+
+    profile = DocumentProfile.load(paths().profile)
+
     for pdf in pdfs:
         fields = extract_fields(
             pdf,
             excluded_numbers=excluded,
             country_code=settings.default_country_code,
             ocr=settings.ocr(),
+            profile=profile,
         )
         if fields.used_ocr:
             ocr_count += 1
@@ -215,33 +226,6 @@ def cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
-def _template_from_meta(item: dict) -> "MessageTemplate":
-    """Turn one entry of Meta's message_templates response into ours."""
-    from .send.templates import MessageTemplate
-
-    body, footer, header_document = "", None, False
-    for component in item.get("components") or []:
-        kind = (component.get("type") or "").upper()
-        if kind == "BODY":
-            body = component.get("text") or ""
-        elif kind == "FOOTER":
-            footer = component.get("text")
-        elif kind == "HEADER":
-            header_document = (component.get("format") or "").upper() == "DOCUMENT"
-
-    return MessageTemplate(
-        name=item["name"],
-        language=item.get("language", "en"),
-        body=body,
-        header_document=header_document,
-        footer=footer,
-        # Meta reports APPROVED / PENDING / REJECTED / PAUSED.
-        status=(item.get("status") or "pending").lower(),
-        category=(item.get("category") or "UTILITY").upper(),
-        parameter_format=(item.get("parameter_format") or "positional").lower(),
-    )
-
-
 def cmd_templates(args: argparse.Namespace) -> int:
     """Show the stored templates, or replace them with what Meta actually has.
 
@@ -256,46 +240,14 @@ def cmd_templates(args: argparse.Namespace) -> int:
     store = TemplateStore(paths().templates, settings.business_name)
 
     if args.sync:
-        import httpx
+        from .send.sync import sync_templates
 
-        from .secrets import load_token
-
-        token = load_token()
-        if not token:
-            print("No access token stored. Run: waprinter set-token")
-            return 1
-        waba = settings.business_account_id
-        if not waba:
-            print("business_account_id is not set in settings.json.")
-            print("Find it in Meta Business Manager -> WhatsApp Manager ->")
-            print("Account tools -> Overview (the WhatsApp Business Account ID).")
-            return 1
-
-        url = (
-            f"https://graph.facebook.com/{settings.graph_api_version}"
-            f"/{waba}/message_templates"
-        )
         try:
-            with httpx.Client(timeout=30) as client:
-                response = client.get(
-                    url,
-                    headers={"Authorization": f"Bearer {token}"},
-                    params={"limit": 100},
-                )
-            payload = response.json()
+            count = sync_templates(settings, store)
         except Exception as exc:
-            print(f"Could not reach Meta: {exc}")
+            print(f"Could not refresh templates: {exc}")
             return 1
-
-        if "data" not in payload:
-            error = payload.get("error", {})
-            print(f"Meta refused the request: [{error.get('code')}] "
-                  f"{error.get('message')}")
-            return 1
-
-        for item in payload["data"]:
-            store.put(_template_from_meta(item))
-        print(f"Synced {len(payload['data'])} template(s) from Meta.\n")
+        print(f"Synced {count} template(s) from Meta.\n")
 
     templates = store.all()
     if not templates:
@@ -308,7 +260,9 @@ def cmd_templates(args: argparse.Namespace) -> int:
     used_for = {v: k for k, v in settings.document_templates.items()}
     used_for.setdefault(settings.default_template, "everything else")
     for template in sorted(templates, key=lambda t: t.name):
-        marker = "*" if template.name in used_for else " "
+        ref = store.ref_for(template)
+        use = used_for.get(ref) or used_for.get(template.name)
+        marker = "*" if use else " "
         state = "usable" if template.usable else f"NOT usable"
         note = ""
         if not template.usable:
@@ -317,10 +271,10 @@ def cmd_templates(args: argparse.Namespace) -> int:
             elif not template.header_document:
                 # Without a document header there is nowhere to attach the PDF.
                 note = " -- no document header, so a PDF cannot be attached"
-        purpose = f"  <- {used_for[template.name]}" if marker == "*" else ""
+        purpose = f"  <- {use}" if use else ""
         print(
-            f" {marker} {template.name:24s} {template.status:10s}"
-            f"{state}{note}{purpose}"
+            f" {marker} {ref:24s} {template.language:6s}"
+            f"{template.status:10s}{state}{note}{purpose}"
         )
     print("\n * = a message this install sends, and the document it is sent for.")
     return 0
@@ -526,32 +480,112 @@ def cmd_set_token(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_go_live(_args: argparse.Namespace) -> int:
-    """Turn off dry-run, refusing if the prerequisites are not in place."""
-    from .secrets import load_token
+def _read_token(from_file: str | None) -> str:
+    import getpass
+
+    if from_file:
+        token = Path(from_file).read_text(encoding="utf-8").strip()
+        print(f"Read {len(token)} characters from {from_file}")
+        return token
+    print("Paste with a RIGHT-CLICK, not Ctrl+V -- Ctrl+V does not paste "
+          "in a Command Prompt. Nothing will appear as you paste.")
+    return getpass.getpass("WhatsApp access token: ").strip()
+
+
+def cmd_connect(args: argparse.Namespace) -> int:
+    """Store a token and the account and number it reaches, in one step.
+
+    The same discovery the Connect WhatsApp screen does, for an engineer on
+    AnyDesk: the token alone is enough, and the IDs are read from Meta rather
+    than typed. With one number there is nothing to choose; with several,
+    --phone picks one.
+    """
+    from .secrets import load_token, save_token, token_problem
+    from .send.meta_account import MetaError, inspect
+    from .send.sync import sync_templates
     from .send.templates import TemplateStore
 
     settings = Settings.load()
-    problems = []
+    token = load_token() if args.stored else _read_token(args.from_file)
+    problem = token_problem(token)
+    if problem:
+        print(f"Not connected: {problem}")
+        return 1
+    try:
+        connection = inspect(token, settings.graph_api_version, args.account or "")
+    except MetaError as exc:
+        print(f"Not connected: {exc}")
+        return 1
 
-    if not settings.phone_number_id:
-        problems.append("phone_number_id is not set in settings.json")
-    if not load_token():
-        problems.append("no access token stored (run: waprinter set-token)")
-    if not settings.own_numbers:
-        problems.append(
-            "own_numbers is empty — your own numbers must be blocklisted so an "
-            "invoice footer is never treated as a customer"
-        )
+    print(connection.expiry_text())
+    for note in connection.problems:
+        print(f"  ! {note}")
+    numbers = [(a, n) for a in connection.accounts for n in a.phone_numbers]
+    if not numbers:
+        print("No phone numbers were found. Pass --account with the WhatsApp "
+              "Business Account ID.")
+        return 1
+    for index, (account, number) in enumerate(numbers, start=1):
+        print(f"  {index}. {number.label}   (account {account.label}, id {number.id})")
 
-    templates = TemplateStore(paths().root / "templates.json", settings.business_name)
-    template = templates.get(settings.default_template)
-    if template is None:
-        problems.append(f"template '{settings.default_template}' is not configured")
-    elif not template.usable:
-        problems.append(
-            f"template '{template.name}' is {template.status}, not approved"
-        )
+    chosen = numbers[0] if len(numbers) == 1 else None
+    if args.phone:
+        chosen = next(((a, n) for a, n in numbers if args.phone in (n.id, n.display_phone_number)), None)
+        if chosen is None:
+            print(f"No number matches {args.phone}.")
+            return 1
+    if chosen is None:
+        print("Several numbers are available. Run again with --phone <id>.")
+        return 1
+
+    account, number = chosen
+    if not args.stored:
+        save_token(token)
+    settings.business_account_id = account.id
+    settings.phone_number_id = number.id
+    settings.save()
+    print(f"Connected: {number.label}")
+
+    store = TemplateStore(paths().templates, settings.business_name,
+                          settings.template_language)
+    try:
+        count = sync_templates(settings, store, token)
+        print(f"Loaded {count} template(s) from WhatsApp.")
+    except ValueError as exc:
+        print(f"Connected, but templates could not be loaded: {exc}")
+        return 1
+    return 0
+
+
+def cmd_export_setup(args: argparse.Namespace) -> int:
+    """Write this counter's setup to a file for the others. No token."""
+    from .extract.profile import DocumentProfile
+    from .send.templates import TemplateStore
+    from .setup_profile import export_setup
+
+    settings = Settings.load()
+    templates = TemplateStore(paths().templates, settings.business_name,
+                              settings.template_language)
+    profile = DocumentProfile.load(paths().profile)
+    target = Path(args.file)
+    export_setup(target, settings, templates, profile)
+    print(f"Setup written to {target}. It starts other counters in test mode, "
+          f"and holds no access token.")
+    return 0
+
+
+def cmd_go_live(_args: argparse.Namespace) -> int:
+    """Turn off dry-run, refusing if the prerequisites are not in place.
+
+    The checks are readiness.problems(), the same ones the window shows. This
+    command used to carry its own copy, which tested only whether *a* token
+    was stored -- so a token of one control character passed go-live and
+    then failed every send, the exact case token_problem() was written for.
+    """
+    from .send.readiness import problems as readiness_problems
+
+    settings = Settings.load()
+    problems = readiness_problems(settings)
 
     if problems:
         print("Cannot go live yet:")
@@ -573,7 +607,7 @@ def cmd_go_live(_args: argparse.Namespace) -> int:
         print("        API. WhatsApp opens with the text ready and someone")
         print("        presses send. For automatic sending set send_mode to")
         print(f"        'api' in {paths().settings}, or choose")
-        print("        'Send automatically' in Settings, then restart the app.")
+        print("        'Send automatically' in Setup → Counter settings.")
     return 0
 
 
@@ -614,6 +648,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.set_defaults(func=cmd_set_token)
     sub.add_parser("go-live", help="turn dry-run off").set_defaults(func=cmd_go_live)
+
+    p = sub.add_parser(
+        "connect", help="store a token and pick the WhatsApp number it reaches"
+    )
+    p.add_argument("--from-file", help="read the token from a text file")
+    p.add_argument("--stored", action="store_true",
+                   help="use the token already stored on this computer")
+    p.add_argument("--account", help="WhatsApp Business Account ID, if the token does not say")
+    p.add_argument("--phone", help="phone number ID or number to send from, if there are several")
+    p.set_defaults(func=cmd_connect)
+
+    p = sub.add_parser("export-setup", help="write this counter's setup for the others")
+    p.add_argument("file")
+    p.set_defaults(func=cmd_export_setup)
 
     p = sub.add_parser("provision", help="configure this install from a file")
     p.add_argument("file", nargs="?", help=f"path to the provisioning file")

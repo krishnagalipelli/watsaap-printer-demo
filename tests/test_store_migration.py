@@ -235,3 +235,74 @@ class TestSettingsThatReachAMachineAlreadyRunning:
         path.write_text(json.dumps({"document_templates": {}}), encoding="utf-8")
 
         assert Settings.load(path).document_templates == {}
+
+
+class TestWhatSurvivesTheDatabase:
+    def _job(self, **fields) -> PrintJob:
+        from waprinter.models import ExtractedFields
+
+        return PrintJob(
+            id="j1",
+            created_at=datetime(2026, 9, 7, 11, 36),
+            pdf_path=Path("/tmp/x.pdf"),
+            fields=ExtractedFields(**fields),
+        )
+
+    def test_the_verified_flag_comes_back_as_it_went_in(self, tmp_path):
+        """Written since the field existed, never read back.
+
+        So a held scan reopened from the queue looked verified whatever the
+        two OCR passes had said about what kind of document it was.
+        """
+        store = Store(tmp_path / "jobs.db")
+        store.upsert(self._job(document_kind="removal_notice", document_kind_verified=False))
+        assert store.get("j1").fields.document_kind_verified is False
+
+    def test_an_older_row_without_the_flag_reads_as_verified(self, tmp_path):
+        store = Store(tmp_path / "jobs.db")
+        store.upsert(self._job())
+        store.conn.execute("UPDATE jobs SET fields_json = '{}' WHERE id = 'j1'")
+        store.conn.commit()
+        assert store.get("j1").fields.document_kind_verified is True
+
+
+class TestInterruptedSends:
+    """QUEUED is written just before the sender is called.
+
+    A QUEUED row at startup means the answer never came -- a crash, a power
+    cut -- and nothing listed those rows, so the receipt was gone from every
+    screen. They go back on the queue for a person.
+    """
+
+    def test_a_queued_job_is_held_for_review_at_startup(self, pipeline):
+        job = PrintJob(
+            id="stuck",
+            created_at=datetime.now(),
+            pdf_path=Path("/tmp/x.pdf"),
+            status=JobStatus.QUEUED,
+            recipient="+919876543210",
+        )
+        pipeline.store.upsert(job)
+        assert pipeline.store.pending() == []
+
+        recovered = pipeline.recover_interrupted()
+
+        assert [j.id for j in recovered] == ["stuck"]
+        held = pipeline.store.get("stuck")
+        assert held.status is JobStatus.HELD
+        assert "Check WhatsApp" in held.hold_reason
+        assert [j.id for j in pipeline.store.pending()] == ["stuck"]
+
+    def test_nothing_else_is_touched(self, pipeline):
+        for status in (JobStatus.SENT, JobStatus.HELD, JobStatus.FAILED):
+            pipeline.store.upsert(
+                PrintJob(
+                    id=str(status),
+                    created_at=datetime.now(),
+                    pdf_path=Path("/tmp/x.pdf"),
+                    status=status,
+                )
+            )
+        assert pipeline.recover_interrupted() == []
+        for status in (JobStatus.SENT, JobStatus.HELD, JobStatus.FAILED):
+            assert pipeline.store.get(str(status)).status is status

@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import threading
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -85,6 +86,7 @@ class SpoolWatcher:
         on_job: Callable[[Path], None],
         poll_interval: float = POLL_INTERVAL,
         settle_seconds: float = SETTLE_SECONDS,
+        operation_lock=None,
     ):
         self.spool = spool
         self.inbox = inbox
@@ -93,6 +95,7 @@ class SpoolWatcher:
         self.settle_seconds = settle_seconds
         self._sizes: dict[Path, tuple[int, float]] = {}
         self._running = False
+        self.operation_lock = operation_lock or threading.RLock()
 
     def stop(self) -> None:
         self._running = False
@@ -114,6 +117,12 @@ class SpoolWatcher:
             time.sleep(self.poll_interval)
 
     def drain_once(self) -> list[Path]:
+        # The updater shares this lock. Acquire before claiming a spool file,
+        # so an installation cannot strand a claimed, not-yet-recorded PDF.
+        with self.operation_lock:
+            return self._drain_once()
+
+    def _drain_once(self) -> list[Path]:
         """One pass over the spool folder. Returns the jobs handed off."""
         captured: list[Path] = []
         now = time.monotonic()
