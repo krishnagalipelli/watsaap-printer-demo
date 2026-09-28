@@ -8,11 +8,12 @@ description = "Virtual Windows printer that sends printed invoices to customers 
 requires-python = ">=3.8"
 
 # Deliberately small. The interface is Tk, which ships with Python, so there is
-# no web server, no template engine and no browser runtime to install.
+# no web server, no template engine and no browser runtime to install. The
+# spool folder is polled, not watched, so there is no filesystem-events
+# library either.
 dependencies = [
     "pymupdf>=1.24",
     "httpx>=0.27",
-    "watchdog>=4.0",
 ]
 
 [project.optional-dependencies]

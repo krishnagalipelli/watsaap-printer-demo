@@ -8,7 +8,12 @@
     "you control, and never commit it -- this repository is public.",
     "",
     "Every key is optional; anything left out keeps its existing value.",
-    "To reconfigure a machine that is already running: waprinter provision FILE"
+    "To reconfigure a machine that is already running: waprinter provision FILE",
+    "",
+    "Easier than writing this by hand: set one counter up in Setup, then use",
+    "Share setup -> Export setup. That file carries the templates, the message",
+    "mappings and any taught document types and fields, but never the token.",
+    "Add access_token to it here if the counter should connect unattended."
   ],
 
   "access_token": "EAAG...",
@@ -17,6 +22,22 @@
   "send_mode": "api",
   "dry_run": false,
   "default_template": "chit_receipt",
+  "business_account_id": "123456789012345",
+  "document_templates": {
+    "removal_notice": "removal_notice",
+    "removal_letter": "removal_letter"
+  },
+  "document_nouns": {
+    "removal_notice": "Removal Notice",
+    "removal_letter": "Removal Letter"
+  },
+  "template_mappings": {
+    "member_statement": {
+      "name": "customer_name",
+      "id": "customer_id",
+      "branch": "text:Karimnagar"
+    }
+  },
   "business_name": "Srinidhi Chit Funds",
   "document_noun": "Receipt",
   "own_numbers": ["8782251999"],

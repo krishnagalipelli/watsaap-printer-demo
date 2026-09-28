@@ -58,33 +58,15 @@ function Copy-Tesseract {
         Write-Warning 'Building without OCR; scanned invoices will be held.'
         return
     }
-    # A 64-bit tesseract.exe cannot be launched by a 32-bit install on a 32-bit
-    # Windows, and it is the default install that gets staged here. Bundling it
-    # anyway produces a build whose OCR fails only at the counter, which is the
-    # one place nobody can debug it.
-    if ($Target -eq 'win7-x86' -and -not $PSBoundParameters.ContainsKey('TesseractDir')) {
-        throw "The $Target build needs a 32-bit Tesseract. Pass -TesseractDir " +
-              "<path to a 32-bit install>, or -SkipOcr to hold scanned pages " +
-              "for a person instead."
-    }
-    if (-not (Test-Path $TesseractDir)) {
-        throw "Tesseract not found at $TesseractDir. Install it, or pass " +
-              "-TesseractDir <path> / -SkipOcr."
-    }
-
-    Write-Host "== Staging Tesseract from $TesseractDir ==" -ForegroundColor Cyan
-    Copy-Item "$TesseractDir\*.exe" $vendor -Force
-    Copy-Item "$TesseractDir\*.dll" $vendor -Force -ErrorAction SilentlyContinue
-    # English only. The full tessdata set is several hundred MB and Indian
-    # invoices are printed in English regardless of the business's language.
+    # PyMuPDF invokes its embedded OCR engine. Only language data is external;
+    # copying another tesseract.exe adds size and an unnecessary architecture
+    # dependency. The same traineddata works in both payloads.
     foreach ($file in 'eng.traineddata', 'osd.traineddata') {
         $source = Join-Path $TesseractDir "tessdata\$file"
-        if (Test-Path $source) {
-            Copy-Item $source "$vendor\tessdata" -Force
-        } else {
-            Write-Warning "Missing $file - OCR quality will suffer."
-        }
+        if (-not (Test-Path $source)) { throw "Required OCR data missing: $source" }
+        Copy-Item $source "$vendor\tessdata" -Force
     }
+
 }
 
 function Copy-Ucrt {
@@ -110,7 +92,7 @@ function Copy-Ucrt {
     Write-Host "== Bundling the Universal CRT from $source ==" -ForegroundColor Cyan
     foreach ($dist in 'dist\waprinter-agent', 'dist\cli\waprinter') {
         Copy-Item (Join-Path $source '*.dll') $dist -Force
-        foreach ($dll in 'ucrtbase.dll', 'api-ms-win-crt-runtime-l1-1-0.dll') {
+        foreach ($dll in 'python38.dll', 'vcruntime140.dll', 'ucrtbase.dll', 'api-ms-win-crt-runtime-l1-1-0.dll') {
             if (-not (Test-Path (Join-Path $dist $dll))) {
                 throw "Bundling the Universal CRT left no $dll in $dist"
             }
@@ -139,7 +121,7 @@ try {
                   "Use an x86 install (setup-python's architecture: x86)."
         }
         if ($bits -notmatch '\(3, 8\)') {
-            Write-Warning ("Expected Python 3.8 for $Target; got $bits. " +
+            throw ("Expected Python 3.8 for $Target; got $bits. " +
                            "Anything newer will not start on Windows 7.")
         }
     } else {
@@ -181,6 +163,11 @@ try {
     # broken installer that shipped before.
     if ($Target -eq 'win7-x86') { Copy-Ucrt }
 
+    Copy-Tesseract
+    if (-not $SkipOcr) {
+        $env:TESSDATA_PREFIX = Join-Path $root 'installer\vendor\tesseract\tessdata'
+    }
+
     Write-Host '== Smoke testing the frozen executables ==' -ForegroundColor Cyan
     $cliExe   = 'dist\cli\waprinter\waprinter.exe'
     $agentExe = 'dist\waprinter-agent\waprinter-agent.exe'
@@ -193,7 +180,9 @@ try {
     Write-Host '  ok    waprinter.exe --help'
 
     # --windowed means no console output, so the exit code is the signal.
-    $agent = Start-Process -FilePath $agentExe -ArgumentList '--selftest' -Wait -PassThru
+    $smokeArgs = @('--selftest')
+    if (-not $SkipOcr) { $smokeArgs += '--check-ocr' }
+    $agent = Start-Process -FilePath $agentExe -ArgumentList $smokeArgs -Wait -PassThru
     if ($agent.ExitCode -ne 0) {
         $crash = Join-Path $env:PROGRAMDATA 'WAPrinter\logs\crash.txt'
         if (Test-Path $crash) { Write-Host (Get-Content $crash -Raw) -ForegroundColor Red }
@@ -201,14 +190,12 @@ try {
     }
     Write-Host '  ok    waprinter-agent.exe --selftest'
 
-    Copy-Tesseract
-
-
     Write-Host '== Compiling the installer ==' -ForegroundColor Cyan
     if (-not (Test-Path $ISCC)) {
         throw "Inno Setup not found at $ISCC. Install it or pass -ISCC <path>."
     }
-    & $ISCC "/DTarget=$Target" 'installer\setup.iss'
+    $ocrFlag = if ($SkipOcr) { "/DOcrEnabled=0" } else { "/DOcrEnabled=1" }
+    & $ISCC $ocrFlag "/DTarget=$Target" 'installer\setup.iss'
     if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed.' }
 
     Write-Host ''

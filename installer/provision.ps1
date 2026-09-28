@@ -63,6 +63,13 @@ function Install-WhatsAppPrinter {
     $acl.AddAccessRule($rule)
     Set-Acl -Path $SpoolPath -AclObject $acl
 
+    if ([Environment]::OSVersion.Version.Major -lt 10) {
+        # Windows 7/8 have no Microsoft PDF driver or PrintManagement cmdlets.
+        # The existing watcher accepts exported PDFs, including unique names.
+        Write-Host "PDF folder capture ready: $SpoolPath"
+        return
+    }
+
     if (-not (Get-PrinterDriver -Name $DriverName -ErrorAction SilentlyContinue)) {
         throw "The inbox driver '$DriverName' is not present. Enable the " +
               "'Microsoft Print to PDF' Windows feature and re-run."
@@ -104,6 +111,7 @@ function Install-WhatsAppPrinter {
 }
 
 function Uninstall-WhatsAppPrinter {
+    if ([Environment]::OSVersion.Version.Major -lt 10) { return }
     if (Get-Printer -Name $PrinterName -ErrorAction SilentlyContinue) {
         Write-Host "Removing printer '$PrinterName'"
         Remove-Printer -Name $PrinterName

@@ -9,7 +9,13 @@ else to click.
 Chit fund software  --Print-->  WhatsApp Printer  -->  PDF  -->  read the page  -->  send  -->  popup
 ```
 
-No changes to their existing software, and no integration with it.
+Windows 10/11 use the virtual printer. On Windows 7 SP1, setup enables PDF
+folder capture instead: export a PDF from the billing software into
+`C:\ProgramData\WAPrinter\spool`, using a unique filename for each document.
+The **WhatsApp PDF folder** desktop shortcut opens it. The running app reads and
+moves the PDF automatically. Windows 7 does not gain a virtual printer; the
+billing software must support PDF export (or already have a compatible PDF
+printer installed).
 
 ---
 
@@ -28,7 +34,7 @@ and has no desktop, so it cannot show a window at all. Everything is a single
 `waprinter-agent.exe` that starts at logon in the user's own session.
 
 The interface is Tk, which ships with Python. No web server, no template engine,
-no browser runtime — the whole dependency list is PyMuPDF, httpx and watchdog.
+no browser runtime — the whole dependency list is PyMuPDF and httpx.
 An earlier build rendered the panel in WebView2; native widgets removed a runtime
 dependency, four packages and about 36 MB, and look more like the printer
 properties sheet they are modelled on.
@@ -55,15 +61,104 @@ Failures and anything needing a decision do **not** auto-close — a receipt tha
 did not arrive has to be noticed. Those offer "Open queue" and stay until
 dismissed.
 
-**The control panel** is an application window laid out like a printer's
-properties sheet rather than a dashboard.
+**The control panel** is one window: a side bar on the left and a page beside
+it, ink on paper with a single mint accent. The counter clerk has three pages
+and nothing that changes what members receive.
 
-- A **device status line** across the top — Ready / Not ready / Test mode — plus
-  a **Test send** button, the equivalent of "Print Test Page"
-- **Status** — today's counts, anything blocking sending, and how to use the printer
-- **Needs attention** — only documents whose recipient could not be read
-- **Recent** — what went where, in plain words
-- **Settings** — grouped fields with Apply
+- A **header** with the printer's state as a badge — Ready / Not ready / Test
+  mode — and a **Check configuration** button that checks setup without
+  sending a message. The side bar's **Current mode** card says the same in a
+  line.
+- **Status** — today's counts, a card for each setup step still blocking
+  sending (each with a link straight to that step), the last five documents,
+  and **Check for updates**
+- **Needs attention** — documents waiting for review and failed sends, with View
+  PDF, Retry and Discard actions; Show more makes older jobs accessible. The
+  setup checklist is repeated underneath, so a clerk who came here because
+  nothing is sending finds out why.
+- **Recent documents** — what went where, in plain words
+
+Everything else is under **Setup** and **Message templates** in the side bar,
+which swap in the setup screens in the same window. A PIN can be set so a clerk
+does not change a member's message by accident; it keeps honest people out and
+is not a password.
+
+## Setting up a counter
+
+Setup is seven steps down the left-hand side, each ticked when it is done:
+
+1. **Connect WhatsApp.** Paste the access token and press **Look up**. The token
+   is inspected with Meta: the WhatsApp Business Account and its phone numbers
+   are read from it and shown in words (`+91 87822 51999 · Srinidhi Chit Funds`),
+   so there are no IDs to copy. The token's expiry is shown too, and a
+   temporary token — the one on the API Setup page, which dies within a day —
+   is called out. Choose the number and **Save and load templates**. A token
+   that does not name its account asks for the account ID once.
+2. **Message templates.** Everything on the WhatsApp account: status, language,
+   whether it can attach a PDF, and what it fills in, with Meta's example values
+   shown in the wording. One template name in two languages is two templates.
+   A template deleted in the Business Manager is marked *not on WhatsApp*
+   rather than staying approved here.
+3. **Document types.** Receipts need positive evidence. Removal notices and letters are
+   built in. **Teach a new type from a PDF** opens the sample: click each value
+   that matters, say what it is — a built-in field, the customer's mobile, or
+   anything new such as *Customer ID* — and the label printed beside or above it
+   is recorded, not its position. Every field shows what it reads *on the sample*,
+   so a rule that would read the wrong thing is caught before saving. The title
+   that identifies the new type is suggested, and refused if it also appears on
+   another type's sample. **Try on recent prints** reads the last thirty prints
+   with the new fields without saving or sending anything, including OCR.
+   **Review validation PDFs** lets you compare at least three different PDFs
+   against their expected field values and customer mobiles. Saving validates
+   those answers and stored samples from other types. Fix mismatches before
+   saving. Reviewed samples stay locally in `samples/validation`; the export
+   setup file does not contain customer PDFs. Cached OCR is reused only while
+   the PDF, extraction settings and rules remain unchanged.
+4. **Fill in messages.** For each document type: the template, the PDF name the
+   member sees, and what fills each `{{variable}}`. Each variable is a drop-down
+   of the fields that type has — including taught ones — plus fixed text or
+   deliberately blank. A first guess is made from the names (`{{id}}` is offered
+   *Customer id*, `{{receipt_no}}` the document number), each row shows what the
+   latest print of that type actually reads, and the preview is the message a
+   member would receive. A template cannot be saved with a variable unfilled.
+5. **Try it.** Check one PDF, or re-read the last thirty prints, with the saved
+   setup. Nothing is sent or queued.
+6. **Counter settings.** Sending behaviour, scanned pages, where printed
+   receipts are kept, and this computer's branch and name.
+7. **Share setup.** Export and import, and the setup PIN.
+
+A template mapped on step 4 is strict: if a print is missing a mapped value,
+the document is held with the reason ("Could not read customer id…") instead of
+sending "-". Templates never mapped there keep the shared `template_variables`
+behaviour every install has always had.
+
+The taught fields are data in `profile.json` — `custom_kinds` and
+`field_rules` — next to the built-in vocabulary, and the per-template mapping is
+`template_mappings` in settings.json. The customer's mobile is never a mappable
+value: teaching where it sits only makes that label count as a phone label for
+the scorer, and the own-number blocklist, the double OCR read and the
+ambiguity hold still decide who is sent to.
+
+### Repeat the setup on another counter
+
+Use **Setup → Share setup → Export setup** on the configured counter, or
+`waprinter export-setup FILE`. The exported `provision.json` carries the
+account IDs, message choices and mappings, cached template definitions, taught
+document types and fields, and the setup PIN. It excludes the access token and
+counter-specific branch, computer and archive-folder values, and starts the
+destination in test mode.
+
+Put the file beside the installer for automatic import, select it on the installer's
+optional **Counter setup** page, or use **Share setup → Import setup** afterwards.
+Connect WhatsApp on the new counter and check one sample PDF of each kind before
+turning test mode off. Importing through the app preserves the reusable source
+file. The installer reports printer-creation failures instead of silently
+finishing with no working queue.
+
+Over AnyDesk, the same connection is one command: `waprinter connect` reads the
+token (paste with a right-click, or `--from-file`), finds the account and
+number, stores them and loads the templates. `--phone` chooses when there are
+several numbers.
 
 ---
 
@@ -129,16 +224,14 @@ right person — a member being removed, thanked for a payment — and nothing
 about it looks wrong. So the two passes must agree on what the document is,
 and a disagreement is held whatever `ocr_silent_send` says.
 
-Agreeing on *nothing*, though, is not agreement. Two passes that both failed to
-find a title say only that neither could read one, and an unrecognised document
-falls back to `default_template` — the receipt. That fallback is right on an
-install that only sends receipts, and on one that also sends removal notices it
-is exactly how a notice goes out thanking someone for a payment. So where
-`document_templates` maps anything, an unidentified scan is held rather than
-assumed. Receipts are recognised positively for this: the chit fund's own
-software prints only the filled-in fields, so `Received from` never reaches the
-PDF's text layer — but it is printed on the paper, so a *scan* of a receipt
-carries it, which is precisely where the positive identification is needed.
+Headings on the first page take priority over body phrases. A removal letter
+mentioning an earlier removal notice remains a removal letter. Multiple matching
+headings are held for review. Receipts require a receipt/invoice heading, both
+receipt payment phrases, or the untitled chit form's CR identifier, customer
+anchor and amount in words. On installations with multiple message types,
+unrecognised text PDFs and scans are both held. In Needs attention, choose the
+document type and review the message before sending; fields are re-read using
+that type's rules.
 
 ---
 
@@ -165,9 +258,10 @@ open anything, which is why a notice must not arrive called `Receipt-`.
 
 Each kind is a `DocumentKind` in [`extract/profile.py`](src/waprinter/extract/profile.py)
 — a title phrase and whatever anchors that layout needs — so a fourth document
-is configuration, not a release. Anything the profile does not recognise is
-read exactly as it always was and uses `default_template`, which is every
-receipt.
+is configuration, not a release, and **Setup → Document types** makes one by
+clicking on a sample. Anything the profile does not recognise uses
+the receipt selection (`default_template`). Recognised non-receipt documents
+require an explicit message mapping.
 
 Two things that layout taught us, both now regression-tested. `subscriber` is
 a customer anchor, and it matched inside *"...removed from the list of
@@ -183,8 +277,8 @@ none worth having: captured PDFs stayed in `inbox` under the name capture gave
 them — `20260907-113601-fee7f6b4.pdf` — flat, forever, inside ProgramData. Not
 a folder anyone browses and not a name anyone can search.
 
-Every processed receipt is now copied into a folder the operator picks on the
-Settings tab, filed by the date it was printed and named after itself:
+Every processed receipt is now copied into a folder chosen in
+Setup → Counter settings, filed by the date it was printed and named after itself:
 
 ```
 D:\Receipts\2026-09-07\CHQ6511-26 SHAHNAVAZDANISH MOHAMMAD.pdf
@@ -199,6 +293,16 @@ but not the folder is a nuisance, the other way round is a lost receipt.
 Which is also why `waprinter doctor` reports the folder and tries to write to
 it. A drive letter that stopped being mapped loses copies quietly, exactly
 because filing is not allowed to complain loudly.
+
+The working copies under `inbox` are pruned after `keep_inbox_days` (90 by
+default; 0 keeps them forever). Every unresolved job is protected, including
+failed, captured and in-progress jobs, regardless of its age or queue position.
+Failed sends stay in Needs attention until retried or discarded; review WhatsApp
+before retrying when the previous result was uncertain.
+
+Test sends and live sends have separate duplicate histories. Testing a receipt
+does not suppress its first live send, and test sends do not inflate the live
+sent-today count.
 
 ## Installing 20+ machines
 
@@ -249,12 +353,18 @@ on untouched.
 Two triggers:
 
 - **Daily**, in the background, for the routine version bump.
-- **Check for updates**, on the Status tab. A fix released at eleven in the
+- **Check for updates**, at the foot of the Status page. A fix released at eleven in the
   morning should not wait for a timer, and this is how it reaches a branch the
   moment it exists — including over AnyDesk.
 
-Guard rails: the download is SHA-256 verified against the manifest before it is
-executed, and an update never installs while a document is being processed.
+Guard rails: the manifest and the installer are fetched over HTTPS only, the
+manifest must carry a SHA-256 and the download is verified against it before it
+is executed. Capture, processing and queue sends share a lock with installation:
+the updater checks again after download and excludes new work until the installer
+exits. If a document is busy, use Check for updates again when it finishes.
+The installer asks for administrator rights because it creates a printer queue,
+so on a standard user account Windows shows that prompt rather than installing
+unattended.
 The database is brought up to the current shape when it is opened, because
 `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists — a
 column added in a release once never reached a single installed machine, and
@@ -309,13 +419,23 @@ to `logs/dry_run.jsonl`, but nothing is sent.
 | Path | What it does |
 |---|---|
 | [`agent.py`](src/waprinter/agent.py) | The one process: GUI loop on the main thread, watcher and server on their own |
-| [`ui/desktop.py`](src/waprinter/ui/desktop.py) | The application window |
+| [`ui/desktop.py`](src/waprinter/ui/desktop.py) | The application window: side bar, header and the counter's three pages |
+| [`ui/theme.py`](src/waprinter/ui/theme.py) | The palette, typefaces and ttk styles every window uses |
+| [`ui/icons.py`](src/waprinter/ui/icons.py) | Line icons, drawn from SVG by PyMuPDF at the screen's scaling |
+| [`ui/setup.py`](src/waprinter/ui/setup.py) | The setup screens, one page per step |
+| [`ui/teach.py`](src/waprinter/ui/teach.py) | Teaching a document type by clicking on a sample |
+| [`ui/setupmodel.py`](src/waprinter/ui/setupmodel.py) | What setup decides — mapping guesses, checks, PIN — testable without a display |
+| [`teaching.py`](src/waprinter/teaching.py) | Saving taught types, title checks, trials on recent prints |
+| [`extract/rules.py`](src/waprinter/extract/rules.py) | Turns a click into a field rule, and reads it back off every print |
+| [`send/meta_account.py`](src/waprinter/send/meta_account.py) | What a token reaches: account, numbers, expiry |
+| [`send/sync.py`](src/waprinter/send/sync.py) | Refreshes templates from WhatsApp, examples included |
 | [`ui/viewmodel.py`](src/waprinter/ui/viewmodel.py) | What it says, testable without a display |
 | [`ui/notification.py`](src/waprinter/ui/notification.py) | The corner panel after a print |
 | [`update.py`](src/waprinter/update.py) | Version check, verified download, silent install |
 | [`capture/watcher.py`](src/waprinter/capture/watcher.py) | Drains the spool folder; waits for `%%EOF` before claiming a file |
 | [`extract/split.py`](src/waprinter/extract/split.py) | Splits a batch print into one job per receipt |
 | [`archive.py`](src/waprinter/archive.py) | Files a copy of every printed receipt where the office can find it |
+| [`housekeeping.py`](src/waprinter/housekeeping.py) | Prunes old working copies and caps the logs, once a day |
 | [`provision.py`](src/waprinter/provision.py) | Configures an install from one file, then deletes it |
 | [`extract/profile.py`](src/waprinter/extract/profile.py) | Per-client document vocabulary |
 | [`extract/phone.py`](src/waprinter/extract/phone.py) | Number parsing and scoring, shared by the page reader and typed input |
@@ -336,6 +456,32 @@ to `logs/dry_run.jsonl`, but nothing is sent.
 - **Retry with backoff** — failures are classified as retryable or not, but
   retries are manual from the queue.
 - **Code signing** — every client install currently shows "Windows protected
-  your PC".
+  your PC". Until then the update relies on HTTPS to GitHub and the manifest's
+  checksum; there is no signature on the installer itself.
+- **Unattended updates on standard user accounts** — the installer needs
+  elevation, so a clerk without admin rights sees a UAC prompt.
 - **Amount extraction for chit receipts** — several competing figures on the page
   and no "Total" label, so it is deliberately left blank rather than guessed.
+
+## Windows 7 build and verification
+
+Use the `win7-x86` installer on Windows 7 SP1 (32-bit or 64-bit Windows).
+The normal installer now requires 64-bit Windows 10 or later. Setup checks for
+`AddDllDirectory`, the loader API supplied by KB2533623 or a superseding update,
+before installing. The Windows 7 build requires exactly 32-bit Python 3.8 and
+bundles the Universal CRT beside both executables.
+
+Both builds include OCR language data by default. PyMuPDF provides the OCR
+engine; no separate Tesseract executable is shipped. The frozen build performs
+an actual raster OCR smoke test, and the installer omits its OCR option when
+built with `-SkipOcr`. Tagged releases wait for both builds before publishing
+one manifest with separate x64 and win7-x86 downloads and checksums.
+
+Modern Windows CI does not certify Windows 7 compatibility. Before shipping,
+install on a clean Windows 7 SP1 VM without Python or Tesseract, then run
+`powershell -ExecutionPolicy Bypass -File installer\verify-win7.ps1` from the
+checkout. Also check: missing-loader-update rejection; exported PDF capture;
+receipt/notice/letter routing in test mode; a scanned sample; logon startup;
+upgrade and uninstall retaining history. Repeat on x86 and x64 Windows 7.
+The verification script checks startup and OCR without sending messages; the
+interactive capture and install checks still require the VM.

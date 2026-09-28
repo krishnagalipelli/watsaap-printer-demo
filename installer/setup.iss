@@ -24,6 +24,10 @@
 #define AppPublisher   "Sunrise Software"
 #define DataDir        "C:\ProgramData\WAPrinter"
 
+#ifndef OcrEnabled
+  #define OcrEnabled 1
+#endif
+
 [Setup]
 AppId={{8E3B4C21-9A7D-4F62-B1E5-7C9D2A6F4B83}
 AppName={#AppName}
@@ -48,7 +52,9 @@ PrivilegesRequired=admin
 ; which is what those machines report as 6.1.7601.
 MinVersion=6.1sp1
 #else
+ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion=10.0
 #endif
 WizardStyle=modern
 UninstallDisplayIcon={app}\waprinter-agent.exe
@@ -63,7 +69,9 @@ Name: "custom"; Description: "Custom"; Flags: iscustom
 
 [Components]
 Name: "core"; Description: "WhatsApp Printer"; Types: full custom; Flags: fixed
-Name: "ocr";  Description: "Read scanned invoices (OCR) - adds about 50 MB"; Types: full
+#if OcrEnabled
+Name: "ocr";  Description: "Read scanned documents (OCR)"; Types: full
+#endif
 
 [Files]
 Source: "..\dist\waprinter-agent\*"; DestDir: "{app}"; \
@@ -90,8 +98,10 @@ Source: "..\README.md";              DestDir: "{app}"; DestName: "README.txt"; \
     Flags: ignoreversion; Components: core
 
 ; Tesseract, for invoices that print as an image rather than as text.
+#if OcrEnabled
 Source: "vendor\tesseract\*"; DestDir: "{app}\tesseract"; \
-    Flags: ignoreversion recursesubdirs skipifsourcedoesntexist; Components: ocr
+    Flags: ignoreversion recursesubdirs; Components: ocr
+#endif
 
 [Dirs]
 Name: "{#DataDir}";       Permissions: users-modify
@@ -113,6 +123,8 @@ Name: "{commondesktop}\{#AppName}"; Filename: "{app}\waprinter-agent.exe"; \
 Name: "{commonstartup}\{#AppName}"; Filename: "{app}\waprinter-agent.exe"; \
     Parameters: "--hidden"
 
+Name: "{commondesktop}\WhatsApp PDF folder"; Filename: "{#DataDir}\spool"; Check: UseFolderCapture
+
 [Tasks]
 Name: "desktopicon"; Description: "Put a shortcut on the desktop"; \
     GroupDescription: "Shortcuts"
@@ -120,21 +132,17 @@ Name: "desktopicon"; Description: "Put a shortcut on the desktop"; \
 [Registry]
 ; Point the agent at the bundled tessdata, so OCR works without Tesseract being
 ; on PATH.
+#if OcrEnabled
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; \
     ValueType: string; ValueName: "TESSDATA_PREFIX"; \
     ValueData: "{app}\tesseract\tessdata"; \
     Flags: preservestringtype uninsdeletevalue; Components: ocr
+#endif
 
 [Run]
-; Create the printer queue and its ports.
-Filename: "powershell.exe"; \
-    Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\provision.ps1"""; \
-    StatusMsg: "Creating the WhatsApp Printer queue..."; \
-    Flags: runhidden waituntilterminated
-
 ; Start the agent now so the first print works without a reboot.
 Filename: "{app}\waprinter-agent.exe"; Description: "Start {#AppName}"; \
-    Flags: postinstall nowait skipifsilent
+    Flags: postinstall nowait skipifsilent runasoriginaluser
 
 
 [UninstallRun]
@@ -146,6 +154,73 @@ Filename: "powershell.exe"; \
     Flags: runhidden waituntilterminated; RunOnceId: "RemovePrinter"
 
 [Code]
+var
+  CounterSetupPage: TInputFileWizardPage;
+
+function GetModuleHandle(ModuleName: string): LongWord;
+  external 'GetModuleHandleW@kernel32.dll stdcall';
+function GetProcAddress(Module: LongWord; ProcName: AnsiString): LongWord;
+  external 'GetProcAddress@kernel32.dll stdcall';
+
+function UseFolderCapture: Boolean;
+begin
+  Result := GetWindowsVersion < $0A000000;
+end;
+
+function InitializeSetup: Boolean;
+begin
+  Result := True;
+  if GetProcAddress(GetModuleHandle('kernel32.dll'), 'AddDllDirectory') = 0 then
+  begin
+    MsgBox('Windows needs the loader update KB2533623 (or a superseding update such as KB3063858) before this app can start. Install the update, restart Windows, and run setup again.', mbError, MB_OK);
+    Result := False;
+  end;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = wpFinished) and UseFolderCapture then
+    WizardForm.FinishedLabel.Caption := 'PDF folder capture is ready. Export PDFs from your billing software into {#DataDir}\spool, using a new filename for each document. The desktop shortcut opens this folder. The app reads and moves each PDF automatically. Open Setup > Try it to check a sample before enabling live sends. This mode does not add a printer to Windows.';
+end;
+
+procedure InitializeWizard;
+begin
+  CounterSetupPage := CreateInputFilePage(wpSelectDir,
+    'Counter setup', 'Reuse the settings from a configured counter',
+    'Choose an exported setup file, or leave this blank to configure the app after installation.');
+  CounterSetupPage.Add('Setup file (optional):', 'Setup files|*.json', '.json');
+  if FileExists(ExpandConstant('{src}\provision.json')) then
+    CounterSetupPage.Values[0] := ExpandConstant('{src}\provision.json');
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (PageID = CounterSetupPage.ID) and
+    FileExists(ExpandConstant('{src}\provision.json'));
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    if CounterSetupPage.Values[0] <> '' then
+      if CompareText(CounterSetupPage.Values[0], ExpandConstant('{#DataDir}\provision.json')) <> 0 then
+        if not FileCopy(CounterSetupPage.Values[0], ExpandConstant('{#DataDir}\provision.json'), False) then
+          RaiseException('Could not copy the counter setup file. Check that it is accessible and run setup again.');
+
+    // [Run] ignores a program's failure exit code. A failed printer creation
+    // must be visible before setup offers to launch an apparently ready app.
+    if not Exec('powershell.exe',
+      '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\provision.ps1') + '"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+      RaiseException('Could not start printer setup. Check PowerShell is available and run setup again.');
+    if ResultCode <> 0 then
+      RaiseException('The printer could not be created. Check that Microsoft Print to PDF is enabled, then run setup again.');
+  end;
+end;
+
 // Job history and the captured PDFs are the record of what was sent to whom.
 // Ask before deleting rather than taking it away silently.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
