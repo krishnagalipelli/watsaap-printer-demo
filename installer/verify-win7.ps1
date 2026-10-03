@@ -12,8 +12,17 @@ if (-not $InstallDir) {
     $InstallDir = Join-Path $base 'WhatsAppPrinter'
 }
 foreach ($folder in @($InstallDir, (Join-Path $InstallDir 'cli'))) {
-    foreach ($dll in @('python38.dll', 'ucrtbase.dll', 'api-ms-win-crt-runtime-l1-1-0.dll', 'vcruntime140.dll')) {
+    foreach ($dll in @('python3.dll', 'python38.dll', 'msvcp140.dll', 'ucrtbase.dll', 'api-ms-win-crt-runtime-l1-1-0.dll', 'vcruntime140.dll')) {
         if (-not (Test-Path (Join-Path $folder $dll))) { throw "Missing runtime file: $folder\$dll" }
+        $reader = New-Object System.IO.BinaryReader([System.IO.File]::OpenRead((Join-Path $folder $dll)))
+        try {
+            $reader.BaseStream.Position = 0x3c
+            $offset = $reader.ReadInt32()
+            $reader.BaseStream.Position = $offset
+            if ($reader.ReadUInt32() -ne 0x00004550 -or $reader.ReadUInt16() -ne 0x014c) {
+                throw "Runtime is not an x86 PE file: $folder\$dll"
+            }
+        } finally { $reader.Close() }
     }
 }
 $previousHome = $env:WAPRINTER_HOME

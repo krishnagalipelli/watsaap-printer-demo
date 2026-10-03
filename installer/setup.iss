@@ -20,7 +20,7 @@
 #endif
 
 #define AppName        "WhatsApp Printer"
-#define AppVersion     "0.1.6"
+#define AppVersion     "0.1.7"
 #define AppPublisher   "Sunrise Software"
 #define DataDir        "C:\ProgramData\WAPrinter"
 
@@ -59,6 +59,8 @@ MinVersion=10.0
 WizardStyle=modern
 UninstallDisplayIcon={app}\waprinter-agent.exe
 DisableProgramGroupPage=yes
+CloseApplications=yes
+CloseApplicationsFilter=waprinter-agent.exe,waprinter.exe
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -79,6 +81,18 @@ Source: "..\dist\waprinter-agent\*"; DestDir: "{app}"; \
 Source: "..\dist\cli\waprinter\*";   DestDir: "{app}\cli"; \
     Flags: ignoreversion recursesubdirs; Components: core
 Source: "provision.ps1";             DestDir: "{app}"; Flags: ignoreversion; Components: core
+
+; Remove only obsolete application runtime files from a previous x64 install.
+; Current runtimes are overwritten by [Files]; customer data is not touched.
+#if Target == "win7-x86"
+[InstallDelete]
+Type: files; Name: "{app}\python312.dll"
+Type: files; Name: "{app}\VCRUNTIME140_1.dll"
+Type: files; Name: "{app}\cli\python312.dll"
+Type: files; Name: "{app}\cli\VCRUNTIME140_1.dll"
+#endif
+
+[Files]
 
 ; Unattended configuration, if whoever is installing put a provision.json next
 ; to the setup executable. "external" matters: the file is read from {src} at

@@ -471,6 +471,24 @@ The normal installer now requires 64-bit Windows 10 or later. Setup checks for
 before installing. The Windows 7 build requires exactly 32-bit Python 3.8 and
 bundles the Universal CRT beside both executables.
 
+The Windows 7 build also requires Visual Studio's **v142 (14.29) x86/x64
+tools** and **Windows SDK 10.0.19041.0**. CI installs these explicitly on
+`windows-2022`. `build.ps1` copies the x86 VC142 redistributable and that SDK's
+x86 UCRT into both payloads, replacing any copies collected from the build
+machine. `python3.dll` and `python38.dll` come from the selected Python 3.8
+installation. Missing prerequisites stop the build; it never falls back to
+the newest runtime installed on the runner.
+
+Before smoke tests, `packaging/verify_win7_payload.py` checks every packaged
+EXE/DLL/PYD for x86 architecture, checks runtime versions and Python stable-ABI
+forwarders, compares imports with bundled exports, and rejects known Windows
+8+ imports observed in incompatible runtimes. This audit is deliberately not
+a claim of complete Windows 7 compatibility. Rebuild the installer after
+source changes; old files in `installer/Output` do not contain those changes.
+Windows 7 setup replaces the runtime files and removes only obsolete
+`python312.dll` and `VCRUNTIME140_1.dll` copies from the app/CLI directories.
+It does not remove `C:\ProgramData\WAPrinter` during an upgrade.
+
 Both builds include OCR language data by default. PyMuPDF provides the OCR
 engine; no separate Tesseract executable is shipped. The frozen build performs
 an actual raster OCR smoke test, and the installer omits its OCR option when

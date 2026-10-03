@@ -69,35 +69,39 @@ function Copy-Tesseract {
 
 }
 
-function Copy-Ucrt {
-    # python38.dll links against the Universal CRT (ucrtbase.dll and the
-    # api-ms-win-crt-* forwarders). Windows 10 and Server ship it, so PyInstaller
-    # treats it as part of the OS and collects none of it -- and a Windows 7
-    # counter without KB2999226 then shows "Error loading Python DLL ...
-    # LoadLibrary: The specified module could not be found" before any of our
-    # code runs. The smoke test below cannot catch that on this runner, which
-    # has the UCRT, so the check here has to be on the files themselves.
-    # Microsoft ships these for app-local deployment in the Windows SDK.
-    $kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Redist'
-    $source = @(Get-ChildItem $kits -Directory -ErrorAction SilentlyContinue |
-        ForEach-Object { Join-Path $_.FullName 'ucrt\DLLs\x86' }) +
-        (Join-Path $kits 'ucrt\DLLs\x86') |
-        Where-Object { Test-Path (Join-Path $_ 'ucrtbase.dll') } |
-        Sort-Object -Descending | Select-Object -First 1
-    if (-not $source) {
-        throw "No x86 Universal CRT redistributable under $kits. Install the " +
-              "Windows 10/11 SDK; without it the $Target build cannot start on 7."
+function Copy-Win7Runtimes {
+    # Use a bounded SDK/toolset, never DLLs from System32 or the newest SDK.
+    # Modern runners can contain x64 Python and VC runtimes requiring Win8+.
+    $ucrt = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Redist\10.0.19041.0\ucrt\DLLs\x86'
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not (Test-Path $vswhere)) { throw 'Install Visual Studio with the v142 (14.29) C++ tools.' }
+    $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.ComponentGroup.VC.Tools.142.x86.x64 -property installationPath
+    if (-not $vs) { throw 'Visual Studio v142 (14.29) tools were not found.' }
+    $vc = Get-ChildItem (Join-Path $vs 'VC\Redist\MSVC') -Directory -Filter '14.29.*' |
+        ForEach-Object { Get-Item (Join-Path $_.FullName 'x86\Microsoft.VC142.CRT') -ErrorAction SilentlyContinue } |
+        Sort-Object FullName -Descending | Select-Object -First 1
+    if (-not $vc) { throw 'No x86 Microsoft.VC142.CRT redistributable found.' }
+    if (-not (Test-Path (Join-Path $ucrt 'ucrtbase.dll'))) {
+        throw 'Install Windows SDK 10.0.19041.0, including its x86 UCRT redistributable.'
     }
-
-    Write-Host "== Bundling the Universal CRT from $source ==" -ForegroundColor Cyan
+    $pythonHome = & cmd /c "$Python -c `"import sys;print(sys.base_prefix)`""
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot locate Python 3.8 runtime.' }
+    $sources = @{}
+    foreach ($file in (Get-ChildItem $ucrt -Filter '*.dll')) { $sources[$file.Name] = $file.FullName }
+    foreach ($file in (Get-ChildItem $vc.FullName -Filter '*.dll')) { $sources[$file.Name] = $file.FullName }
+    foreach ($name in 'python3.dll', 'python38.dll') {
+        $file = Join-Path $pythonHome $name
+        if (-not (Test-Path $file)) { throw "Missing interpreter runtime: $file" }
+        $sources[$name] = $file
+    }
     foreach ($dist in 'dist\waprinter-agent', 'dist\cli\waprinter') {
-        Copy-Item (Join-Path $source '*.dll') $dist -Force
-        foreach ($dll in 'python38.dll', 'vcruntime140.dll', 'ucrtbase.dll', 'api-ms-win-crt-runtime-l1-1-0.dll') {
-            if (-not (Test-Path (Join-Path $dist $dll))) {
-                throw "Bundling the Universal CRT left no $dll in $dist"
-            }
+        # Replace nested copies too: they can take precedence over the root copy.
+        foreach ($file in (Get-ChildItem $dist -Recurse -Filter '*.dll')) {
+            if ($sources.ContainsKey($file.Name)) { Copy-Item $sources[$file.Name] $file.FullName -Force }
         }
+        foreach ($name in $sources.Keys) { Copy-Item $sources[$name] (Join-Path $dist $name) -Force }
     }
+    Invoke-Step "$Python packaging\verify_win7_payload.py dist\waprinter-agent dist\cli\waprinter"
 }
 
 try {
@@ -107,7 +111,7 @@ try {
         # and these only cap what pip is allowed to resolve that to.
         $constraints = 'installer\constraints-win7.txt'
         Invoke-Step "$Python -m pip install --upgrade pip"
-        Invoke-Step "$Python -m pip install -c $constraints pyinstaller"
+        Invoke-Step "$Python -m pip install -c $constraints pyinstaller pefile==2023.2.7"
         Invoke-Step "$Python -m pip install -c $constraints -e `".[dev,windows]`""
 
         # A 64-bit interpreter here would freeze a 64-bit exe and every check
@@ -161,7 +165,7 @@ try {
     # from source, and --windowed hides it completely, so the build must not be
     # allowed to call that a success. This exact check would have caught the
     # broken installer that shipped before.
-    if ($Target -eq 'win7-x86') { Copy-Ucrt }
+    if ($Target -eq 'win7-x86') { Copy-Win7Runtimes }
 
     Copy-Tesseract
     if (-not $SkipOcr) {
