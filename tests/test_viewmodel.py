@@ -159,6 +159,24 @@ class TestSetupNeeds:
 
 
 class TestCounters:
+    def test_confirmed_sends_use_send_date_and_exclude_unsent_jobs(self, store, tmp_path):
+        from datetime import datetime, timedelta
+        from waprinter.models import PrintJob
+
+        now = datetime(2026, 10, 3, 12)
+        yesterday = now - timedelta(days=1)
+        assert vm.counters_for_today(store, Settings(dry_run=False), now).total_sent == 0
+        for index, status in enumerate(JobStatus):
+            store.upsert(PrintJob(str(index), yesterday, tmp_path / "invoice.pdf",
+                                  status=status, sent_at=now))
+        store.upsert(PrintJob("older-send", yesterday, tmp_path / "invoice.pdf",
+                              status=JobStatus.SENT, sent_at=yesterday))
+        counts = vm.counters_for_today(store, Settings(dry_run=False), now)
+        assert counts.total_sent == 2
+        assert counts.sent == 1
+        assert counts.printed == 0
+        assert vm.counters_for_today(store, Settings(dry_run=True), now).total_sent == 2
+
     def test_it_counts_the_day(self, pipeline, make_invoice):
         pipeline.process(make_invoice())
         pipeline.process(make_invoice(InvoiceSpec(customer_phone=None)))

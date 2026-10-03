@@ -288,6 +288,10 @@ class DesktopWindow:
             self.counter_values[key] = value
             self.counter_captions[key] = label
 
+        self.total_sent_label = ttk.Label(page, text="Total messages sent: 0",
+                                         style="Hint.TLabel")
+        self.total_sent_label.pack(anchor="w", pady=(8, 0))
+
         # Shown only while something stops sending: one card per setup step
         # that has something left to do.
         self.problems_box = ttk.Frame(page)
@@ -1311,6 +1315,7 @@ class DesktopWindow:
             self.counter_values[key].configure(
                 text=f"{value:02d}", foreground=theme.INK if value else theme.FAINT)
         self.counter_captions["sent"].configure(text=vm.sent_caption(self.settings).upper())
+        self.total_sent_label.configure(text=f"Total messages sent: {counters.total_sent:,}")
 
         self.nav_buttons["attention"].configure(
             text=f"Needs attention ({waiting})" if waiting else "Needs attention")

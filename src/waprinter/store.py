@@ -381,6 +381,14 @@ class Store:
         return self._row_to_job(row) if row else None
 
     @_locked
+    def count_sent(self) -> int:
+        """Total confirmed sends, excluding tests and opened WhatsApp chats."""
+        return int(self.conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE status = ?",
+            (str(JobStatus.SENT),),
+        ).fetchone()[0])
+
+    @_locked
     def count_sent_since(self, since: datetime) -> int:
         row = self.conn.execute(
             "SELECT COUNT(*) AS n FROM jobs WHERE status = ? AND sent_at >= ?",

@@ -153,6 +153,7 @@ class Counters:
     sent: int = 0
     waiting: int = 0
     failed: int = 0
+    total_sent: int = 0
 
     @property
     def sent_label(self) -> str:
@@ -165,10 +166,12 @@ def counters_for_today(store, settings: Settings, now: datetime | None = None) -
     counts = store.status_counts(midnight)
     return Counters(
         printed=sum(counts.values()),
-        sent=counts.get(JobStatus.DRY_RUN if settings.dry_run else JobStatus.SENT, 0),
+        sent=(counts.get(JobStatus.DRY_RUN, 0) if settings.dry_run
+              else store.count_sent_since(midnight)),
         waiting=sum(counts.get(s, 0) for s in
                     (JobStatus.AWAITING, JobStatus.HELD, JobStatus.READY, JobStatus.FAILED)),
         failed=counts.get(JobStatus.FAILED, 0),
+        total_sent=store.count_sent(),
     )
 
 
