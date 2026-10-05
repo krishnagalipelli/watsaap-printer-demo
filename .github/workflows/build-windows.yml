@@ -64,14 +64,6 @@ jobs:
           python -m pip install -e ".[dev,windows]"
           python -m pytest -q
 
-      # The Windows 7 queue is built on the XPS driver and converted on capture.
-      # No Windows 7 runner exists, so this proves the three moving parts here,
-      # against the shipped watcher, rather than at a counter.
-      - name: Check the XPS capture route end to end
-        run: |
-          python -m pip install -e ".[dev,windows]"
-          python packaging/check_xps_capture.py
-
       - name: Build installer
         shell: pwsh
         run: |
@@ -146,6 +138,18 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -c installer/constraints-win7.txt -e ".[dev,windows]"
           python -m pytest -q
+
+      # The queue this build installs is an XPS one, converted on capture, and
+      # that is three moving parts: a Local Port named as a file path, a queue
+      # on an inbox driver, and the conversion in waprinter.capture. There is
+      # no Windows 7 runner, so prove them here, against the shipped watcher
+      # and on the same interpreter, rather than at a counter.
+      #
+      # windows-2022 rather than windows-latest on purpose: Server 2025 ships
+      # no XPS Document Writer at all. A missing driver fails this step, which
+      # is what we want to hear about.
+      - name: Check the XPS capture route end to end
+        run: python packaging/check_xps_capture.py
 
       - name: Build installer
         shell: pwsh
