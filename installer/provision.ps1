@@ -83,7 +83,11 @@ function Add-SpoolerType {
     if ('WAPrinter.Spooler' -as [type]) { return }
     # XcvData on the Local Port monitor is how a port is added without the
     # PrintManagement cmdlets, which Windows 7 does not have.
-    Add-Type -Namespace 'WAPrinter' -Name 'Spooler' -UsingNamespace 'System.Runtime.InteropServices' -MemberDefinition @'
+    # No -UsingNamespace here. Add-Type's own template already opens
+    # System.Runtime.InteropServices, and naming it again emits the using
+    # twice; the .NET 3.5 compiler on Windows 7 treats that as an error, the
+    # type never compiles, and every port quietly falls back to the registry.
+    Add-Type -Namespace 'WAPrinter' -Name 'Spooler' -MemberDefinition @'
 [StructLayout(LayoutKind.Sequential)]
 public struct PrinterDefaults {
     public IntPtr pDatatype;
@@ -132,25 +136,49 @@ function Invoke-LocalPortMonitor {
     }
 }
 
+function Test-LocalPort {
+    param([string] $Port)
+
+    # Both routes land in the monitor's own list, so this verifies either.
+    $ports = Get-ItemProperty -Path $LocalPortKey -ErrorAction SilentlyContinue
+    if (-not $ports) { return $false }
+    return ($null -ne $ports.PSObject.Properties[$Port])
+}
+
 function Add-LocalPort {
     param([string] $Port)
 
-    # No existence pre-check: AddPort reports ERROR_ALREADY_EXISTS, which
-    # Invoke-LocalPortMonitor treats as success, and there is no tidy way to
-    # enumerate Local Ports before Windows 8 anyway.
+    # True when the monitor took it. False means the caller should fall back,
+    # and the fallback is batched: it restarts the spooler, and doing that
+    # once per port takes far longer than the whole install should.
     try {
         Invoke-LocalPortMonitor -Action AddPort -Port $Port
         Write-Host "Created port: $Port"
-        return
+        return $true
     } catch {
-        Write-Warning "The Local Port monitor refused $Port ($_); using the registry instead."
+        Write-Warning "The Local Port monitor refused $Port ($_)"
+        return $false
     }
+}
+
+function Add-LocalPortsViaRegistry {
+    param([string[]] $Ports)
+
     # The monitor keeps its port list here, and the spooler rereads it on
-    # restart. Slower, but it needs no compiler and no P/Invoke.
+    # restart. Slower than XcvData, but it needs no compiler and no P/Invoke.
     if (-not (Test-Path $LocalPortKey)) { New-Item -Path $LocalPortKey -Force | Out-Null }
-    New-ItemProperty -Path $LocalPortKey -Name $Port -PropertyType String -Value '' -Force | Out-Null
+    foreach ($port in $Ports) {
+        New-ItemProperty -Path $LocalPortKey -Name $port -PropertyType String -Value '' -Force | Out-Null
+    }
+    Write-Host "Restarting the spooler to pick up $($Ports.Count) port(s)"
     Restart-Service -Name Spooler -Force
-    Write-Host "Created port via the registry: $Port"
+    # The spooler takes a moment to come back before it will accept a printer
+    # bound to one of these.
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        if ((Get-Service -Name Spooler).Status -eq 'Running') { break }
+        Start-Sleep -Seconds 1
+    }
+    Start-Sleep -Seconds 2
 }
 
 function Remove-LocalPort {
@@ -181,6 +209,39 @@ function New-SpoolFolder {
     Set-Acl -Path $SpoolPath -AclObject $acl
 }
 
+function New-LegacyPrinter {
+    param([string] $Driver, [string] $Port)
+
+    try {
+        $printer = ([WMIClass] 'Win32_Printer').CreateInstance()
+        $printer.DeviceID   = $PrinterName
+        $printer.DriverName = $Driver
+        $printer.PortName   = $Port
+        $printer.Put() | Out-Null
+        return
+    } catch {
+        Write-Warning "WMI could not create the queue ($_); trying prnmngr.vbs."
+    }
+
+    # Microsoft's own printer admin script, shipped with Windows 7. It does the
+    # same job through a different path, and is worth trying before giving up
+    # on a machine where WMI reports nothing more useful than "Generic failure".
+    $script = Get-ChildItem (Join-Path $env:SystemRoot 'System32\Printing_Admin_Scripts') `
+        -Filter 'prnmngr.vbs' -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($script) {
+        & cscript.exe //nologo $script.FullName -a -p $PrinterName -m $Driver -r $Port
+        if ($LASTEXITCODE -eq 0) { return }
+        Write-Warning "prnmngr.vbs exited with $LASTEXITCODE"
+    } else {
+        Write-Warning 'prnmngr.vbs was not found on this machine.'
+    }
+
+    throw ("The queue '$PrinterName' could not be created on driver '$Driver' " +
+           "and port '$Port'. Check that the Print Spooler service is running " +
+           "and that the XPS Document Writer is installed.")
+}
+
 function Install-LegacyQueue {
     # Windows 7 and 8: the XPS Document Writer, created through WMI because
     # Add-Printer does not exist here.
@@ -195,7 +256,20 @@ function Install-LegacyQueue {
     Write-Host "Using the inbox driver '$driver'"
 
     $ports = @(Get-PortPaths)
-    foreach ($port in $ports) { Add-LocalPort $port }
+    $pending = @($ports | Where-Object { -not (Add-LocalPort $_) })
+    if ($pending.Count) {
+        Add-LocalPortsViaRegistry $pending
+        # Verify rather than assume, but only the ones written by hand: the
+        # monitor reporting success is authority enough for the rest, and a
+        # registry read that disagreed would fail a working install. A printer
+        # bound to a port the spooler does not know about fails with "Generic
+        # failure", which says nothing about why.
+        $missing = @($pending | Where-Object { -not (Test-LocalPort $_) })
+        if ($missing.Count) {
+            throw ("These printer ports could not be created, so the queue " +
+                   "cannot be bound to them: " + ($missing -join ', '))
+        }
+    }
 
     $existing = Get-WmiObject -Class Win32_Printer -Filter "Name='$PrinterName'" -ErrorAction SilentlyContinue
     if ($existing) {
@@ -205,11 +279,7 @@ function Install-LegacyQueue {
         $existing.Put() | Out-Null
     } else {
         Write-Host "Creating printer '$PrinterName'"
-        $printer = ([WMIClass] 'Win32_Printer').CreateInstance()
-        $printer.DeviceID   = $PrinterName
-        $printer.DriverName = $driver
-        $printer.PortName   = $ports[0]
-        $printer.Put() | Out-Null
+        New-LegacyPrinter -Driver $driver -Port $ports[0]
     }
 
     Write-Host ''
