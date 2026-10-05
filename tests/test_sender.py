@@ -604,6 +604,31 @@ class TestReloadingWhatTheCliWrote:
         assert pipeline.reload_if_changed() is True
         assert pipeline.templates.get("chits_details").usable is True
 
+    def test_it_notices_a_write_that_did_not_move_the_clock(self, pipeline):
+        """A change is a change even when the timestamp did not move.
+
+        Windows file timestamps advance on a ~15.6 ms tick, so a write can land
+        in the same tick as the last read and leave the mtime untouched. Pinning
+        the mtime back reproduces that here on any filesystem; this used to fail
+        on the Windows runner only, and at random.
+        """
+        import os
+
+        from waprinter.send.templates import TemplateStore
+
+        path = pipeline.templates.path
+        was = path.stat()
+        store = TemplateStore(path)
+        template = store.get("chits_details")
+        template.status = "approved"
+        template.header_document = True
+        store.put(template)
+        os.utime(path, ns=(was.st_atime_ns, was.st_mtime_ns))
+        assert path.stat().st_mtime_ns == was.st_mtime_ns, "mtime must look unchanged"
+
+        assert pipeline.reload_if_changed() is True
+        assert pipeline.templates.get("chits_details").usable is True
+
     def test_it_notices_go_live_and_rewires_the_sender(self, pipeline, monkeypatch):
         from waprinter.config import Settings
         from waprinter.send.dryrun import DryRunSender

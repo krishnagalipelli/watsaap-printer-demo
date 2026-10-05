@@ -7,6 +7,7 @@ five o'clock on a Friday.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import functools
 import threading
@@ -65,7 +66,7 @@ class Pipeline:
         self.operation_lock = threading.RLock()
         self.update_lock = threading.Lock()
         # What the shared files looked like when we last read them.
-        self._stamps: dict[str, int | None] = {
+        self._stamps: dict[str, bytes | None] = {
             "settings": self._stamp(paths().settings),
             "templates": self._stamp(self.templates.path),
             "profile": self._stamp(paths().profile),
@@ -171,9 +172,17 @@ class Pipeline:
         return True
 
     @staticmethod
-    def _stamp(path: Path) -> int | None:
+    def _stamp(path: Path) -> bytes | None:
+        """What the file holds, not when it was last written.
+
+        An mtime is not enough on Windows, where file timestamps advance on a
+        ~15.6 ms tick: a write landing in the same tick as our last read is
+        invisible, and the CLI's change then goes unnoticed until something
+        else happens to touch the file. These are small JSON files read on a
+        poll, so digesting the contents costs nothing worth saving.
+        """
         try:
-            return path.stat().st_mtime_ns
+            return hashlib.blake2b(path.read_bytes(), digest_size=16).digest()
         except OSError:
             return None
 
