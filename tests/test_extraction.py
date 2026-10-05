@@ -135,6 +135,17 @@ class TestDriverPunctuationIsFoldedBack:
     actual queue on a Windows runner and reports what it sees.
     """
 
+    def test_the_soft_hyphen_the_xps_driver_emits_reads_as_a_hyphen(self):
+        """U+00AD is the one actually observed coming off the XPS queue.
+
+        Dropping it instead -- which is what a soft hyphen usually warrants,
+        being an invisible hint about where a word may break -- would read the
+        number as "INV2291". What is on the page is a hyphen.
+        """
+        from waprinter.extract.pdf_text import fold_punctuation
+
+        assert fold_punctuation("INV\u00ad2291") == "INV-2291"
+
     def test_a_non_breaking_hyphen_reads_as_a_hyphen(self):
         from waprinter.extract.pdf_text import fold_punctuation
 
@@ -143,7 +154,7 @@ class TestDriverPunctuationIsFoldedBack:
     def test_every_dash_the_drivers_use_folds(self):
         from waprinter.extract.pdf_text import fold_punctuation
 
-        for dash in "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe63\uff0d":
+        for dash in "\u00ad\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe63\uff0d":
             assert fold_punctuation("INV{}2291".format(dash)) == "INV-2291"
 
     def test_plain_ascii_is_untouched(self):

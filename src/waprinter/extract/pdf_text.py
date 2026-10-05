@@ -227,7 +227,12 @@ MIN_WORDS_FOR_TEXT_LAYER = 5
 # runs of text read as a whole; the dashes are what actually survive into a
 # word and corrupt a field.
 _PUNCTUATION = {
-    # Dashes and minus signs.
+    # Dashes and minus signs. U+00AD SOFT HYPHEN is first because it is the
+    # one actually observed: printing "INV-2291" through the XPS queue brings
+    # it back as "INV\u00ad2291". Elsewhere a soft hyphen is an invisible hint
+    # about where a word may break, but what is on the page here is a hyphen,
+    # and dropping it instead would read the number as "INV2291".
+    "\u00ad": "-",
     "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-",
     "\u2014": "-", "\u2015": "-", "\u2212": "-", "\ufe63": "-",
     "\uff0d": "-",

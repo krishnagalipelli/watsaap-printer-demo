@@ -102,15 +102,23 @@ def make_printer(driver, port):
 
 
 def remove_printer():
-    """Best effort. The spooler holds the queue briefly after a job finishes,
-    so access-denied and busy here are timing, not a real problem."""
-    import win32print
+    """Delete through WMI, the way it was created.
+
+    win32print.DeletePrinter needs a handle opened for administration; on a
+    default OpenPrinter it fails with access denied, and the port is then still
+    in use and cannot be deleted either.
+    """
+    import win32com.client
 
     for attempt in range(5):
         try:
-            handle = win32print.OpenPrinter(PRINTER)
-            win32print.DeletePrinter(handle)
-            win32print.ClosePrinter(handle)
+            wmi = win32com.client.GetObject(r"winmgmts:\\.\root\cimv2")
+            found = wmi.ExecQuery(
+                "SELECT * FROM Win32_Printer WHERE Name = '{}'".format(PRINTER))
+            if not len(found):
+                return
+            for printer in found:
+                printer.Delete_()
             return
         except Exception as exc:
             if attempt == 4:
@@ -204,9 +212,11 @@ def main():
                 "extractor saw: {!r}".format(folded[:200]))
         for expected in ("INV-2291", "18,450.00"):
             if expected not in folded:
-                print("NOTE: {!r} did not survive as typed. The driver's "
-                      "substitution is not folded yet; see the codepoints "
-                      "above.".format(expected))
+                raise SystemExit(
+                    "{!r} did not survive as typed, so the driver substituted "
+                    "something pdf_text does not fold. Add the codepoint above "
+                    "to _PUNCTUATION. Extractor saw: {!r}".format(
+                        expected, folded[:200]))
         print("\nOK: a print became a readable PDF through the shipped watcher.")
     finally:
         remove_printer()
