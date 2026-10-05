@@ -88,6 +88,55 @@ def test_missing_runtime_dependency_cannot_fall_back_to_build_machine(payload):
     assert any('msvcp140_atomic_wait.dll is not bundled' in e for e in checker.verify(root))
 
 
+def test_pywin32_dll_in_its_own_subdirectory_counts_as_bundled(payload):
+    # PyInstaller >= 5.4 stages pythoncom38.dll under pywin32_system32 and adds
+    # that directory to the search path with a runtime hook, so a .pyd importing
+    # it is satisfied from there rather than from the payload root.
+    root, records = payload
+    (root / 'pywin32_system32').mkdir()
+    dll = root / 'pywin32_system32' / 'pythoncom38.dll'
+    dll.touch()
+    records[dll] = (0x14c, None, [], {'PyCom_Init': None})
+    nested = root / 'win32com' / 'shell'
+    nested.mkdir(parents=True)
+    pyd = nested / 'shell.pyd'
+    pyd.touch()
+    records[pyd] = (0x14c, None, [('pythoncom38.dll', 'PyCom_Init')], {})
+    assert checker.verify(root) == []
+
+
+def test_pythoncom_is_not_mistaken_for_the_interpreter(payload):
+    # It is pywin32's COM library, not a second Python runtime, and it carries
+    # no version resource of its own.
+    root, records = payload
+    dll = root / 'pythoncom38.dll'
+    dll.touch()
+    records[dll] = (0x14c, None, [], {})
+    assert checker.verify(root) == []
+
+
+def test_still_rejects_a_second_interpreter_runtime(payload):
+    root, records = payload
+    dll = root / 'python312.dll'
+    dll.touch()
+    records[dll] = (0x14c, (3, 12, 10, 0), [], {})
+    assert any('python312.dll: expected Python 3.8 runtime' in e
+               for e in checker.verify(root))
+
+
+def test_unreadable_export_table_does_not_invent_missing_symbols(payload):
+    # pefile gives up on an export directory it thinks is corrupt, and MFC
+    # exports more than its ceiling. Ordinals past the cut are not missing.
+    root, records = payload
+    mfc = root / 'mfc140u.dll'
+    mfc.touch()
+    records[mfc] = (0x14c, None, [], None)
+    pyd = root / 'win32ui.pyd'
+    pyd.touch()
+    records[pyd] = (0x14c, None, [('mfc140u.dll', 10045)], {})
+    assert checker.verify(root) == []
+
+
 def test_reads_real_pe_headers_and_import_table(tmp_path):
     # Small synthetic PE with a single KERNEL32 import; no Windows execution.
     data = bytearray(1536)

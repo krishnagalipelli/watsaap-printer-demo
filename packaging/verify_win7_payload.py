@@ -6,6 +6,7 @@ startup/OCR test: the import denylist covers known newer APIs, not every API.
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import pefile
@@ -18,11 +19,24 @@ NEWER_APIS = {
 }
 REQUIRED = {"python3.dll", "python38.dll", "msvcp140.dll", "vcruntime140.dll",
             "ucrtbase.dll", "api-ms-win-crt-runtime-l1-1-0.dll"}
+# python3.dll, python38.dll, python312.dll -- the interpreter itself. Matching
+# "python*.dll" instead would also catch pywin32's pythoncom38.dll, which is a
+# COM library, carries no version resource, and is not a second interpreter.
+INTERPRETER = re.compile(r"python\d+\.dll$")
+# pefile stops parsing an export directory once it looks corrupt, and its
+# default ceiling is below what MFC exports: mfc140u.dll alone has over 8192.
+# win32ui.pyd imports it by ordinal, so a truncated table makes every ordinal
+# past the cut appear missing. Read the whole table, and keep a bound.
+MAX_EXPORTS = 0x40000
 
 
 def inspect(path):
-    """Read headers/imports/exports only; never load or execute the file."""
-    pe = pefile.PE(str(path))
+    """Read headers/imports/exports only; never load or execute the file.
+
+    Returns exports as None when the directory could not be read in full, so
+    callers can tell "no such symbol" apart from "we did not see the symbols".
+    """
+    pe = pefile.PE(str(path), max_symbol_exports=MAX_EXPORTS)
     try:
         version = None
         info = getattr(pe, "VS_FIXEDFILEINFO", [])
@@ -41,6 +55,8 @@ def inspect(path):
             exports[symbol.ordinal] = forward
             if symbol.name:
                 exports[symbol.name.decode("ascii")] = forward
+        if any("Assuming corrupt" in w for w in pe.get_warnings()):
+            exports = None
         return pe.FILE_HEADER.Machine, version, imports, exports
     finally:
         pe.close()
@@ -60,12 +76,30 @@ def verify(folder):
     root_names = {p.name.lower() for p in binaries if p.parent == folder}
     for name in sorted(REQUIRED - root_names):
         errors.append("{}: required runtime missing".format(folder / name))
-    by_location = {(p.parent, p.name.lower()): data for p, data in binaries.items()}
+    by_location = {}
+    by_name = {}
+    for path, data in binaries.items():
+        by_location[(path.parent, path.name.lower())] = data
+        by_name.setdefault(path.name.lower(), []).append(data)
+
+    def resolve(importer, dll):
+        """Where the loader would find dll, as the frozen app is laid out.
+
+        Its own directory first, then the payload root. Failing both, anywhere
+        in the payload: PyInstaller stages pywin32's DLLs in a pywin32_system32
+        subdirectory and puts that on the search path with a runtime hook, so a
+        .pyd importing one of them is satisfied from there, not from the root.
+        """
+        for key in ((importer.parent, dll), (folder, dll)):
+            if key in by_location:
+                return [by_location[key]]
+        return by_name.get(dll, [])
+
     for path, (machine, version, imports, exports) in binaries.items():
         name = path.name.lower()
         if machine != 0x14C:
             errors.append("{}: expected x86, got PE machine {:#x}".format(path, machine))
-        if name.startswith("python") and name.endswith(".dll"):
+        if INTERPRETER.match(name):
             if name not in {"python3.dll", "python38.dll"} or not version or version[:2] != (3, 8):
                 errors.append("{}: expected Python 3.8 runtime, got {}".format(path, version))
         if name.startswith(("msvcp140", "vcruntime140")) and name.endswith(".dll"):
@@ -79,10 +113,11 @@ def verify(folder):
         for dll, symbol in imports:
             if dll in {"kernel32.dll", "kernelbase.dll"} and symbol in NEWER_APIS:
                 errors.append("{}: {}!{} requires newer Windows".format(path, dll, symbol))
-            target = by_location.get((path.parent, dll), by_location.get((folder, dll)))
-            if target is None and dll.startswith(("python", "msvcp140", "vcruntime140", "api-ms-win-crt-")):
+            targets = resolve(path, dll)
+            if not targets and dll.startswith(("python", "msvcp140", "vcruntime140", "api-ms-win-crt-")):
                 errors.append("{}: imported runtime {} is not bundled".format(path, dll))
-            if target is not None and symbol not in target[3]:
+            readable = [t[3] for t in targets if t[3] is not None]
+            if len(readable) == len(targets) and readable and not any(symbol in e for e in readable):
                 errors.append("{}: {} lacks imported symbol {}".format(path, dll, symbol))
     return errors
 
