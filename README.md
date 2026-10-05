@@ -9,13 +9,26 @@ else to click.
 Chit fund software  --Print-->  WhatsApp Printer  -->  PDF  -->  read the page  -->  send  -->  popup
 ```
 
-Windows 10/11 use the virtual printer. On Windows 7 SP1, setup enables PDF
-folder capture instead: export a PDF from the billing software into
-`C:\ProgramData\WAPrinter\spool`, using a unique filename for each document.
-The **WhatsApp PDF folder** desktop shortcut opens it. The running app reads and
-moves the PDF automatically. Windows 7 does not gain a virtual printer; the
-billing software must support PDF export (or already have a compatible PDF
-printer installed).
+Every supported Windows gets the printer: choose **File > Print**, pick
+**WhatsApp Printer**, print as normal. What differs is the inbox driver
+underneath, because there is no Microsoft PDF driver before Windows 10:
+
+| Windows | Inbox driver | Port writes |
+| --- | --- | --- |
+| 10, 11 | Microsoft Print To PDF | `job<n>.pdf` |
+| 7 SP1, 8 | Microsoft XPS Document Writer | `job<n>.xps`, converted on capture |
+
+On Windows 7 the queue is created through the Local Port monitor and WMI, since
+the `PrintManagement` cmdlets arrived with Windows 8, and each captured XPS is
+converted to PDF by [`capture/xps.py`](src/waprinter/capture/xps.py) before
+anything else reads it. Nothing downstream knows the difference.
+
+If the **XPS Services** Windows feature has been turned off, no queue can be
+created and setup falls back to PDF folder capture: export a PDF from the
+billing software into `C:\ProgramData\WAPrinter\spool` using a unique filename
+for each document, which the **WhatsApp PDF folder** desktop shortcut opens. The
+app reads and moves it automatically. Dropping a PDF into that folder works on
+any version, printer or not.
 
 ---
 
@@ -432,7 +445,8 @@ to `logs/dry_run.jsonl`, but nothing is sent.
 | [`ui/viewmodel.py`](src/waprinter/ui/viewmodel.py) | What it says, testable without a display |
 | [`ui/notification.py`](src/waprinter/ui/notification.py) | The corner panel after a print |
 | [`update.py`](src/waprinter/update.py) | Version check, verified download, silent install |
-| [`capture/watcher.py`](src/waprinter/capture/watcher.py) | Drains the spool folder; waits for `%%EOF` before claiming a file |
+| [`capture/watcher.py`](src/waprinter/capture/watcher.py) | Drains the spool folder; waits for the format's end marker before claiming a file |
+| [`capture/xps.py`](src/waprinter/capture/xps.py) | Converts what the Windows 7 XPS queue writes into the PDF everything else reads |
 | [`extract/split.py`](src/waprinter/extract/split.py) | Splits a batch print into one job per receipt |
 | [`archive.py`](src/waprinter/archive.py) | Files a copy of every printed receipt where the office can find it |
 | [`housekeeping.py`](src/waprinter/housekeeping.py) | Prunes old working copies and caps the logs, once a day |
@@ -498,8 +512,17 @@ one manifest with separate x64 and win7-x86 downloads and checksums.
 Modern Windows CI does not certify Windows 7 compatibility. Before shipping,
 install on a clean Windows 7 SP1 VM without Python or Tesseract, then run
 `powershell -ExecutionPolicy Bypass -File installer\verify-win7.ps1` from the
-checkout. Also check: missing-loader-update rejection; exported PDF capture;
+checkout. Also check: missing-loader-update rejection; that **WhatsApp Printer**
+appears in the print dialog and a print from real billing software is captured
+and converted; exported PDF capture as the fallback;
 receipt/notice/letter routing in test mode; a scanned sample; logon startup;
 upgrade and uninstall retaining history. Repeat on x86 and x64 Windows 7.
+
+The XPS route is checked on every build by
+[`packaging/check_xps_capture.py`](packaging/check_xps_capture.py), which
+creates the port and queue, prints to them, and runs the shipped `SpoolWatcher`
+over the result. That runs on a modern runner, so it proves the APIs and the
+conversion but not the v3 driver Windows 7 ships -- which is what the printer
+check on the VM is for.
 The verification script checks startup and OCR without sending messages; the
 interactive capture and install checks still require the VM.

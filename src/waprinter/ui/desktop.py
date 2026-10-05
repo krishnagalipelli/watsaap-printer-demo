@@ -303,13 +303,34 @@ class DesktopWindow:
 
         import sys
         if sys.platform == "win32" and sys.getwindowsversion().major < 10:
+            from ..capture.spooler import PRINTER_NAME, printer_installed
             from ..config import paths
-            capture = theme.card(page, "PDF folder capture", padding=14)
-            capture.pack(fill="x", pady=(16, 0))
-            ttk.Label(capture, text=f"Export each document as a PDF into {paths().spool}.\n"
-                      "Use a new filename each time. The app reads and moves it automatically.",
-                      wraplength=650).pack(anchor="w")
-            ttk.Button(capture, text="Open PDF folder", command=lambda: webbrowser.open(paths().spool.as_uri())).pack(anchor="w", pady=(6, 0))
+            # Windows 7 gets a real queue built on the inbox XPS driver. Only
+            # when that driver has been turned off does the machine fall back
+            # to reading the spool folder, and only then is the operator asked
+            # to do anything different. None means we could not tell, so say
+            # both rather than send them to the folder for nothing.
+            has_printer = printer_installed()
+            if has_printer is not False:
+                capture = theme.card(page, "How to send", padding=14)
+                capture.pack(fill="x", pady=(16, 0))
+                text = f'Print to "{PRINTER_NAME}" from your billing software.'
+                if has_printer is None:
+                    text += ("\n\nIf it is not in the print dialog, export a PDF into "
+                             f"{paths().spool} instead.")
+                theme.autowrap(ttk.Label(capture, text=text, justify="left")).pack(fill="x")
+            else:
+                capture = theme.card(page, "PDF folder capture", padding=14)
+                capture.pack(fill="x", pady=(16, 0))
+                theme.autowrap(ttk.Label(
+                    capture,
+                    text=(f'"{PRINTER_NAME}" is not installed, so export each document '
+                          f"as a PDF into {paths().spool} instead.\nUse a new filename "
+                          "each time. The app reads and moves it automatically."),
+                    justify="left")).pack(fill="x")
+                ttk.Button(capture, text="Open PDF folder",
+                           command=lambda: webbrowser.open(paths().spool.as_uri())).pack(
+                    anchor="w", pady=(6, 0))
 
         self.activity_box = ttk.Frame(page)
         self.activity_box.pack(fill="x", pady=(30, 0))
@@ -323,7 +344,7 @@ class DesktopWindow:
         # Before the first print the table would be empty, which says
         # nothing; say how to use the printer instead.
         self.activity_empty = theme.card(self.activity_box, "Nothing printed yet", padding=18)
-        theme.autowrap(ttk.Label(self.activity_empty, text=("Export a PDF into the WhatsApp PDF folder to begin." if sys.platform == "win32" and sys.getwindowsversion().major < 10 else vm.HOW_TO_USE),
+        theme.autowrap(ttk.Label(self.activity_empty, text=vm.HOW_TO_USE,
                                  style="Hint.TLabel", justify="left")).pack(fill="x")
 
         ttk.Separator(page).pack(fill="x", pady=(36, 14))

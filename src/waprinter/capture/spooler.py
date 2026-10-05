@@ -113,3 +113,33 @@ def latest_job() -> SpoolJobInfo:
     """Best guess at the job we just captured. Empty when unavailable."""
     jobs = recent_jobs()
     return jobs[0] if jobs else SpoolJobInfo()
+
+
+def printer_installed(name: str = PRINTER_NAME) -> bool | None:
+    """Whether our queue is in the Windows print dialog.
+
+    None means the question could not be answered -- not Windows, or pywin32
+    missing -- which callers must not read as "no". It decides what the window
+    tells the operator to do, and claiming there is no printer when there is
+    one sends them to the spool folder for nothing.
+    """
+    if sys.platform != "win32":
+        return None
+
+    try:
+        import win32print  # type: ignore[import-not-found]
+    except ImportError:
+        log.debug("pywin32 unavailable; cannot tell whether %s exists", name)
+        return None
+
+    try:
+        installed = {
+            printer[2] for printer in win32print.EnumPrinters(
+                win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS,
+                None, 1,
+            )
+        }
+    except Exception:
+        log.exception("could not enumerate printers")
+        return None
+    return name in installed

@@ -1,8 +1,11 @@
 """Watch the printer port's output folder and hand finished PDFs to the pipeline.
 
-The "WhatsApp Printer" queue uses Microsoft's inbox Print-to-PDF driver bound to
-a Local Port whose name is a file path, so Windows writes the job straight to
-disk with no Save-As dialog and no third-party driver. See installer/provision.ps1.
+The "WhatsApp Printer" queue uses an inbox Windows driver bound to a Local Port
+whose name is a file path, so Windows writes the job straight to disk with no
+Save-As dialog and no third-party driver. Which driver depends on the version:
+Print-to-PDF on Windows 10 and later, and the XPS Document Writer on Windows 7,
+which has no PDF driver. An XPS job is converted on the way in -- see xps.py --
+so everything past this module reads PDFs either way. See installer/provision.ps1.
 
 Two consequences shape this module:
 
@@ -29,6 +32,8 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+from . import xps
+
 log = logging.getLogger(__name__)
 
 POLL_INTERVAL = 0.5
@@ -36,10 +41,18 @@ POLL_INTERVAL = 0.5
 SETTLE_SECONDS = 1.0
 EOF_MARKER = b"%%EOF"
 EOF_TAIL_BYTES = 2048
+# What a port may write. The driver decides which: PDF on Windows 10 and later,
+# XPS on Windows 7.
+CAPTURED_SUFFIXES = {".pdf"} | xps.SUFFIXES
 
 
 def is_complete(path: Path) -> bool:
-    """True when the spooler has finished writing this PDF."""
+    """True when the spooler has finished writing this job.
+
+    The end marker is per format, and getting it wrong is not harmless: an XPS
+    checked for %%EOF would never look finished and the print would sit in the
+    spool folder for ever.
+    """
     try:
         size = path.stat().st_size
     except OSError:
@@ -50,10 +63,14 @@ def is_complete(path: Path) -> bool:
     try:
         with path.open("rb") as fh:
             fh.seek(max(0, size - EOF_TAIL_BYTES))
-            return EOF_MARKER in fh.read()
+            tail = fh.read()
     except OSError:
         # Still locked by the spooler.
         return False
+
+    if xps.is_xps(path):
+        return xps.looks_finished(tail)
+    return EOF_MARKER in tail
 
 
 def claim(path: Path, inbox: Path) -> Path | None:
@@ -67,7 +84,8 @@ def claim(path: Path, inbox: Path) -> Path | None:
         return None
 
     inbox.mkdir(parents=True, exist_ok=True)
-    target = inbox / f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.pdf"
+    target = inbox / (f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+                      f"{path.suffix.lower()}")
     try:
         os.replace(path, target)
     except OSError as exc:
@@ -127,7 +145,8 @@ class SpoolWatcher:
         captured: list[Path] = []
         now = time.monotonic()
 
-        for path in sorted(self.spool.glob("*.pdf")):
+        for path in sorted(p for p in self.spool.glob("*")
+                           if p.suffix.lower() in CAPTURED_SUFFIXES):
             try:
                 size = path.stat().st_size
             except OSError:
@@ -148,6 +167,14 @@ class SpoolWatcher:
                 continue
 
             self._sizes.pop(path, None)
+            if xps.is_xps(claimed):
+                try:
+                    claimed = xps.to_pdf(claimed)
+                except Exception:
+                    # Leave it in the inbox to be looked at. A print that
+                    # cannot be converted must not vanish without trace.
+                    log.exception("could not convert %s", claimed)
+                    continue
             captured.append(claimed)
             log.info("captured %s", claimed.name)
             try:

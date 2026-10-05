@@ -64,6 +64,14 @@ jobs:
           python -m pip install -e ".[dev,windows]"
           python -m pytest -q
 
+      # The Windows 7 queue is built on the XPS driver and converted on capture.
+      # No Windows 7 runner exists, so this proves the three moving parts here,
+      # against the shipped watcher, rather than at a counter.
+      - name: Check the XPS capture route end to end
+        run: |
+          python -m pip install -e ".[dev,windows]"
+          python packaging/check_xps_capture.py
+
       - name: Build installer
         shell: pwsh
         run: |

@@ -433,3 +433,60 @@ def build_removal_letter(spec: RemovalLetterSpec, out_path: Path) -> Path:
     text(LEFT, A4.height - 60, f"For {spec.company}")
 
     return _save(doc, page, out_path, spec.raster, spec.raster_dpi)
+
+
+# -- XPS packages ------------------------------------------------------------
+#
+# The Windows 7 queue is built on the inbox XPS Document Writer, so the spool
+# folder there fills with .xps rather than .pdf. These build a valid, minimal
+# package: enough to exercise completeness detection, claiming and conversion.
+# Fidelity against what the real driver emits is covered by the CI probe in
+# .github/probe_xps.py, which converts a genuine spooler-written XPS.
+
+_XPS_CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="fdseq" ContentType="application/vnd.ms-package.xps-fixeddocumentsequence+xml"/>
+<Default Extension="fdoc" ContentType="application/vnd.ms-package.xps-fixeddocument+xml"/>
+<Default Extension="fpage" ContentType="application/vnd.ms-package.xps-fixedpage+xml"/>
+</Types>"""
+
+_XPS_RELS = """<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Target="/FixedDocumentSequence.fdseq"
+ Type="http://schemas.microsoft.com/xps/2005/06/fixedrepresentation"/>
+</Relationships>"""
+
+_XPS_FDSEQ = """<FixedDocumentSequence xmlns="http://schemas.microsoft.com/xps/2005/06">
+<DocumentReference Source="/Documents/1/FixedDocument.fdoc"/></FixedDocumentSequence>"""
+
+_XPS_FDOC = """<FixedDocument xmlns="http://schemas.microsoft.com/xps/2005/06">
+<PageContent Source="/Documents/1/Pages/1.fpage"/></FixedDocument>"""
+
+_XPS_PAGE = """<FixedPage Width="816" Height="1056" xml:lang="en-US"
+ xmlns="http://schemas.microsoft.com/xps/2005/06">
+<Path Fill="#FF000000"><Path.Data><PathGeometry>
+<PathFigure StartPoint="96,96" IsClosed="true">
+<PolyLineSegment Points="300,96 300,200 96,200"/></PathFigure>
+</PathGeometry></Path.Data></Path>
+</FixedPage>"""
+
+
+def build_xps(out_path: Path, pages: int = 1) -> Path:
+    """Write a readable XPS package, as the Windows 7 printer port would."""
+    import zipfile
+
+    refs = "".join(
+        '<PageContent Source="/Documents/1/Pages/{}.fpage"/>'.format(n + 1)
+        for n in range(pages)
+    )
+    fdoc = ('<FixedDocument xmlns="http://schemas.microsoft.com/xps/2005/06">'
+            + refs + "</FixedDocument>")
+    with zipfile.ZipFile(out_path, "w") as package:
+        package.writestr("[Content_Types].xml", _XPS_CONTENT_TYPES)
+        package.writestr("_rels/.rels", _XPS_RELS)
+        package.writestr("FixedDocumentSequence.fdseq", _XPS_FDSEQ)
+        package.writestr("Documents/1/FixedDocument.fdoc", fdoc)
+        for n in range(pages):
+            package.writestr("Documents/1/Pages/{}.fpage".format(n + 1), _XPS_PAGE)
+    return out_path

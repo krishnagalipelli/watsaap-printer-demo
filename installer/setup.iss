@@ -137,7 +137,9 @@ Name: "{commondesktop}\{#AppName}"; Filename: "{app}\waprinter-agent.exe"; \
 Name: "{commonstartup}\{#AppName}"; Filename: "{app}\waprinter-agent.exe"; \
     Parameters: "--hidden"
 
-Name: "{commondesktop}\WhatsApp PDF folder"; Filename: "{#DataDir}\spool"; Check: UseFolderCapture
+; Kept on Windows 7 as the fallback for a machine with XPS Services turned
+; off, where provision.ps1 cannot create a queue.
+Name: "{commondesktop}\WhatsApp PDF folder"; Filename: "{#DataDir}\spool"; Check: IsLegacyWindows
 
 [Tasks]
 Name: "desktopicon"; Description: "Put a shortcut on the desktop"; \
@@ -176,7 +178,7 @@ function GetModuleHandle(ModuleName: string): LongWord;
 function GetProcAddress(Module: LongWord; ProcName: AnsiString): LongWord;
   external 'GetProcAddress@kernel32.dll stdcall';
 
-function UseFolderCapture: Boolean;
+function IsLegacyWindows: Boolean;
 begin
   Result := GetWindowsVersion < $0A000000;
 end;
@@ -193,8 +195,8 @@ end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  if (CurPageID = wpFinished) and UseFolderCapture then
-    WizardForm.FinishedLabel.Caption := 'PDF folder capture is ready. Export PDFs from your billing software into {#DataDir}\spool, using a new filename for each document. The desktop shortcut opens this folder. The app reads and moves each PDF automatically. Open Setup > Try it to check a sample before enabling live sends. This mode does not add a printer to Windows.';
+  if (CurPageID = wpFinished) and IsLegacyWindows then
+    WizardForm.FinishedLabel.Caption := 'The "WhatsApp Printer" queue has been added. In your billing software choose File > Print and pick it, and the receipt is read and sent as normal. On this version of Windows the queue is built on the Microsoft XPS Document Writer, because there is no inbox PDF driver before Windows 10; the app converts each job as it arrives, so there is nothing different to do. If the printer is missing from the print dialog, turn on the "XPS Services" Windows feature and run setup again — until then, exporting a PDF into the folder on the desktop shortcut still works. Open Setup > Try it to check a sample before enabling live sends.';
 end;
 
 procedure InitializeWizard;

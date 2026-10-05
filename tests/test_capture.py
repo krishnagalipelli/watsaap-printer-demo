@@ -7,8 +7,11 @@ losing a job when two prints land back to back.
 
 from __future__ import annotations
 
-from invoice_factory import InvoiceSpec, build
+import pytest
 
+from invoice_factory import InvoiceSpec, build, build_xps
+
+from waprinter.capture import xps
 from waprinter.capture.watcher import SpoolWatcher, claim, is_complete
 
 
@@ -137,3 +140,86 @@ class TestWatcher:
         pdf.unlink()
         watcher.drain_once()
         assert not watcher._sizes
+
+
+class TestWindows7CapturesXps:
+    """Windows 7 has no PDF driver, so its port writes XPS instead.
+
+    Everything past the watcher reads PDFs, so the conversion happens here or
+    not at all -- see waprinter/capture/xps.py.
+    """
+
+    def test_a_finished_xps_is_complete(self, tmp_path):
+        assert is_complete(build_xps(tmp_path / "job1.xps"))
+
+    def test_a_half_written_xps_is_not_complete(self, tmp_path):
+        # A ZIP is unreadable until its central directory lands, which the
+        # spooler writes last. Checking for %%EOF would hold the job for ever.
+        whole = build_xps(tmp_path / "whole.xps").read_bytes()
+        partial = tmp_path / "job1.xps"
+        partial.write_bytes(whole[: len(whole) // 2])
+        assert not is_complete(partial)
+
+    def test_claiming_keeps_the_suffix(self, tmp_path):
+        spool, inbox = make_spool(tmp_path)
+        claimed = claim(build_xps(spool / "job1.xps"), inbox)
+        assert claimed is not None and claimed.suffix == ".xps"
+
+    def test_an_xps_print_is_handed_on_as_a_pdf(self, tmp_path):
+        spool, inbox = make_spool(tmp_path)
+        build_xps(spool / "job1.xps")
+        seen = []
+        watcher = SpoolWatcher(spool, inbox, seen.append, settle_seconds=0)
+        watcher.drain_once()
+        captured = watcher.drain_once()
+
+        assert [p.suffix for p in captured] == [".pdf"]
+        assert seen == captured
+        assert captured[0].exists()
+        assert not list(spool.glob("*.xps")), "the spool file was not drained"
+        assert not list(inbox.glob("*.xps")), "the xps was left behind"
+
+    def test_pdf_capture_still_works_alongside_it(self, tmp_path):
+        spool, inbox = make_spool(tmp_path)
+        build(InvoiceSpec(), spool / "job1.pdf")
+        build_xps(spool / "job2.xps")
+        watcher = SpoolWatcher(spool, inbox, lambda _p: None, settle_seconds=0)
+        watcher.drain_once()
+        captured = watcher.drain_once()
+        assert sorted(p.suffix for p in captured) == [".pdf", ".pdf"]
+
+    def test_an_unconvertible_print_is_kept_not_dropped(self, tmp_path):
+        spool, inbox = make_spool(tmp_path)
+        # Right extension, not a ZIP: whatever this is, it must not vanish.
+        (spool / "job1.xps").write_bytes(b"rubbish PK\x05\x06")
+        seen = []
+        watcher = SpoolWatcher(spool, inbox, seen.append, settle_seconds=0)
+        watcher.drain_once()
+        captured = watcher.drain_once()
+
+        assert captured == [] and seen == []
+        assert list(inbox.glob("*.xps")), "the unreadable print was lost"
+
+
+class TestXpsConversion:
+    def test_converts_every_page(self, tmp_path):
+        import pymupdf
+
+        pdf = xps.to_pdf(build_xps(tmp_path / "job.xps", pages=3))
+        doc = pymupdf.open(str(pdf))
+        try:
+            assert doc.is_pdf and doc.page_count == 3
+        finally:
+            doc.close()
+
+    def test_removes_the_xps_it_converted(self, tmp_path):
+        source = build_xps(tmp_path / "job.xps")
+        xps.to_pdf(source)
+        assert not source.exists()
+
+    def test_refuses_something_that_is_not_an_xps(self, tmp_path):
+        source = tmp_path / "job.xps"
+        source.write_bytes(b"not a package")
+        with pytest.raises(ValueError):
+            xps.to_pdf(source)
+        assert source.exists(), "the original must be left to look at"
