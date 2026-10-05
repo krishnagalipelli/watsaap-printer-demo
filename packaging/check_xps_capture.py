@@ -18,15 +18,23 @@ reads, and the pinned pymupdf is exercised by the Windows 7 build job.
 """
 
 import ctypes
+import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from ctypes import wintypes
 from pathlib import Path
 
 PRINTER = "WAPrinter XPS check"
 SERVER_ACCESS_ADMINISTER = 0x01
+# A fixed short path directly off the root, as the installed product uses
+# (C:\ProgramData\WAPrinter\spool). The Local Port monitor rejects a path
+# under a user profile with ERROR_BAD_PATHNAME, so a temp directory will not
+# do -- and a port is machine-wide anyway, so there is nothing to isolate.
+ROOT = Path(r"C:\waprinter-xps-check")
+# Statuses worth reading rather than looking up.
+STATUS_NAMES = {5: "ERROR_ACCESS_DENIED", 87: "ERROR_INVALID_PARAMETER",
+                161: "ERROR_BAD_PATHNAME", 183: "ERROR_ALREADY_EXISTS"}
 
 
 class PrinterDefaults(ctypes.Structure):
@@ -64,7 +72,9 @@ def local_port(action, port):
                           None, 0, ctypes.byref(needed), ctypes.byref(status))
         # 183 is ERROR_ALREADY_EXISTS, and a missing port on delete is fine too.
         if not ok or status.value not in (0, 183):
-            raise OSError("{} failed with status {}".format(action, status.value))
+            raise OSError("{} failed with status {} ({})".format(
+                action, status.value,
+                STATUS_NAMES.get(status.value, "see winerror.h")))
     finally:
         dll.ClosePrinter(handle)
 
@@ -107,10 +117,12 @@ def main():
     sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
     from waprinter.capture.watcher import SpoolWatcher
 
-    root = Path(tempfile.mkdtemp(prefix="waxps-"))
+    root = ROOT
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
     spool, inbox = root / "spool", root / "inbox"
-    spool.mkdir()
-    inbox.mkdir()
+    spool.mkdir(parents=True)
+    inbox.mkdir(parents=True)
     port = spool / "job1.xps"
 
     driver = xps_driver()
@@ -170,6 +182,7 @@ def main():
             local_port("DeletePort", port)
         except Exception as exc:
             print("  (could not remove the port: {})".format(exc))
+        shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":
