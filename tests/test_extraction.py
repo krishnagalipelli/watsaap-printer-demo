@@ -117,3 +117,46 @@ class TestRasterPrint:
         f = fields_for(make_invoice, InvoiceSpec(raster=True))
         assert f.has_text_layer is False
         assert f.candidates == []
+
+
+class TestDriverPunctuationIsFoldedBack:
+    """The Windows 7 queue renders plain ASCII as typographic punctuation.
+
+    There is no inbox PDF driver before Windows 10, so that queue is built on
+    the XPS Document Writer, whose font substitutes for plain ASCII. Printing
+    an invoice through it on a Windows runner brought the number back as
+    "INV<something>2291" rather than "INV-2291". Unfolded, the same document
+    would extract differently depending on which Windows printed it.
+
+    There is no page-level test here on purpose: PyMuPDF's base-14 fonts
+    cannot carry these characters -- insert_text turns every one of them into
+    U+00B7 -- so a synthetic PDF would prove nothing about a real driver. The
+    faithful check is packaging/check_xps_capture.py, which prints through the
+    actual queue on a Windows runner and reports what it sees.
+    """
+
+    def test_a_non_breaking_hyphen_reads_as_a_hyphen(self):
+        from waprinter.extract.pdf_text import fold_punctuation
+
+        assert fold_punctuation("INV\u20112291") == "INV-2291"
+
+    def test_every_dash_the_drivers_use_folds(self):
+        from waprinter.extract.pdf_text import fold_punctuation
+
+        for dash in "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe63\uff0d":
+            assert fold_punctuation("INV{}2291".format(dash)) == "INV-2291"
+
+    def test_plain_ascii_is_untouched(self):
+        from waprinter.extract.pdf_text import fold_punctuation
+
+        text = "INV-2291 Mobile: 9876543210 Total: 18,450.00"
+        assert fold_punctuation(text) == text
+
+    def test_reading_a_page_applies_the_fold(self):
+        """The fold has to be in the path read() takes, not just available."""
+        from waprinter.extract.pdf_text import _words_from
+
+        raw = [(0.0, 0.0, 10.0, 10.0, "INV\u20112291", 0, 0, 0)]
+        grouped = _words_from(raw, page_number=1, from_ocr=False)
+        words = [w for ws in grouped.values() for w in ws]
+        assert [w.text for w in words] == ["INV-2291"]

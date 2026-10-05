@@ -213,11 +213,48 @@ class Document:
 MIN_WORDS_FOR_TEXT_LAYER = 5
 
 
+# Typographic punctuation a print driver's font substitutes for plain ASCII,
+# mapped back to what an invoice was actually typed with.
+#
+# This is not cosmetic. The Windows 7 queue is built on the XPS Document
+# Writer -- there is no inbox PDF driver before Windows 10 -- and that path
+# renders a plain "-" as U+2011 NON-BREAKING HYPHEN. An invoice number read as
+# "INV\u20112291" matches nothing looking for "INV-2291", so the same document
+# printed on Windows 7 and on Windows 10 would extract differently. Folding
+# here means nothing downstream has to know which driver produced the page.
+#
+# MuPDF already breaks words on the space characters, so these only matter for
+# runs of text read as a whole; the dashes are what actually survive into a
+# word and corrupt a field.
+_PUNCTUATION = {
+    # Dashes and minus signs.
+    "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-",
+    "\u2014": "-", "\u2015": "-", "\u2212": "-", "\ufe63": "-",
+    "\uff0d": "-",
+    # Spaces.
+    "\u00a0": " ", "\u2007": " ", "\u2009": " ", "\u200a": " ",
+    "\u202f": " ",
+    # Quotes and apostrophes.
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u2032": "'",
+    "\u2033": '"',
+    # Zero-width characters, which are not punctuation so much as litter.
+    "\u200b": "", "\u200c": "", "\u200d": "", "\ufeff": "",
+}
+_FOLD = {ord(k): v for k, v in _PUNCTUATION.items()}
+
+
+def fold_punctuation(text: str) -> str:
+    """Replace a driver's typographic punctuation with the ASCII equivalent."""
+    return text.translate(_FOLD)
+
+
 def _words_from(
     raw: list, page_number: int, from_ocr: bool
 ) -> dict[tuple[int, int], list[Word]]:
     grouped: dict[tuple[int, int], list[Word]] = {}
     for x0, y0, x1, y1, text, block, line, _word_no in raw:
+        text = fold_punctuation(text)
         if not text.strip():
             continue
         w = Word(

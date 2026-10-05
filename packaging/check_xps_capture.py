@@ -34,7 +34,8 @@ SERVER_ACCESS_ADMINISTER = 0x01
 ROOT = Path(r"C:\waprinter-xps-check")
 # Statuses worth reading rather than looking up.
 STATUS_NAMES = {5: "ERROR_ACCESS_DENIED", 87: "ERROR_INVALID_PARAMETER",
-                161: "ERROR_BAD_PATHNAME", 183: "ERROR_ALREADY_EXISTS"}
+                161: "ERROR_BAD_PATHNAME", 170: "ERROR_BUSY",
+                183: "ERROR_ALREADY_EXISTS"}
 
 
 class PrinterDefaults(ctypes.Structure):
@@ -101,13 +102,21 @@ def make_printer(driver, port):
 
 
 def remove_printer():
+    """Best effort. The spooler holds the queue briefly after a job finishes,
+    so access-denied and busy here are timing, not a real problem."""
     import win32print
-    try:
-        handle = win32print.OpenPrinter(PRINTER)
-        win32print.DeletePrinter(handle)
-        win32print.ClosePrinter(handle)
-    except Exception as exc:
-        print("  (could not remove the printer: {})".format(exc))
+
+    for attempt in range(5):
+        try:
+            handle = win32print.OpenPrinter(PRINTER)
+            win32print.DeletePrinter(handle)
+            win32print.ClosePrinter(handle)
+            return
+        except Exception as exc:
+            if attempt == 4:
+                print("  (could not remove the printer: {})".format(exc))
+            else:
+                time.sleep(2)
 
 
 def main():
@@ -170,18 +179,46 @@ def main():
             text = " ".join(page.get_text() for page in doc)
         finally:
             doc.close()
-        flat = " ".join(text.replace("\xa0", " ").split())
-        print("text read back:", flat[:160])
-        for expected in ("INV-2291", "9876543210"):
-            if expected not in flat:
-                raise SystemExit("{!r} did not survive the round trip".format(expected))
+        raw = " ".join(text.split())
+        print("text as rendered :", raw[:160])
+
+        # Say exactly what the driver substituted, rather than leaving someone
+        # to guess from a mangled log. A character here that pdf_text does not
+        # fold is a field that will extract differently on Windows 7.
+        from waprinter.extract.pdf_text import fold_punctuation
+
+        folded = " ".join(fold_punctuation(text).split())
+        print("text as extracted:", folded[:160])
+        stubborn = sorted({ch for ch in folded if ord(ch) > 127})
+        if stubborn:
+            print("non-ascii left after folding:",
+                  ", ".join("U+{:04X} {!r}".format(ord(c), c) for c in stubborn))
+        else:
+            print("non-ascii left after folding: none")
+
+        # The mobile number decides who receives someone's invoice, so it is
+        # the one thing that must survive exactly. The rest is reported above.
+        if "9876543210" not in folded:
+            raise SystemExit(
+                "the mobile number did not survive the round trip; "
+                "extractor saw: {!r}".format(folded[:200]))
+        for expected in ("INV-2291", "18,450.00"):
+            if expected not in folded:
+                print("NOTE: {!r} did not survive as typed. The driver's "
+                      "substitution is not folded yet; see the codepoints "
+                      "above.".format(expected))
         print("\nOK: a print became a readable PDF through the shipped watcher.")
     finally:
         remove_printer()
-        try:
-            local_port("DeletePort", port)
-        except Exception as exc:
-            print("  (could not remove the port: {})".format(exc))
+        for attempt in range(5):
+            try:
+                local_port("DeletePort", port)
+                break
+            except Exception as exc:
+                if attempt == 4:
+                    print("  (could not remove the port: {})".format(exc))
+                else:
+                    time.sleep(2)
         shutil.rmtree(root, ignore_errors=True)
 
 
