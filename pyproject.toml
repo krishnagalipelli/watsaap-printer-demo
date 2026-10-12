@@ -1,6 +1,6 @@
 [project]
 name = "waprinter"
-version = "0.1.7"
+version = "2.0.0"
 description = "Virtual Windows printer that sends printed invoices to customers over WhatsApp"
 # 3.8 because of the Windows 7 counters: it is the last Python that starts on
 # that OS, and they are frozen against it. Nothing here needs more -- see
