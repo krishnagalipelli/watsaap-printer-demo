@@ -16,6 +16,10 @@ on:
         description: "Build without OCR (smaller, cannot read scanned invoices)"
         type: boolean
         default: false
+      skip_win7:
+        description: "Build only the Windows 10+ installer (a test build that no Windows 7 counter needs)"
+        type: boolean
+        default: false
 
 # Read-only by default. Only the job that attaches the installer to a release
 # gets to write, and only to contents. Third-party actions are pinned to a
@@ -96,6 +100,9 @@ jobs:
           retention-days: 30
 
   build-win7:
+    # Only a manual run can leave this out. A push, a pull request and a tag
+    # have no inputs, so they always build both -- and a release needs both.
+    if: ${{ !inputs.skip_win7 }}
     runs-on: windows-2022
     # The layout tests map a real window and call update(). Tk fighting its own
     # geometry manager is a documented way to hang rather than fail, and a
