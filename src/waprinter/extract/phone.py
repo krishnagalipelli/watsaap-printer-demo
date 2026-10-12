@@ -73,6 +73,11 @@ JOINABLE_SEP = re.compile(r"^[\s\-]?$")
 # number that ends at a row boundary.
 STICKY_CHARS = frozenset("/.,")
 
+# "048669201016 dated 06/10/2026": a number followed by the date it was issued
+# is a transaction or cheque number. Its label is printed on the row above, so
+# the label lists never see it, and what follows is the only evidence.
+DATED_AFTER = re.compile(r"^\s*dated\b", re.IGNORECASE)
+
 
 def _digit_chunks(text: str) -> list[tuple[int, int, str]]:
     """Maximal runs of digits as (start, end, digits)."""
@@ -274,6 +279,8 @@ def find_candidates(
                 label, is_phone_label = _nearest_label(text[:start], profile)
                 if label and not is_phone_label:
                     continue  # anchored to GSTIN / Invoice No / A/c No / ...
+                if not is_phone_label and DATED_AFTER.match(text[end:]):
+                    continue  # a transaction number and its date
 
                 bbox = row.bbox_of(start, end)
                 if bbox is None:

@@ -84,20 +84,43 @@ def _amount_words(doc: pdf_text.Document, profile: DocumentProfile) -> str | Non
     return None
 
 
+# Modes that are initials, and so are not written "Upi" in a message.
+_MODE_INITIALS = {"upi", "dd", "neft", "rtgs", "imps"}
+
+# The date a payment was made online, printed beside its transaction number:
+# "048669201016 dated 06/10/2026". Not the receipt's date, and "dated" is a
+# date label, so it has to be taken off the row before dates are read.
+_TRANSACTION_DATED = re.compile(r"\b\d{6,}\s+dated\s+\S+", re.IGNORECASE)
+
+
+def _mode_name(word: str) -> str:
+    """A payment mode as a member should read it: "Cash", but "UPI"."""
+    word = word.strip()
+    return word.upper() if word.lower() in _MODE_INITIALS else word.title()
+
+
 def _payment_mode(doc: pdf_text.Document, profile: DocumentProfile) -> str | None:
     """How the customer paid.
 
     A labelled value first ("Mode of Payment  Cash"), then the bare word alone
-    on a row — which is all a pre-printed form leaves in the text layer.
+    on a row — which is all a pre-printed form leaves in the text layer — and
+    last "Through ONLINE-UPI", which is how an online payment is printed
+    under its transaction number.
     """
     for row in doc.rows:
         m = profile.payment_mode_labelled_re.search(row.text)
         if m:
-            return m.group(1).strip().title()
+            return _mode_name(m.group(1))
     for row in doc.rows:
         m = profile.payment_mode_bare_re.match(row.text)
         if m:
-            return m.group(1).strip().title()
+            return _mode_name(m.group(1))
+    for row in doc.rows:
+        m = profile.payment_mode_through_re.search(row.text)
+        if m:
+            # "ONLINE-UPI": the last word is the method, the first only says
+            # it was not paid at the counter.
+            return _mode_name(re.split(r"\s*[-/]\s*", m.group(1))[-1])
     return None
 
 
@@ -130,16 +153,19 @@ def _document_date(doc: pdf_text.Document, profile: DocumentProfile) -> str | No
     A chit receipt prints "13-Aug-26" halfway down and a street address
     ("H.No. 2-7-384") near the top, and row-major order picked the address.
     """
+    # A transaction's own date is never the document's. See _TRANSACTION_DATED.
+    rows = [_TRANSACTION_DATED.sub(" ", row.text) for row in doc.rows]
+
     for pattern in profile.date_res:
-        for row in doc.rows:
-            m = pattern.search(row.text)
+        for text in rows:
+            m = pattern.search(text)
             if m:
                 return m.group(1)
 
     # No "Date:" label anywhere on the page.
     for pattern in profile.bare_date_res:
-        for row in doc.rows:
-            m = pattern.search(row.text)
+        for text in rows:
+            m = pattern.search(text)
             if m:
                 return m.group(1)
     return None

@@ -75,6 +75,49 @@ class TestChitFundReceipt:
         assert fields.used_ocr is False
 
 
+def upi_cell(number: str = "048669201016", date: str = "06/10/2026") -> str:
+    """The payment cell of a receipt paid online, as the branch prints it."""
+    return f"Transaction Number\n{number}   dated {date}\nThrough ONLINE-UPI"
+
+
+class TestPaidOnline:
+    """A branch taking UPI prints three lines where a cash receipt prints one
+    word: the transaction number, the date it was paid, and how. None of it is
+    labelled the way the cash word is, and each line used to go wrong on its
+    own -- no payment mode, the wrong date, and a number that can look like a
+    member's mobile."""
+
+    def test_the_mode_is_read_from_the_through_line(self, receipt):
+        fields = extract_fields(receipt(ChitReceiptSpec(payment_mode=upi_cell())))
+        assert fields.payment_mode == "UPI"
+
+    def test_cash_is_still_cash(self, receipt):
+        assert extract_fields(receipt()).payment_mode == "Cash"
+
+    def test_the_receipt_keeps_its_own_date(self, receipt):
+        """Paid on the 5th and receipted on the 6th is the 6th."""
+        spec = ChitReceiptSpec(
+            receipt_date="06-Oct-26", payment_mode=upi_cell(date="05/10/2026")
+        )
+        assert extract_fields(receipt(spec)).invoice_date == "06-Oct-26"
+
+    def test_the_members_mobile_is_still_the_recipient(self, receipt):
+        fields = extract_fields(receipt(ChitReceiptSpec(payment_mode=upi_cell())))
+        assert fields.best.e164 == "+919000012345"
+
+    @pytest.mark.parametrize("cell", [
+        upi_cell(number="919876543210"),
+        # The label on the same row as the number, as some text layers have it.
+        "Transaction Number 919876543210\nThrough ONLINE-UPI",
+    ])
+    def test_a_transaction_number_is_never_a_recipient(self, receipt, cell):
+        """Twelve digits beginning 91 is a valid mobile with its country code,
+        and with no mobile on the receipt it was the best candidate on it."""
+        spec = ChitReceiptSpec(member_phone=None, payment_mode=cell)
+        numbers = [c.e164 for c in extract_fields(receipt(spec)).candidates]
+        assert "+919876543210" not in numbers
+
+
 class TestOneProfileReadsBothLayouts:
     """A single default profile must handle every client seen so far."""
 

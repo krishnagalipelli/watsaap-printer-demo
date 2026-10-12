@@ -146,7 +146,11 @@ def build_chit_receipt(spec: ChitReceiptSpec, out_path: Path) -> Path:
         text(LEFT + 320, y, right)
         y += 18
 
-    text(LEFT, y + 10, spec.payment_mode)
+    # An online payment fills the same cell with three short lines -- the
+    # transaction number, its date, and "Through ONLINE-UPI" -- where a cash
+    # receipt has one word.
+    for offset, line in enumerate(spec.payment_mode.split("\n")):
+        text(LEFT, y + 10 + offset * 8, line, size=7 if offset or "\n" in spec.payment_mode else 9)
     text(LEFT + 200, y + 28, spec.amount)
     text(LEFT, y + 46, spec.instalment)
 

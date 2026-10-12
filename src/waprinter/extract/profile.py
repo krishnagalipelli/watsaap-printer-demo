@@ -48,6 +48,9 @@ NOT_PHONE_LABELS = [
     "order", "purchase", "pin", "pincode", "cin", "tin", "udyam", "msme",
     "date", "dated", "amount", "qty", "quantity", "rate", "cheque", "check",
     "utr", "ref", "reference", "voucher", "document", "irn", "ack",
+    # An online payment prints its transaction number where a cash receipt
+    # prints one word, and a twelve-digit one can begin "91".
+    "transaction", "txn", "upi", "rrn",
     "state code", "licence", "license", "dl", "fssai", "serial", "s.no",
     # Chit fund specific: these sit next to numbers on a receipt.
     "chit", "group", "ticket", "instal", "instalment", "installment",
@@ -445,6 +448,15 @@ class DocumentProfile:
         )
         self.payment_mode_bare_re = re.compile(
             rf"^\s*({_alt(self.payment_modes)})\s*$", re.IGNORECASE
+        )
+        # An online payment is not labelled at all on a chit receipt: the cell
+        # reads "Transaction Number / 048669201016 dated 06/10/2026 / Through
+        # ONLINE-UPI", so the mode is whatever follows "Through". It can be
+        # two of the words joined, and the last is the one that says how.
+        self.payment_mode_through_re = re.compile(
+            rf"\bthrough\s+((?:{_alt(self.payment_modes)})"
+            rf"(?:\s*[-/]\s*(?:{_alt(self.payment_modes)}))*)\b",
+            re.IGNORECASE,
         )
         self.not_a_name_re = re.compile(
             rf"^\s*(?:{_alt(self.not_a_name_prefixes)})\b", re.IGNORECASE
