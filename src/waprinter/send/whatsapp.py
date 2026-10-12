@@ -2,11 +2,15 @@
 
 Two calls per invoice:
 
-1. Upload the PDF to /{phone_number_id}/media, which returns a media id. Using
-   the media endpoint rather than a public link means the PDF never has to be
-   hosted anywhere reachable from the internet — worth it for documents that
-   carry a customer's billing details.
+1. Upload the attachment to /{phone_number_id}/media, which returns a media
+   id. Using the media endpoint rather than a public link means the document
+   never has to be hosted anywhere reachable from the internet — worth it for
+   paperwork that carries a customer's billing details.
 2. Send a template message whose header component references that media id.
+
+The attachment is the captured PDF, or a JPEG rendered from it when this kind
+of document is sent as an image — see send/attachment.py, which also explains
+why the template's header decides which of the two is possible.
 
 Media ids expire (Meta documents 30 days), which does not matter here because
 the id is used seconds after it is minted.
@@ -21,6 +25,7 @@ from pathlib import Path
 import httpx
 
 from ..models import SendResult
+from .attachment import IMAGE, MEDIA_TYPE, PDF, ConversionError, prepared
 from .templates import RenderedMessage
 
 log = logging.getLogger(__name__)
@@ -115,18 +120,24 @@ class WhatsAppCloudSender:
         pdf_path: Path,
         message: RenderedMessage,
     ) -> SendResult:
-        if not message.template.usable:
-            return SendResult(
-                ok=False,
-                error=(
-                    f"Template '{message.template.name}' is "
-                    f"{message.template.status}, not approved for sending."
-                ),
-                retryable=False,
-            )
+        refusal = _cannot_carry(message)
+        if refusal:
+            return SendResult(ok=False, error=refusal, retryable=False)
 
         try:
-            media_id = self._upload_with_retries(pdf_path, message.filename)
+            # The conversion happens once, outside the retry loop: a dropped
+            # upload is a reason to post the same bytes again, not to render
+            # the pages a second time. The temporary JPEG lives only as long
+            # as this block.
+            with prepared(pdf_path, message.attachment, message.filename) as (
+                upload_path,
+                media_type,
+            ):
+                media_id = self._upload_with_retries(
+                    upload_path, message.filename, media_type
+                )
+        except ConversionError as exc:
+            return SendResult(ok=False, error=str(exc), retryable=False)
         except _ApiError as exc:
             return SendResult(ok=False, error=f"Upload failed: {exc}", retryable=exc.retryable)
         except httpx.HTTPError as exc:
@@ -150,12 +161,14 @@ class WhatsAppCloudSender:
 
         return SendResult(ok=True, wamid=wamid)
 
-    def _upload_with_retries(self, pdf_path: Path, filename: str) -> str:
+    def _upload_with_retries(
+        self, path: Path, filename: str, media_type: str = MEDIA_TYPE[PDF]
+    ) -> str:
         """Upload, retrying the failures that a retry can actually fix."""
         last: Exception | None = None
         for attempt in range(UPLOAD_ATTEMPTS):
             try:
-                return self._upload(pdf_path, filename)
+                return self._upload(path, filename, media_type)
             except httpx.HTTPError as exc:
                 last = exc
                 # A transport-level failure is the symptom of a bad route, not
@@ -182,13 +195,15 @@ class WhatsAppCloudSender:
 
     # -- internals ---------------------------------------------------------
 
-    def _upload(self, pdf_path: Path, filename: str) -> str:
-        with pdf_path.open("rb") as fh:
+    def _upload(
+        self, path: Path, filename: str, media_type: str = MEDIA_TYPE[PDF]
+    ) -> str:
+        with path.open("rb") as fh:
             response = self._client.post(
                 f"{self._base}/{self.phone_number_id}/media",
                 headers=self._auth,
-                data={"messaging_product": "whatsapp", "type": "application/pdf"},
-                files={"file": (filename, fh, "application/pdf")},
+                data={"messaging_product": "whatsapp", "type": media_type},
+                files={"file": (filename, fh, media_type)},
             )
         payload = _parse(response)
         media_id = payload.get("id")
@@ -202,16 +217,17 @@ class WhatsAppCloudSender:
         media_id: str,
         message: RenderedMessage,
     ) -> str:
-        components: list[dict] = [
-            {
-                "type": "header",
-                "parameters": [
-                    {
-                        "type": "document",
-                        "document": {"id": media_id, "filename": message.filename},
-                    }
-                ],
+        if message.attachment == IMAGE:
+            # Meta's image header takes the media id alone. There is no
+            # filename field on it, so nothing is sent that would be ignored.
+            header_parameter = {"type": "image", "image": {"id": media_id}}
+        else:
+            header_parameter = {
+                "type": "document",
+                "document": {"id": media_id, "filename": message.filename},
             }
+        components: list[dict] = [
+            {"type": "header", "parameters": [header_parameter]}
         ]
         if message.parameters:
             # A named template needs every body parameter labelled; a
@@ -248,6 +264,34 @@ class WhatsAppCloudSender:
         if not messages or "id" not in messages[0]:
             raise _ApiError("Send returned no message id", retryable=False)
         return messages[0]["id"]
+
+
+def _cannot_carry(message: RenderedMessage) -> str:
+    """Why this message cannot go out as composed, or "".
+
+    Checked before the upload rather than after, because both failures here
+    are settled in setup and no amount of retrying changes either: Meta has
+    not approved the template, or the header it approved cannot hold what
+    this document is being sent as.
+    """
+    template = message.template
+    if template.status != "approved":
+        return (
+            f"Template '{template.name}' is {template.status}, "
+            f"not approved for sending."
+        )
+    if template.carries(message.attachment):
+        return ""
+    if message.attachment == IMAGE:
+        return (
+            f"Template '{template.name}' has {template.header_phrase}, so an "
+            f"image cannot be attached to it. Choose a template with an image "
+            f"header, or send this document as a PDF."
+        )
+    return (
+        f"Template '{template.name}' has {template.header_phrase}, so the PDF "
+        f"has nowhere to go."
+    )
 
 
 class _ApiError(Exception):

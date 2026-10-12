@@ -283,6 +283,49 @@ greeted the member with that sentence. And `Dear Sir/ Madam,` is printed
 between the `To,` heading and the member's own name, which greeted them
 `Dear Dear Sir/ Madam,`.
 
+## Sent as a PDF, or as a picture of itself
+
+A PDF arrives in WhatsApp as a file: a grey tile with a filename, which the
+member has to tap, and on a cheap Android phone with no PDF viewer installed
+that tap goes nowhere. An image is shown in the chat itself and is read
+without opening anything.
+
+So each kind of paperwork chooses, in **Setup → Fill in messages**, beside its
+template:
+
+| | PDF | Image |
+|---|---|---|
+| The member sees | `Receipt-CR1747-26.pdf`, tapped to open | the receipt, in the chat |
+| Filename shown | yes | **no** — Meta's image header carries none |
+| Template header | `DOCUMENT` | `IMAGE` |
+| Multi-page print | all pages, as printed | all pages, joined into one tall image |
+
+The conversion is done here — [`send/attachment.py`](src/waprinter/send/attachment.py),
+on the PyMuPDF that is already installed for OCR — so nothing new is shipped
+to a counter PC. Pages are rendered at 150 dpi and re-encoded down only as far
+as Meta's 5 MB limit for images requires, and a print that cannot be made to
+fit is held with the reason rather than failing at Meta.
+
+```
+waprinter to-image "C:\Receipts\2026-09-07\CHQ6511-26.pdf"
+```
+
+renders one, so what a member would receive can be looked at before a counter
+is switched over.
+
+**The half this app does not decide.** A template header holds a document or
+an image, settled when Meta approved the template — so sending images needs a
+template approved with an `IMAGE` header, and the app cannot convert its way
+around that. The mismatch is said in three places before a print: the Status
+page, the warning under the template on the Messages screen, and the one-PDF
+check. If it reaches a print anyway, the document is **held**, not failed:
+Meta's answer would be the same on every retry, so it waits for a person.
+
+Two things worth knowing before switching receipts over. The filename is how
+a member identifies a receipt at a glance, and an image send has none — keep
+the receipt number in the message body. And the office's own copy is still the
+PDF; the image exists for the seconds the upload takes and is then deleted.
+
 ## Keeping the printed receipts
 
 The office needs its own record of what it printed, and for a while there was

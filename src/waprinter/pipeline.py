@@ -251,6 +251,20 @@ class Pipeline:
             or self.settings.document_noun
         )
 
+    def attachment_for(self, fields) -> str:
+        """Whether this kind of document goes out as a PDF or as an image.
+
+        Chosen per kind beside the template, because the two choices have to
+        agree: only an image-header template can carry an image, and the
+        screen that picks one picks the other.
+        """
+        from .send.attachment import format_for
+
+        return format_for(
+            self.settings.document_attachments.get(fields.document_kind or "")
+            or self.settings.attachment_format
+        )
+
     def compose(self, job: PrintJob) -> tuple[str, RenderedMessage | None]:
         """The message this job goes out as, and the template name wanted.
 
@@ -272,6 +286,7 @@ class Pipeline:
             doc_title=job.doc_title,
             extra={"business_name": self.settings.business_name},
             document_noun=self.noun_for(job.fields),
+            attachment=self.attachment_for(job.fields),
         )
         job.template_name = template.name
         job.message_preview = message.preview
@@ -305,6 +320,39 @@ class Pipeline:
             template, self.variable_map_for(template), known_fields(self.profile)
         )
         return unfilled_reason(template, unfilled) if unfilled else ""
+
+    def attachment_problem(self, template, attachment: str) -> str:
+        """Why this template cannot carry what this install attaches, or "".
+
+        A setup problem rather than a delivery one, and the same on every
+        print: Meta settles a template's header when it approves it, so an
+        image has nowhere to go in a document-header template no matter how
+        many times it is tried. The document is held with the reason instead
+        of failing once per print.
+
+        Link mode is exempt. Nothing is attached on that route -- WhatsApp
+        opens with the text typed out and a person attaches the file -- so no
+        header is involved at all.
+        """
+        from .send.attachment import IMAGE, format_for
+
+        if self.settings.send_mode != "api":
+            return ""
+        attachment = format_for(attachment)
+        if template.carries(attachment):
+            return ""
+        if attachment == IMAGE:
+            return (
+                f"'{template.name}' has {template.header_phrase}, so an image "
+                f"cannot be attached to it. Open Setup → Fill in messages and "
+                f"either choose a template with an image header, or send this "
+                f"document as a PDF."
+            )
+        return (
+            f"'{template.name}' has {template.header_phrase}, so the PDF has "
+            f"nowhere to go. Open Setup → Fill in messages and choose another "
+            f"template."
+        )
 
     def missing_required(self, message: RenderedMessage) -> list[str]:
         """Mapped values this print did not supply, for templates set up on
@@ -471,11 +519,15 @@ class Pipeline:
             # here means the dialog can show the exact text without repeating
             # any of this work.
             _wanted, message = self.compose(job)
-            unfilled = self.unfilled_reason(message.template) if message else ""
-            if unfilled:
+            blocker = ""
+            if message is not None:
+                blocker = self.unfilled_reason(message.template) or (
+                    self.attachment_problem(message.template, message.attachment)
+                )
+            if blocker:
                 # Asking for a number would be asking for nothing: the
                 # message cannot go out until setup fills it in.
-                return self._hold(job, unfilled)
+                return self._hold(job, blocker)
             job.status = JobStatus.AWAITING
             job.hold_reason = outcome.reason
             self.store.upsert(job)
@@ -496,6 +548,9 @@ class Pipeline:
         unfilled = self.unfilled_reason(message.template)
         if unfilled:
             return self._hold(job, unfilled)
+        carrying = self.attachment_problem(message.template, message.attachment)
+        if carrying:
+            return self._hold(job, carrying)
         required = self.missing_required(message)
         if required:
             return self._hold(
@@ -648,6 +703,11 @@ class Pipeline:
             unfilled = self.unfilled_reason(template)
             if unfilled:
                 raise ValueError(unfilled)
+            carrying = self.attachment_problem(
+                template, self.attachment_for(job.fields)
+            )
+            if carrying:
+                raise ValueError(carrying)
 
         if customer_name:
             job.fields.customer_name = customer_name

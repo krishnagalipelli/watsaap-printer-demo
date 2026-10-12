@@ -24,6 +24,7 @@ from .config import Settings, paths
 from .extract import extract_fields
 from .models import Confidence, JobStatus
 from .rules.gate import excluded_numbers
+from .send.attachment import IMAGE, format_for
 from .send.sync import _template_from_meta
 from .store import Store
 
@@ -226,6 +227,30 @@ def cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_to_image(args: argparse.Namespace) -> int:
+    """Render a PDF as the JPEG that an image send would attach.
+
+    Here so that what a member would receive can be looked at before anyone
+    switches a document type over to images -- on this client's own
+    paperwork, at the dpi and size limit the sender really uses, rather than
+    on faith.
+    """
+    from .send.attachment import ConversionError, to_jpeg
+
+    source = Path(args.pdf)
+    if not source.is_file():
+        print(f"No such file: {source}")
+        return 1
+    target = Path(args.out) if args.out else source.with_suffix(".jpg")
+    try:
+        written = to_jpeg(source, target)
+    except ConversionError as exc:
+        print(f"Cannot be sent as an image: {exc}")
+        return 1
+    print(f"{written}  ({written.stat().st_size // 1024} KB)")
+    return 0
+
+
 def cmd_templates(args: argparse.Namespace) -> int:
     """Show the stored templates, or replace them with what Meta actually has.
 
@@ -258,19 +283,39 @@ def cmd_templates(args: argparse.Namespace) -> int:
     # Which kind of paperwork each template is used for, so the listing says
     # why a template is in play rather than implying only one ever is.
     used_for = {v: k for k, v in settings.document_templates.items()}
+    # What each template is asked to carry, by the kind it is used for. Keyed
+    # by template rather than by kind so the listing can look it up beside
+    # `used_for`, which is already in that shape.
+    attached_as = {
+        name: settings.document_attachments.get(kind) or settings.attachment_format
+        for kind, name in settings.document_templates.items()
+        if name
+    }
+    attached_as.setdefault(settings.default_template, settings.attachment_format)
     used_for.setdefault(settings.default_template, "everything else")
     for template in sorted(templates, key=lambda t: t.name):
         ref = store.ref_for(template)
         use = used_for.get(ref) or used_for.get(template.name)
         marker = "*" if use else " "
-        state = "usable" if template.usable else f"NOT usable"
+        # What this template is asked to carry here, which is what decides
+        # whether it is usable: an image-header template is perfectly usable
+        # for a counter sending images and no use at all to one sending PDFs.
+        attachment = format_for(
+            attached_as.get(ref)
+            or attached_as.get(template.name)
+            or settings.attachment_format
+        )
+        state = "usable" if template.usable_for(attachment) else "NOT usable"
         note = ""
-        if not template.usable:
+        if not template.usable_for(attachment):
             if template.status != "approved":
                 note = f" -- status is {template.status}"
-            elif not template.header_document:
-                # Without a document header there is nowhere to attach the PDF.
-                note = " -- no document header, so a PDF cannot be attached"
+            else:
+                carried = "an image" if attachment == IMAGE else "a PDF"
+                note = (
+                    f" -- {template.header_phrase}, so {carried} cannot be "
+                    f"attached"
+                )
         purpose = f"  <- {use}" if use else ""
         print(
             f" {marker} {ref:24s} {template.language:6s}"
@@ -675,6 +720,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser(
         "doctor", help="check this install and try a real upload"
     ).set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser(
+        "to-image", help="render a PDF as the image an image send would attach"
+    )
+    p.add_argument("pdf")
+    p.add_argument("-o", "--out", help="where to write the JPEG (default: beside the PDF)")
+    p.set_defaults(func=cmd_to_image)
 
     p = sub.add_parser("templates", help="list templates, or sync them from Meta")
     p.add_argument(

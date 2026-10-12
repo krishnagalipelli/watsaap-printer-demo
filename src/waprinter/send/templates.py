@@ -25,6 +25,7 @@ from pathlib import Path
 
 from ..config import atomic_write_text, set_aside_corrupt
 from ..models import ExtractedFields
+from .attachment import IMAGE, PDF, SUFFIX
 
 log = logging.getLogger(__name__)
 
@@ -214,8 +215,42 @@ class MessageTemplate:
         return out
 
     @property
+    def header_image(self) -> bool:
+        """Whether the header can carry an image instead of a document."""
+        return self.header_format == "IMAGE"
+
+    def carries(self, attachment: str = PDF) -> bool:
+        """Whether this template's header can carry that kind of attachment.
+
+        A header holds a document or an image, never both, and which one is
+        settled when Meta approves the template. So this is not a preference
+        the app can satisfy by converting harder: an install that sends
+        receipts as images needs a template approved with an image header.
+        """
+        return self.header_image if attachment == IMAGE else self.header_document
+
+    @property
+    def header_phrase(self) -> str:
+        """How this template's header reads inside a sentence.
+
+        One wording, so the sender, the queue and the setup screen cannot
+        describe the same template three different ways.
+        """
+        if not self.header_format:
+            # A built-in template has never been through a refresh, so it has
+            # no format recorded -- only the flag saying it takes the PDF.
+            return "a document header" if self.header_document else "no header"
+        word = self.header_format.lower()
+        return f"{'an' if word[0] in 'aeiou' else 'a'} {word} header"
+
+    def usable_for(self, attachment: str = PDF) -> bool:
+        """Approved by Meta, and able to carry what this install sends."""
+        return self.status == "approved" and self.carries(attachment)
+
+    @property
     def usable(self) -> bool:
-        return self.status == "approved" and self.header_document
+        """Able to send the PDF, which is what an install sends by default."""
+        return self.usable_for(PDF)
 
 
 CHIT_RECEIPT_BODY = (
@@ -513,6 +548,11 @@ class RenderedMessage:
     parameter_names: list[str] = field(default_factory=list)
     preview: str = ""       # what the customer will actually read
     filename: str = "document.pdf"
+    # "pdf" or "image": what is attached, and so which header the template
+    # needs. The filename above already carries the matching suffix. Only a
+    # document header shows a filename on the phone -- an image send has to
+    # name the document in the body instead.
+    attachment: str = PDF
     missing: list[str] = field(default_factory=list)  # variables with no value
     # Variables with nothing mapped to them at all -- a setup problem, as
     # opposed to a field that came out blank on this one print.
@@ -526,6 +566,7 @@ def render(
     doc_title: str | None = None,
     extra: dict[str, str] | None = None,
     document_noun: str = DEFAULT_DOCUMENT_NOUN,
+    attachment: str = PDF,
 ) -> RenderedMessage:
     """Resolve a template's variables from the extracted invoice fields.
 
@@ -577,9 +618,10 @@ def render(
         parameters=parameters,
         parameter_names=list(template.placeholders) if template.named else [],
         preview=preview,
-        filename=_filename(fields, doc_title, document_noun),
+        filename=_filename(fields, doc_title, document_noun, attachment),
         missing=missing,
         unmapped=unmapped,
+        attachment=attachment,
     )
 
 
@@ -587,12 +629,15 @@ def _filename(
     fields: ExtractedFields,
     doc_title: str | None,
     noun: str = DEFAULT_DOCUMENT_NOUN,
+    attachment: str = PDF,
 ) -> str:
-    """What the PDF is called on the customer's phone.
+    """What the attached file is called on the customer's phone.
 
     `noun` is what this client's paperwork is called — a chit fund sends
     receipts, not invoices, and the member reads this filename before they open
-    anything.
+    anything. An image send does not show it at all, Meta's image header
+    having no filename field, but the name still travels with the upload and
+    is what the dry-run log and the queue show.
     """
     noun = noun.strip() or DEFAULT_DOCUMENT_NOUN
     if fields.invoice_number:
@@ -608,4 +653,4 @@ def _filename(
         stem = noun
     # WhatsApp shows this verbatim; keep it filesystem- and eye-friendly.
     stem = re.sub(r"[^A-Za-z0-9._\- ]+", "", stem).strip() or noun
-    return f"{stem[:60]}.pdf"
+    return f"{stem[:60]}{SUFFIX.get(attachment, SUFFIX[PDF])}"

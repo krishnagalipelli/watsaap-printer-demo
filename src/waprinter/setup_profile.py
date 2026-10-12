@@ -107,7 +107,16 @@ def check_pdf(pipeline, pdf_path: Path) -> str:
     if message is None:
         lines.append("No message configured. Choose a template in Messages.")
     else:
-        lines.extend([f"Template status: {message.template.status}", f"Attachment: {message.filename}"])
+        carried = "Image" if message.attachment == "image" else "PDF"
+        lines.extend([
+            f"Template status: {message.template.status}",
+            f"Attachment: {message.filename} ({carried})",
+        ])
+        # The template's header and what this install attaches have to agree,
+        # and this check is the last place to say so before a real print.
+        carrying = pipeline.attachment_problem(message.template, message.attachment)
+        if carrying:
+            lines.append(carrying)
         if message.missing:
             lines.append("Missing values: " + ", ".join(message.missing))
         lines.extend(["", message.preview])

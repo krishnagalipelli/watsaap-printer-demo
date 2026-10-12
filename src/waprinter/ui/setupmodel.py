@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from ..extract.rules import BUILTIN_FIELDS, display_name
 from ..models import ExtractedFields
+from ..send.attachment import IMAGE, PDF, format_for
 from ..send.templates import (
     FIXED_TEXT_PREFIX,
     LEAVE_BLANK,
@@ -50,8 +51,18 @@ _SYNONYMS = {
 # -- templates ---------------------------------------------------------------
 
 
-def template_problem(template: MessageTemplate | None, send_mode: str) -> str:
-    """Why this template cannot carry a PDF from this install, or ""."""
+def template_problem(
+    template: MessageTemplate | None,
+    send_mode: str,
+    attachment: str = PDF,
+) -> str:
+    """Why this template cannot carry this install's attachment, or "".
+
+    `attachment` is what the document goes out as, because that is half the
+    question: a template with an image header can carry an image perfectly
+    well and has nowhere to put a PDF, and the opposite is the same sentence
+    the other way round.
+    """
     if template is None:
         return "Not on this computer. Refresh the templates from WhatsApp."
     if send_mode != "api":
@@ -60,14 +71,55 @@ def template_problem(template: MessageTemplate | None, send_mode: str) -> str:
         return ""
     if template.status != "approved":
         return f"Cannot be used: {STATUS_WORDS.get(template.status, template.status)}."
-    if not template.header_document:
-        kind = (template.header_format or "no").lower()
+    if not template.carries(attachment):
+        carried = "image" if attachment == IMAGE else "PDF"
         return (
-            f"Cannot be used: it has {kind} header, so the PDF has nowhere to go."
-            if template.header_format
-            else "Cannot be used: it has no document header, so the PDF has nowhere to go."
+            f"Cannot be used for this: it has {template.header_phrase}, so the "
+            f"{carried} has nowhere to go."
         )
     return ""
+
+
+# What a document can be attached as, as the drop-down reads. The wording says
+# what the member gets, not what the file is: "image" is a format, "shown in
+# the chat" is the reason anyone would pick it.
+ATTACHMENT_CHOICES = (
+    (PDF, "PDF file — opened from the chat"),
+    (IMAGE, "Image — shown in the chat"),
+)
+
+
+def attachment_implied(template: MessageTemplate | None) -> str | None:
+    """What this template's header can carry, when that is one thing only.
+
+    Meta settles the header when it approves the template, so choosing an
+    image-header template has already chosen the image; asking for it a second
+    time in the next drop-down is only a chance to get it wrong. None for a
+    header that carries neither, where there is nothing to follow.
+    """
+    if template is None:
+        return None
+    for attachment in (IMAGE, PDF):
+        if template.carries(attachment):
+            return attachment
+    return None
+
+
+def attachment_label(attachment: str) -> str:
+    """How an attachment format reads in the drop-down."""
+    wanted = format_for(attachment)
+    for value, label in ATTACHMENT_CHOICES:
+        if value == wanted:
+            return label
+    return ATTACHMENT_CHOICES[0][1]
+
+
+def attachment_for_label(label: str) -> str:
+    """The stored format behind a drop-down line."""
+    for value, text in ATTACHMENT_CHOICES:
+        if text == label:
+            return value
+    return PDF
 
 
 def template_choice(template: MessageTemplate, ref: str) -> str:

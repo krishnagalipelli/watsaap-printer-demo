@@ -259,6 +259,22 @@ class Settings:
     # anything, so a chit fund must not be sending "Invoice-".
     document_noun: str = "Receipt"
 
+    # --- What is attached ---------------------------------------------------
+    # "pdf" or "image". A PDF reaches the member as a file they have to tap,
+    # and on a phone with no PDF viewer that tap goes nowhere; an image is
+    # shown in the chat and is read without opening anything. The app converts
+    # the print itself -- see send/attachment.py -- but Meta decides what a
+    # template's header can hold, so an image send needs a template approved
+    # with an image header. PDF is the default, and is what every install sent
+    # before this existed.
+    attachment_format: str = "pdf"
+    # The same choice per kind of paperwork, keyed like document_templates:
+    # {"removal_notice": "pdf"}. A kind with no entry uses attachment_format.
+    # Receipts are worth sending as images -- they are glanced at and thrown
+    # away -- where a removal notice people keep and forward is better as a
+    # file.
+    document_attachments: dict[str, str] = field(default_factory=dict)
+
     # --- Keeping the printed receipts --------------------------------------
     # Every PDF that comes off the printer is copied here, filed by date and
     # named after the receipt, so the office has its own record without going

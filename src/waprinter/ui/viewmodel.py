@@ -114,7 +114,10 @@ class SetupNeed:
 _FIXED_BY = (
     ("connect", ("phone number id", "access token")),
     ("templates", ("approved by meta", "is not configured")),
-    ("messages", ("nothing to fill", "no message yet")),
+    # "has nowhere to go" is a template whose header cannot carry what these
+    # documents are sent as. Both halves of that -- which message, and PDF or
+    # image -- are chosen on the messages page.
+    ("messages", ("nothing to fill", "no message yet", "nowhere to go")),
     ("preferences", ("own numbers",)),
 )
 SETUP_ACTIONS = {

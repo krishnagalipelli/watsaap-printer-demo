@@ -23,6 +23,8 @@ import tkinter as tk
 
 import pytest
 
+from waprinter.extract.profile import DEFAULT_KIND
+
 
 @pytest.fixture(scope="module")
 def window(tmp_path_factory):
@@ -488,6 +490,104 @@ class TestFillInMessages:
         page.save()
         assert "Save anyway" in asked["m"]
         assert restore.settings.document_templates == before
+
+    def test_pdf_or_image_is_chosen_beside_the_template(self, restore, monkeypatch):
+        """The two halves of one decision: only an image-header template can
+        carry an image, so the screen that picks one picks the other."""
+        from waprinter.ui import setup
+
+        monkeypatch.setattr(setup.messagebox, "showinfo", lambda *a, **k: None)
+        restore.settings.document_templates = {"removal_notice": "removal_notice"}
+        page = _messages(restore)
+        page.select_kind("removal_notice")
+        _choose(page.attachment_box, lambda v: v.startswith("Image"))
+        page.save()
+
+        assert restore.settings.document_attachments["removal_notice"] == "image"
+
+    def test_the_receipt_choice_is_the_one_everything_else_follows(
+        self, restore, monkeypatch
+    ):
+        from waprinter.ui import setup
+
+        monkeypatch.setattr(setup.messagebox, "showinfo", lambda *a, **k: None)
+        page = _messages(restore)
+        page.select_kind(DEFAULT_KIND)
+        _choose(page.attachment_box, lambda v: v.startswith("Image"))
+        page.save()
+
+        assert restore.settings.attachment_format == "image"
+
+    def test_the_saved_choice_comes_back(self, restore):
+        restore.settings.attachment_format = "image"
+        page = _messages(restore)
+        page.select_kind(DEFAULT_KIND)
+
+        assert page.attachment() == "image"
+        assert page.attachment_box.get().startswith("Image")
+
+    def test_choosing_an_image_warns_that_this_template_cannot_carry_one(
+        self, restore
+    ):
+        """The mismatch is said here, not after a member got nothing."""
+        from waprinter.send.templates import MessageTemplate
+
+        store = restore.pipeline.templates
+        approved = MessageTemplate(name="receipt_pdf", body="Dear {{1}}.",
+                                   status="approved", header_format="DOCUMENT")
+        store.put(approved)
+        try:
+            restore.settings.send_mode = "api"
+            page = _messages(restore)
+            page.select_kind(DEFAULT_KIND)
+            _choose(page.template_box, lambda v: v.startswith("receipt_pdf"))
+            assert page.status.cget("text") == ""  # fine as a PDF
+
+            _choose(page.attachment_box, lambda v: v.startswith("Image"))
+
+            assert "image has nowhere to go" in page.status.cget("text")
+        finally:
+            store._templates.pop(store.ref_for(approved), None)
+
+    def test_choosing_a_template_chooses_what_its_header_carries(self, restore):
+        """An image-header template has already decided the image; the second
+        drop-down follows it instead of waiting to be set wrong."""
+        from waprinter.send.templates import MessageTemplate
+
+        store = restore.pipeline.templates
+        image = MessageTemplate(name="receipt_image", body="Dear {{1}}.",
+                                status="approved", header_document=False,
+                                header_format="IMAGE")
+        pdf = MessageTemplate(name="receipt_pdf", body="Dear {{1}}.",
+                              status="approved", header_format="DOCUMENT")
+        store.put(image)
+        store.put(pdf)
+        try:
+            restore.settings.send_mode = "api"
+            page = _messages(restore)
+            page.select_kind(DEFAULT_KIND)
+            assert page.attachment() == "pdf"
+
+            _choose(page.template_box, lambda v: v.startswith("receipt_image"))
+            assert page.attachment() == "image"
+            assert page.status.cget("text") == ""
+            assert ".jpg" in str(page.filename.cget("text"))
+
+            _choose(page.template_box, lambda v: v.startswith("receipt_pdf"))
+            assert page.attachment() == "pdf"
+            assert page.status.cget("text") == ""
+        finally:
+            store._templates.pop(store.ref_for(image), None)
+            store._templates.pop(store.ref_for(pdf), None)
+
+    def test_an_image_send_says_the_filename_is_not_shown(self, restore):
+        page = _messages(restore)
+        page.select_kind(DEFAULT_KIND)
+        _choose(page.attachment_box, lambda v: v.startswith("Image"))
+
+        hint = str(page.filename.cget("text"))
+        assert ".jpg" in hint
+        assert "no filename beside it" in hint
 
     def test_a_variable_is_mapped_to_a_taught_field(self, restore, monkeypatch):
         """The case this screen exists for: the template says {{id}}, the

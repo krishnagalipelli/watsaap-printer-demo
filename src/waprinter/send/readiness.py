@@ -70,21 +70,38 @@ def problems(
     # removal notice held with "Template 'removal_notice' is not configured"
     # is the same failure as a receipt held that way, and used to be invisible
     # here until the first notice was printed.
-    wanted = [settings.default_template]
-    for name in settings.document_templates.values():
-        if name and name not in wanted:
-            wanted.append(name)
-    for name in wanted:
+    # Carried with each name: what that kind of paperwork is attached as,
+    # because whether a template is usable depends on it -- a document header
+    # cannot hold the image an install has chosen to send.
+    from .attachment import IMAGE, format_for
+
+    def attached_as(kind: str) -> str:
+        return format_for(
+            settings.document_attachments.get(kind) or settings.attachment_format
+        )
+
+    wanted = [(settings.default_template, attached_as(""))]
+    for kind, name in settings.document_templates.items():
+        if name and name not in [chosen for chosen, _ in wanted]:
+            wanted.append((name, attached_as(kind)))
+    for name, attachment in wanted:
         template = templates.get(name)
         if template is None:
             found.append(f"Message '{name}' is not configured.")
-        elif settings.send_mode == "api" and not template.usable:
+        elif settings.send_mode == "api" and template.status != "approved":
             # Meta's approval matters only where Meta sends the message. Link
             # mode opens WhatsApp with the text typed out, and a person
             # presses send; no template is involved on that route at all.
             found.append(
                 f"Message '{template.name}' is {template.status}, not yet "
                 f"approved by Meta."
+            )
+        elif settings.send_mode == "api" and not template.carries(attachment):
+            found.append(
+                f"Message '{template.name}' has {template.header_phrase}, so "
+                f"the {'image' if attachment == IMAGE else 'PDF'} has nowhere "
+                f"to go. Choose another message, or change what these "
+                f"documents are sent as."
             )
         if template is not None:
             # The same check the pipeline makes before it sends, made here so

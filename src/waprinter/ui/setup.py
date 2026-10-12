@@ -32,6 +32,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from .. import teaching
 from ..extract.profile import DEFAULT_KIND
 from ..extract.rules import display_name
+from ..send.attachment import IMAGE
 from ..send.templates import FIXED_TEXT_PREFIX, PLACEHOLDER, STATUS_WORDS
 from . import icons, theme
 from . import setupmodel as sm
@@ -383,7 +384,7 @@ class TemplatesPage(Page):
         )
         theme.headings(self.tree, (
             ("#0", "Template", 150), ("language", "Language", 70),
-            ("status", "Status", 130), ("pdf", "Attaches PDF", 90),
+            ("status", "Status", 130), ("pdf", "Can attach", 90),
             ("fills", "Fills in", 130),
         ))
         self.tree.pack(fill="x")
@@ -407,7 +408,9 @@ class TemplatesPage(Page):
                 values=(
                     t.language,
                     STATUS_WORDS.get(t.status, t.status),
-                    "Yes" if t.header_document else "No",
+                    # Which one, not whether: a template with an image header
+                    # used to read "No" here, which is only true of the PDF.
+                    "PDF" if t.header_document else ("Image" if t.header_image else "—"),
                     ", ".join(t.placeholders) or "—",
                 ),
             )
@@ -618,14 +621,22 @@ class MessagesPage(Page):
         ttk.Label(top, text="WhatsApp template").grid(row=1, column=0, sticky="w", pady=3)
         self.template_box = ttk.Combobox(top, state="readonly")
         self.template_box.grid(row=1, column=1, sticky="ew", pady=3, padx=(10, 0))
-        self.template_box.bind("<<ComboboxSelected>>", lambda _e: self.build_rows())
-        ttk.Label(top, text="PDF named").grid(row=2, column=0, sticky="w", pady=3)
+        self.template_box.bind("<<ComboboxSelected>>", lambda _e: self.template_chosen())
+        ttk.Label(top, text="Send the document as").grid(row=2, column=0, sticky="w",
+                                                          pady=3)
+        self.attachment_box = ttk.Combobox(
+            top, state="readonly",
+            values=[label for _value, label in sm.ATTACHMENT_CHOICES],
+        )
+        self.attachment_box.grid(row=2, column=1, sticky="ew", pady=3, padx=(10, 0))
+        self.attachment_box.bind("<<ComboboxSelected>>", lambda _e: self.build_rows())
+        ttk.Label(top, text="File named").grid(row=3, column=0, sticky="w", pady=3)
         self.noun = tk.StringVar()
-        ttk.Entry(top, textvariable=self.noun).grid(row=2, column=1, sticky="ew",
+        ttk.Entry(top, textvariable=self.noun).grid(row=3, column=1, sticky="ew",
                                                      pady=3, padx=(10, 0))
         self.noun.trace_add("write", lambda *_: self._update_filename())
         self.filename = ttk.Label(top, style="Hint.TLabel")
-        self.filename.grid(row=3, column=1, sticky="w", padx=(10, 0))
+        self.filename.grid(row=4, column=1, sticky="w", padx=(10, 0))
         self.status = _wrapping(f, style="Warn.TLabel")
         self.status.pack(anchor="w", fill="x", pady=(6, 6))
 
@@ -699,11 +710,35 @@ class MessagesPage(Page):
         self.template_box.configure(values=[label for label, _ref in choices])
         self.template_box.current(refs.index(chosen) if chosen in refs else 0)
         self.noun.set(s.document_noun if key == DEFAULT_KIND else s.document_nouns.get(key, ""))
+        self.select_attachment(
+            s.attachment_format if key == DEFAULT_KIND
+            else (s.document_attachments.get(key) or s.attachment_format)
+        )
         self.build_rows()
 
     def template_ref(self) -> str:
         index = self.template_box.current()
         return self._templates[index][1] if 0 <= index < len(self._templates) else ""
+
+    def template_chosen(self) -> None:
+        """A template was picked by hand: follow its header, then redraw.
+
+        Only on a pick, not when a kind is loaded -- what was saved is shown
+        as saved, with its warning if the two disagree, rather than being
+        quietly changed by opening the page.
+        """
+        ref = self.template_ref()
+        implied = sm.attachment_implied(self.pipeline.templates.get(ref) if ref else None)
+        if implied:
+            self.select_attachment(implied)
+        self.build_rows()
+
+    def attachment(self) -> str:
+        """What this kind of document is attached as, as the screen stands."""
+        return sm.attachment_for_label(self.attachment_box.get())
+
+    def select_attachment(self, attachment: str) -> None:
+        self.attachment_box.set(sm.attachment_label(attachment))
 
     # what fills each variable
 
@@ -724,7 +759,8 @@ class MessagesPage(Page):
             self._update_filename()
             return
 
-        self.status.configure(text=sm.template_problem(template, self.settings.send_mode))
+        self.status.configure(text=sm.template_problem(
+            template, self.settings.send_mode, self.attachment()))
         saved = self.settings.template_mappings.get(template.name)
         guess = sm.suggest_mapping(
             template, self._fields,
@@ -801,8 +837,21 @@ class MessagesPage(Page):
 
         noun = self.noun.get().strip() or "Document"
         number = self._values.get("invoice_number") or "CR1747/26"
-        name = _filename(ExtractedFields(invoice_number=number), None, noun)
-        self.filename.configure(text=f"The member sees: {name}")
+        attachment = self.attachment()
+        name = _filename(ExtractedFields(invoice_number=number), None, noun, attachment)
+        if attachment == IMAGE:
+            # Meta's image header carries no filename, so saying "the member
+            # sees" this would be a lie -- they see the receipt itself.
+            hint = (f"Sent as {name}. An image is shown in the chat, with no "
+                    f"filename beside it — keep the receipt number in the message.")
+            if self.settings.send_mode != "api":
+                # Nothing is attached by the app in manual mode, so this
+                # choice is stored and inert until sending is automatic.
+                hint += (" While sending is manual you attach the file "
+                         "yourself, so this takes effect when it is automatic.")
+            self.filename.configure(text=hint)
+        else:
+            self.filename.configure(text=f"The member sees: {name}")
 
     def save(self) -> None:
         key = self.kind_key()
@@ -818,7 +867,7 @@ class MessagesPage(Page):
             if problems:
                 messagebox.showerror(TITLE, "\n".join(problems), parent=self.root)
                 return
-            blocker = sm.template_problem(template, s.send_mode)
+            blocker = sm.template_problem(template, s.send_mode, self.attachment())
             if blocker and not messagebox.askyesno(
                 TITLE, f"{template.name}: {blocker}\n\nSave anyway?", parent=self.root
             ):
@@ -832,6 +881,7 @@ class MessagesPage(Page):
             changed.default_template = ref
             if noun:
                 changed.document_noun = noun
+            changed.attachment_format = self.attachment()
         else:
             if ref:
                 changed.document_templates[key] = ref
@@ -841,6 +891,7 @@ class MessagesPage(Page):
                 changed.document_nouns[key] = noun
             else:
                 changed.document_nouns.pop(key, None)
+            changed.document_attachments[key] = self.attachment()
 
         if self.apply(changed):
             self.view.pages["documents"].on_show()

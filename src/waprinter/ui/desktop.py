@@ -858,13 +858,31 @@ class DesktopWindow:
         # the check runs here, over every message this counter actually uses,
         # and asks rather than refuses -- approval may be minutes away.
         if s.send_mode == "api":
+            from ..send.attachment import IMAGE, format_for
+
             problems = []
-            for ref in sorted({s.default_template, *s.document_templates.values()}):
+            # What each message is asked to carry, because that is half of
+            # whether it can be used: a template approved with an image header
+            # is no use to a counter sending PDFs, and the reverse.
+            attached_as = {s.default_template: s.attachment_format}
+            for kind, name in s.document_templates.items():
+                attached_as.setdefault(
+                    name, s.document_attachments.get(kind) or s.attachment_format
+                )
+            attached_as.pop("", None)
+            for ref in sorted(attached_as):
                 template = self.pipeline.templates.get(ref)
+                attachment = format_for(attached_as[ref])
                 if template is None:
                     problems.append(f"{ref} — not on this computer")
-                elif not template.usable:
+                elif template.status != "approved":
                     problems.append(f"{ref} — {template.status}, not approved by Meta")
+                elif not template.carries(attachment):
+                    problems.append(
+                        f"{ref} — {template.header_phrase}, so the "
+                        f"{'image' if attachment == IMAGE else 'PDF'} has "
+                        f"nowhere to go"
+                    )
             if problems and not messagebox.askyesno(
                 "WhatsApp Printer",
                 "These messages cannot be sent automatically as things stand:\n\n• "
