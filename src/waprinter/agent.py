@@ -38,7 +38,10 @@ DAILY_CHECK_SECONDS = 60 * 60  # how often to wonder whether a day has passed
 
 class Agent:
     def __init__(
-        self, pipeline: Pipeline | None = None, settings: Settings | None = None
+        self,
+        pipeline: Pipeline | None = None,
+        settings: Settings | None = None,
+        instance: SingleInstance | None = None,
     ):
         self.settings = settings or Settings.load()
         self.pipeline = pipeline or build_default(self.settings)
@@ -53,12 +56,13 @@ class Agent:
         self._busy = threading.Event()
 
         self.window = DesktopWindow(self.pipeline, on_check_updates=self.check_updates)
-        self.instance = SingleInstance(self.paths.root / "instance.port")
+        self.instance = instance or SingleInstance(self.paths.root / "instance.port")
         self.watcher = SpoolWatcher(
             spool=self.paths.spool,
             inbox=self.paths.inbox,
             on_job=self._handle,
             operation_lock=self.pipeline.operation_lock,
+            on_unreadable=self._handle_unreadable,
         )
 
     # -- capture -----------------------------------------------------------
@@ -83,6 +87,14 @@ class Agent:
                 self.window.submit(job.id, auto_open=len(jobs) == 1)
         finally:
             self._busy.clear()
+
+    def _handle_unreadable(self, path: Path, reason: str) -> None:
+        """Runs on the watcher thread: a print that could not be converted."""
+        info = latest_job()
+        job = self.pipeline.record_unreadable_capture(
+            path, reason, doc_title=info.document, windows_user=info.user
+        )
+        self.window.submit(job.id, auto_open=False)
 
     # -- updates -----------------------------------------------------------
 
@@ -283,22 +295,28 @@ def main(argv: list[str] | None = None) -> int:
         configure_logging(paths().logs)
         if "--selftest" in argv:
             return selftest(check_ocr="--check-ocr" in argv)
-        # Before anything reads settings: a fresh install is configured from
-        # the provisioning file the installer carried, and then that file is
-        # deleted. Nothing is typed at the counter.
-        from .provision import apply_if_present
-
-        apply_if_present()
         # --hidden: started at logon, so do not steal focus with the window.
         hidden = "--hidden" in argv
         # An agent may already be running, hidden, from the logon entry. The
         # operator clicking the desktop icon wants that window, not a second
         # agent competing for the same spool folder. A logon start that finds
-        # one already there just bows out.
+        # one already there just bows out. The lock decides; the knock on the
+        # port only asks the owner to show itself.
         guard = SingleInstance(paths().root / "instance.port")
-        if guard.signal_running(show=not hidden):
+        if not guard.claim():
+            guard.signal_running(show=not hidden)
             return 0
-        Agent().run(visible=not hidden)
+        try:
+            # Before anything reads settings, and only in the process that
+            # owns the machine: a fresh install is configured from the
+            # provisioning file the installer carried, and then that file is
+            # deleted. Nothing is typed at the counter.
+            from .provision import apply_if_present
+
+            apply_if_present()
+            Agent(instance=guard).run(visible=not hidden)
+        finally:
+            guard.release()
         return 0
     except Exception as exc:
         log.exception("agent crashed")

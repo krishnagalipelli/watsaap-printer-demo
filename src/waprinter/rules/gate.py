@@ -11,8 +11,10 @@ A held job is a ten-second interruption. A wrong send cannot be taken back.
 from __future__ import annotations
 
 import hashlib
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from ..compat import StrEnum
 from ..config import Settings
@@ -36,17 +38,47 @@ class GateOutcome:
     dedupe_key: str | None = None
 
 
-def dedupe_key(fields: ExtractedFields, recipient: str) -> str:
-    """Identify "this invoice, to this person".
+def dedupe_key(
+    fields: ExtractedFields, recipient: str, pdf_path: Path | None = None
+) -> str:
+    """Identify "this document, to this person".
 
-    Falls back to a hash of the page content when there is no invoice number,
-    so reprints of unnumbered documents are still caught.
+    The document number when there is one; otherwise the name, date and
+    amount read off it; otherwise the PDF's own bytes, so the same file
+    processed twice is still caught. A document with none of those used to
+    key on the recipient alone, and every later document to that member --
+    a removal notice after a receipt -- was suppressed as a reprint of it.
+
+    Non-receipt kinds carry their kind in the key, so a notice and a receipt
+    that happen to share what was read are still two documents. Receipts
+    keep the key they always had, so an upgrade does not forget the reprints
+    already sent today.
     """
     basis = fields.invoice_number or "|".join(
         filter(None, [fields.customer_name, fields.invoice_date, fields.total_amount])
     )
+    if not basis:
+        basis = f"file:{_content_digest(pdf_path)}"
+    kind = fields.document_kind
+    if kind and kind != "receipt":
+        basis = f"{kind}:{basis}"
     raw = f"{basis}->{recipient}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _content_digest(pdf_path: Path | None) -> str:
+    """The file's digest, or a value nothing else will ever share.
+
+    Unreadable or absent means there is nothing to recognise a reprint by,
+    and a key that matches nothing sends once rather than suppressing a
+    document that was never sent.
+    """
+    if pdf_path is not None:
+        try:
+            return hashlib.sha256(Path(pdf_path).read_bytes()).hexdigest()
+        except OSError:
+            pass
+    return f"unique:{uuid.uuid4().hex}"
 
 
 def excluded_numbers(settings: Settings) -> set[str]:
@@ -92,6 +124,29 @@ def evaluate(
             recipient=strong[0].e164 if len(strong) == 1 else None,
             reason=fields.classification_error or
             "Document type could not be identified. Choose its type before sending.",
+        )
+
+    # --- the two reads disagree about what this document even is ----------
+    # Checked before confirmation mode and before ocr_silent_send, and not
+    # governed by either: those are judgements about a *number*. Which
+    # approved template the member is written to is a different question,
+    # and a wrong answer is worse -- a removal notice arriving as "Thank you
+    # for your payment" is worse for the member than no message at all. A
+    # person typing the number into the confirmation dialog is not checking
+    # the document type, so that dialog used to send it under whichever
+    # message the first read chose.
+    if not fields.document_kind_verified:
+        strong = [c for c in candidates if c.confidence is Confidence.HIGH]
+        suggestion = strong[0] if len(strong) == 1 else None
+        kind = (fields.document_kind or "one kind of document").replace("_", " ")
+        return GateOutcome(
+            Decision.HOLD,
+            recipient=suggestion.e164 if suggestion else None,
+            confidence=suggestion.confidence if suggestion else None,
+            reason=f"Reading this scan twice gave two different answers about "
+            f"what it is ({kind} on one pass, something else on the other), "
+            f"so it could go out under the wrong message. Choose its type "
+            f"before sending.",
         )
 
     # --- operator confirms every send ------------------------------------
@@ -148,23 +203,6 @@ def evaluate(
 
     winner = high[0]
 
-    # --- the two reads disagree about what this document even is ----------
-    # Checked before ocr_silent_send, and not governed by it: that setting is
-    # a judgement about trusting a *number* read off a scan. Which approved
-    # template the member is written to is a different question, and a wrong
-    # answer is worse -- a removal notice arriving as "Thank you for your
-    # payment" is worse for the member than no message at all.
-    if not fields.document_kind_verified:
-        kind = (fields.document_kind or "one kind of document").replace("_", " ")
-        return GateOutcome(
-            Decision.HOLD,
-            recipient=winner.e164,
-            confidence=winner.confidence,
-            reason=f"Reading this scan twice gave two different answers about "
-            f"what it is ({kind} on one pass, something else on the other), "
-            f"so it could go out under the wrong message. Check it first.",
-        )
-
     # --- OCR results are not trusted for a silent send by default ---------
     if winner.from_ocr and not settings.ocr_silent_send:
         return GateOutcome(
@@ -175,7 +213,7 @@ def evaluate(
             f"Check it against the invoice before sending.",
         )
 
-    key = dedupe_key(fields, winner.e164)
+    key = dedupe_key(fields, winner.e164, job.pdf_path)
 
     # --- reprints ---------------------------------------------------------
     prior = store.find_duplicate(
@@ -193,25 +231,14 @@ def evaluate(
         )
 
     # --- volume rails -----------------------------------------------------
-    per_minute = store.count_sent_since(now - timedelta(minutes=1))
-    if per_minute >= settings.max_sends_per_minute:
+    limited = volume_limit_reason(settings, store, now)
+    if limited:
         return GateOutcome(
             Decision.HOLD,
             recipient=winner.e164,
             confidence=winner.confidence,
             dedupe_key=key,
-            reason=f"Rate limit reached ({per_minute} sent in the last minute). "
-            f"Held so a runaway batch print cannot fan out.",
-        )
-
-    per_day = store.count_sent_since(now - timedelta(days=1))
-    if per_day >= settings.max_sends_per_day:
-        return GateOutcome(
-            Decision.HOLD,
-            recipient=winner.e164,
-            confidence=winner.confidence,
-            dedupe_key=key,
-            reason=f"Daily cap reached ({per_day} sent in 24h).",
+            reason=limited,
         )
 
     return GateOutcome(
@@ -221,3 +248,20 @@ def evaluate(
         dedupe_key=key,
         reason="; ".join(winner.reasons),
     )
+
+
+def volume_limit_reason(settings: Settings, store: Store, now: datetime) -> str:
+    """Why sending one more message now would break a volume rail, or "".
+
+    Shared by the gate and the queue's send path, which used to skip it.
+    """
+    per_minute = store.count_sent_since(now - timedelta(minutes=1))
+    if per_minute >= settings.max_sends_per_minute:
+        return (
+            f"Rate limit reached ({per_minute} sent in the last minute). "
+            f"Held so a runaway batch print cannot fan out."
+        )
+    per_day = store.count_sent_since(now - timedelta(days=1))
+    if per_day >= settings.max_sends_per_day:
+        return f"Daily cap reached ({per_day} sent in 24h)."
+    return ""

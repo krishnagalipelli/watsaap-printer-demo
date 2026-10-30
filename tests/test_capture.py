@@ -200,6 +200,79 @@ class TestWindows7CapturesXps:
         assert captured == [] and seen == []
         assert list(inbox.glob("*.xps")), "the unreadable print was lost"
 
+    def test_an_unconvertible_print_is_reported_not_only_logged(self, tmp_path):
+        spool, inbox = make_spool(tmp_path)
+        (spool / "job1.xps").write_bytes(b"rubbish PK\x05\x06")
+        reported = []
+        watcher = SpoolWatcher(
+            spool, inbox, lambda _p: None, settle_seconds=0,
+            on_unreadable=lambda path, reason: reported.append((path, reason)),
+        )
+        watcher.drain_once()
+        watcher.drain_once()
+
+        assert len(reported) == 1
+        path, reason = reported[0]
+        assert path.parent == inbox and path.suffix == ".xps"
+        assert reason
+
+    def test_a_failing_report_does_not_stop_the_watcher(self, tmp_path):
+        spool, inbox = make_spool(tmp_path)
+        (spool / "job1.xps").write_bytes(b"rubbish PK\x05\x06")
+        build(InvoiceSpec(), spool / "job2.pdf")
+
+        def boom(_path, _reason):
+            raise RuntimeError("database is locked")
+
+        watcher = SpoolWatcher(spool, inbox, lambda _p: None, settle_seconds=0,
+                               on_unreadable=boom)
+        watcher.drain_once()
+        assert [p.suffix for p in watcher.drain_once()] == [".pdf"]
+
+
+class TestAnUnconvertiblePrintReachesTheQueue:
+    """It used to leave nothing but a log line: no job, nothing in Needs
+    attention, and a file the daily tidy-up never looked at."""
+
+    def test_it_is_a_failed_job_waiting_on_a_person(self, pipeline, tmp_path):
+        from waprinter.models import JobStatus
+
+        bad = tmp_path / "inbox" / "20261017-101010-abcd1234.xps"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        bad.write_bytes(b"rubbish")
+
+        job = pipeline.record_unreadable_capture(bad, "cannot recognize zip archive")
+
+        assert job.status is JobStatus.FAILED
+        assert "could not be converted" in job.error
+        assert str(bad) in job.error
+        assert job.id in {j.id for j in pipeline.store.pending()}
+
+    def test_the_tidy_up_keeps_it_while_unresolved_then_prunes_it(
+        self, pipeline, tmp_path
+    ):
+        import os
+        import time
+
+        from waprinter import housekeeping
+
+        inbox = tmp_path / "inbox"
+        inbox.mkdir(exist_ok=True)
+        bad = inbox / "old.xps"
+        bad.write_bytes(b"rubbish")
+        old = time.time() - 200 * 86_400
+        os.utime(bad, (old, old))
+        job = pipeline.record_unreadable_capture(bad, "broken")
+
+        protected = pipeline.store.unresolved_pdf_paths()
+        assert housekeeping.prune_inbox(inbox, 90, protected) == 0
+        assert bad.exists()
+
+        pipeline.discard(job.id)
+        protected = pipeline.store.unresolved_pdf_paths()
+        assert housekeeping.prune_inbox(inbox, 90, protected) == 1
+        assert not bad.exists()
+
 
 class TestXpsConversion:
     def test_converts_every_page(self, tmp_path):

@@ -71,6 +71,7 @@ class Runner:
             inbox=self.paths.inbox,
             on_job=self._handle,
             operation_lock=self.pipeline.operation_lock,
+            on_unreadable=self._handle_unreadable,
         )
         self._thread: threading.Thread | None = None
 
@@ -89,6 +90,13 @@ class Runner:
                 job.status,
                 job.recipient or job.hold_reason or "",
             )
+
+    def _handle_unreadable(self, path: Path, reason: str) -> None:
+        info = latest_job()
+        job = self.pipeline.record_unreadable_capture(
+            path, reason, doc_title=info.document, windows_user=info.user
+        )
+        log.info("job %s -> %s (%s)", job.id, job.status, job.error)
 
     def start(self) -> None:
         self._thread = threading.Thread(

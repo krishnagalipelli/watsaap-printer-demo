@@ -23,7 +23,7 @@ import re
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
-from ..config import atomic_write_text, set_aside_corrupt
+from ..config import atomic_write_text, read_text_retrying, set_aside_corrupt
 from ..models import ExtractedFields
 from .attachment import IMAGE, PDF, SUFFIX
 
@@ -425,7 +425,7 @@ class TemplateStore:
         self._templates: dict[str, MessageTemplate] = {}
         self.load()
 
-    def load(self) -> None:
+    def load(self, *, raise_if_unreadable: bool = False) -> None:
         """Built-in templates, with whatever this machine has stored over them.
 
         The stored file used to be the whole truth, which meant a template
@@ -438,20 +438,37 @@ class TemplateStore:
         Stored entries win, always. What Meta reports about a template it has
         seen -- above all its status -- is worth more than what shipped in the
         build, so a rejected template is never quietly made approved again.
+
+        A file that cannot be opened -- held by another program for a moment
+        -- is not corrupt, and is left in place. What is already loaded is
+        kept (the built-ins on a first load), or with `raise_if_unreadable`
+        the error is raised with nothing changed, so a reload can try again.
         """
-        self._templates = {
-            t.ref: t for t in default_templates(self.business_name)
-        }
-        self.refreshed_at = ""
+        templates = {t.ref: t for t in default_templates(self.business_name)}
         if not self.path.exists():
+            self._templates, self.refreshed_at = templates, ""
             return
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            text = read_text_retrying(self.path)
+        except FileNotFoundError:
+            self._templates, self.refreshed_at = templates, ""
+            return
+        except OSError as exc:
+            if raise_if_unreadable:
+                raise
+            log.error(
+                "could not open %s (%s); the file was left in place", self.path, exc
+            )
+            if not self._templates:
+                self._templates, self.refreshed_at = templates, ""
+            return
+        try:
+            raw = json.loads(text)
             items = raw.get("templates", []) if isinstance(raw, dict) else None
             if items is None:
                 raise ValueError("not a JSON object")
-        except (OSError, ValueError) as exc:
-            # The same rule as settings.json: a file that cannot be read is
+        except ValueError as exc:
+            # The same rule as settings.json: a file that cannot be parsed is
             # set aside, not allowed to stop the agent starting. The built-in
             # copies are all pending, so nothing is sent on their say-so.
             moved = set_aside_corrupt(self.path)
@@ -461,8 +478,8 @@ class TemplateStore:
                 exc,
                 f", the file was moved to {moved.name}" if moved else "",
             )
+            self._templates, self.refreshed_at = templates, ""
             return
-        self.refreshed_at = str(raw.get("refreshed_at") or "")
         known = set(MessageTemplate.__dataclass_fields__)
         for item in items:
             if not isinstance(item, dict) or not item.get("name"):
@@ -475,7 +492,9 @@ class TemplateStore:
             if not isinstance(fields.get("examples", {}), dict):
                 fields.pop("examples")
             template = MessageTemplate(**fields)
-            self._templates[template.ref] = template
+            templates[template.ref] = template
+        self._templates = templates
+        self.refreshed_at = str(raw.get("refreshed_at") or "")
 
     def save(self) -> None:
         payload = {

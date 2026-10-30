@@ -344,9 +344,12 @@ def extract_fields(
     candidates = find_candidates(doc, excluded_numbers, country_code, profile)
     words = _amount_words(doc, profile)
 
-    # Only pay for the verification pass when OCR actually produced a number.
+    # Any page OCR read gets the second pass, whether or not it held a
+    # number. It used to run only for an OCR'd number, so a scan with none --
+    # the normal case where the operator types the number -- had its title
+    # read once and was marked verified on the strength of that one read.
     kind_verified = True
-    if ocr and any(c.from_ocr for c in candidates):
+    if ocr and doc.used_ocr:
         verification = pdf_text.read(pdf_path, ocr=ocr, ocr_dpi=ocr.verify_dpi)
         apply_ocr_verification(candidates, scan_numbers(verification, country_code))
         # The title gets the same treatment as the number, and for a stronger

@@ -214,6 +214,68 @@ class TestDeduplication:
         assert job.status is JobStatus.DRY_RUN
 
 
+class TestTheReprintKey:
+    """A document with nothing read off it used to key on the recipient
+    alone, so the next document of any kind to that member was suppressed."""
+
+    def _fields(self, **values):
+        from waprinter.models import ExtractedFields
+
+        return ExtractedFields(**values)
+
+    def test_two_unread_documents_to_one_member_are_not_the_same(self, tmp_path):
+        from waprinter.rules.gate import dedupe_key
+
+        a, b = tmp_path / "a.pdf", tmp_path / "b.pdf"
+        a.write_bytes(b"%PDF one")
+        b.write_bytes(b"%PDF two")
+        blank = self._fields()
+        assert dedupe_key(blank, "+919000012345", a) != dedupe_key(blank, "+919000012345", b)
+
+    def test_the_same_unread_file_twice_is_still_a_reprint(self, tmp_path):
+        from waprinter.rules.gate import dedupe_key
+
+        pdf = tmp_path / "a.pdf"
+        pdf.write_bytes(b"%PDF one")
+        blank = self._fields()
+        assert dedupe_key(blank, "+919000012345", pdf) == dedupe_key(blank, "+919000012345", pdf)
+
+    def test_with_no_file_an_unread_document_matches_nothing(self):
+        from waprinter.rules.gate import dedupe_key
+
+        blank = self._fields()
+        assert dedupe_key(blank, "+919000012345") != dedupe_key(blank, "+919000012345")
+
+    def test_a_notice_is_not_a_reprint_of_a_receipt(self):
+        from waprinter.rules.gate import dedupe_key
+
+        notice = self._fields(document_kind="removal_notice", customer_name="ANITHA")
+        receipt = self._fields(document_kind="receipt", customer_name="ANITHA")
+        assert dedupe_key(notice, "+919000012345") != dedupe_key(receipt, "+919000012345")
+
+    def test_a_receipt_keeps_the_key_it_had_before_the_upgrade(self):
+        import hashlib
+
+        from waprinter.rules.gate import dedupe_key
+
+        receipt = self._fields(document_kind="receipt", invoice_number="CR1747/26")
+        before = hashlib.sha256(b"CR1747/26->+919000012345").hexdigest()[:32]
+        assert dedupe_key(receipt, "+919000012345") == before
+
+    def test_an_unread_print_after_a_sent_one_still_goes(
+        self, confirm_pipeline, make_invoice, monkeypatch
+    ):
+        # Nothing identifying read off either page.
+        monkeypatch.setattr(
+            "waprinter.pipeline.extract_fields",
+            lambda *a, **k: self._fields(document_kind="receipt"),
+        )
+        first = run(confirm_pipeline, make_invoice)
+        assert confirm_pipeline.release(first.id, "9876543210").status is JobStatus.DRY_RUN
+        other = run(confirm_pipeline, make_invoice, InvoiceSpec(seller_name="Another Shop"))
+        assert confirm_pipeline.release(other.id, "9876543210").status is JobStatus.DRY_RUN
+
+
 class TestVolumeRails:
     def test_a_runaway_batch_is_capped(self, pipeline, make_invoice, monkeypatch):
         pipeline.settings.max_sends_per_minute = 3
@@ -285,6 +347,39 @@ class TestWhatTheQueueSendsIsGuardedToo:
     left the job at QUEUED -- a status no screen lists -- so the receipt
     simply vanished.
     """
+
+    def test_the_businesss_own_number_is_refused(self, confirm_pipeline, make_invoice):
+        job = run(confirm_pipeline, make_invoice, InvoiceSpec(customer_phone=None))
+        # 9845012345 is in the fixture's own_numbers.
+        with pytest.raises(ValueError, match="own numbers or on the blocklist"):
+            confirm_pipeline.release(job.id, "98450 12345")
+        assert confirm_pipeline.store.get(job.id).status is JobStatus.AWAITING
+
+    def test_a_blocklisted_number_is_refused(self, confirm_pipeline, make_invoice):
+        confirm_pipeline.settings.blocklist = ["9111111111"]
+        job = run(confirm_pipeline, make_invoice, InvoiceSpec(customer_phone=None))
+        with pytest.raises(ValueError, match="blocklist"):
+            confirm_pipeline.release(job.id, "+91 91111 11111")
+
+    def test_the_rate_limit_applies_to_queue_sends(
+        self, confirm_pipeline, make_invoice, monkeypatch
+    ):
+        confirm_pipeline.settings.max_sends_per_minute = 3
+        job = run(confirm_pipeline, make_invoice, InvoiceSpec(customer_phone=None))
+        monkeypatch.setattr(confirm_pipeline.store, "count_sent_since", lambda _s: 3)
+        with pytest.raises(ValueError, match="Rate limit"):
+            confirm_pipeline.release(job.id, "9876543210")
+        assert confirm_pipeline.store.get(job.id).status is JobStatus.AWAITING
+
+    def test_the_daily_cap_applies_to_queue_sends(
+        self, confirm_pipeline, make_invoice, monkeypatch
+    ):
+        confirm_pipeline.settings.max_sends_per_day = 10
+        confirm_pipeline.settings.max_sends_per_minute = 100
+        job = run(confirm_pipeline, make_invoice, InvoiceSpec(customer_phone=None))
+        monkeypatch.setattr(confirm_pipeline.store, "count_sent_since", lambda _s: 10)
+        with pytest.raises(ValueError, match="Daily cap"):
+            confirm_pipeline.release(job.id, "9876543210")
 
     def test_a_reprint_released_to_the_same_number_is_suppressed(
         self, confirm_pipeline, make_invoice

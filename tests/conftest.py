@@ -100,8 +100,13 @@ def pipeline(settings, store, templates, tmp_path):
 
 @pytest.fixture
 def link_pipeline(pipeline):
-    """Click-to-chat mode, used until the Cloud API account is live."""
+    """Click-to-chat mode, used until the Cloud API account is live.
+
+    Out of test mode: in test mode link mode opens nothing, and these tests
+    are about the chat it opens.
+    """
     pipeline.settings.send_mode = "link"
+    pipeline.settings.dry_run = False
     pipeline.settings.default_template = "chit_receipt"
     pipeline.settings.template_variables = {
         "1": "customer_name",

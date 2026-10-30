@@ -105,10 +105,14 @@ class SpoolWatcher:
         poll_interval: float = POLL_INTERVAL,
         settle_seconds: float = SETTLE_SECONDS,
         operation_lock=None,
+        on_unreadable: Callable[[Path, str], None] | None = None,
     ):
         self.spool = spool
         self.inbox = inbox
         self.on_job = on_job
+        # Called with the claimed file and the reason when a print cannot be
+        # turned into a PDF, so it is recorded rather than only logged.
+        self.on_unreadable = on_unreadable
         self.poll_interval = poll_interval
         self.settle_seconds = settle_seconds
         self._sizes: dict[Path, tuple[int, float]] = {}
@@ -170,10 +174,16 @@ class SpoolWatcher:
             if xps.is_xps(claimed):
                 try:
                     claimed = xps.to_pdf(claimed)
-                except Exception:
-                    # Leave it in the inbox to be looked at. A print that
-                    # cannot be converted must not vanish without trace.
+                except Exception as exc:
+                    # Leave it in the inbox to be looked at, and say so where
+                    # the operator looks. A log line alone was the only trace,
+                    # and nothing on any screen said a print had been lost.
                     log.exception("could not convert %s", claimed)
+                    if self.on_unreadable is not None:
+                        try:
+                            self.on_unreadable(claimed, str(exc))
+                        except Exception:
+                            log.exception("could not record %s", claimed)
                     continue
             captured.append(claimed)
             log.info("captured %s", claimed.name)

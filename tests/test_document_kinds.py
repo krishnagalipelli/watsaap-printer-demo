@@ -75,6 +75,7 @@ class TestSendingItUnderTheRightTemplate:
                 return SendResult(ok=True)
 
         link_pipeline.settings.send_mode = "api"
+        link_pipeline.settings.dry_run = True
         link_pipeline.sender = RecordingSender()
         jobs = [link_pipeline.process_document(make())[0] for make in (receipt, notice, letter)]
         assert all(j.status == JobStatus.DRY_RUN for j in jobs)
@@ -419,6 +420,29 @@ class TestWhenTheDocumentArrivesAsAScan:
         assert job.status.value == "held"
         assert "two different answers" in job.hold_reason
 
+    def test_a_scan_with_no_number_still_has_its_title_read_twice(
+        self, link_pipeline, tmp_path, monkeypatch
+    ):
+        """The normal scan in confirmation mode: no number on the page. The
+        second read used to run only for an OCR'd number, so this one was
+        marked verified on a single read of its title."""
+        from waprinter.extract.profile import DocumentProfile
+
+        answers = iter([_kind("removal_notice"), None])
+        monkeypatch.setattr(
+            DocumentProfile, "kind_of", lambda self, text: next(answers, None)
+        )
+        path = build_removal_notice(
+            RemovalNoticeSpec(raster=True, member_phone=None,
+                              address="BUS STAND ROAD,KARIMNAGAR,Telangana."),
+            tmp_path / "scan_rn4.pdf",
+        )
+        job = link_pipeline.process_document(path)[0]
+
+        assert job.fields.candidates == []
+        assert job.fields.document_kind_verified is False
+        assert job.status.value == "held"
+
     def test_an_unreadable_title_does_not_fall_back_to_the_receipt(
         self, link_pipeline, tmp_path, monkeypatch
     ):
@@ -459,6 +483,54 @@ class TestWhenTheDocumentArrivesAsAScan:
 
         assert job.status.value != "held"
         assert job.template_name == "chit_receipt"
+
+
+class TestAnUnconfirmedTypeInConfirmationMode:
+    """Confirmation mode asks a person for the number, not the document type,
+    so the dialog used to send a disputed scan under the first read's choice."""
+
+    def _unverified(self, pipeline, path):
+        from datetime import datetime
+
+        from waprinter.models import ExtractedFields, PrintJob
+
+        fields = ExtractedFields(
+            document_kind="receipt", document_kind_verified=False,
+            has_text_layer=False, used_ocr=True,
+        )
+        return PrintJob(id="scan", created_at=datetime.now(), pdf_path=path, fields=fields)
+
+    def test_the_gate_holds_it_instead_of_asking_for_a_number(
+        self, confirm_pipeline, tmp_path
+    ):
+        from waprinter.rules import Decision, evaluate
+
+        job = self._unverified(confirm_pipeline, tmp_path / "x.pdf")
+        outcome = evaluate(job, confirm_pipeline.settings, confirm_pipeline.store)
+        assert outcome.decision is Decision.HOLD
+        assert "two different answers" in outcome.reason
+
+    def test_a_queue_send_needs_the_type_chosen(self, confirm_pipeline, tmp_path):
+        path = build_removal_notice(RemovalNoticeSpec(), tmp_path / "rn.pdf")
+        job = self._unverified(confirm_pipeline, path)
+        confirm_pipeline.store.upsert(job)
+
+        with pytest.raises(ValueError, match="Choose the document type"):
+            confirm_pipeline.release(job.id, "9000012345")
+
+    def test_choosing_the_type_lets_it_go(self, confirm_pipeline, tmp_path):
+        from waprinter.models import JobStatus
+
+        confirm_pipeline.settings.template_variables.update(
+            {"notice_no": "invoice_number", "date": "invoice_date"}
+        )
+        path = build_removal_notice(RemovalNoticeSpec(), tmp_path / "rn.pdf")
+        job = self._unverified(confirm_pipeline, path)
+        confirm_pipeline.store.upsert(job)
+
+        sent = confirm_pipeline.release(job.id, "9000012345", document_kind="removal_notice")
+        assert sent.status is JobStatus.DRY_RUN
+        assert sent.template_name == "removal_notice"
 
 
 def _kind(name: str):

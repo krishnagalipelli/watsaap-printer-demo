@@ -21,9 +21,9 @@ from .extract import extract_fields
 from .extract.pdf_text import read as read_pdf
 from .extract.profile import DocumentProfile
 from .extract.split import receipt_groups, segment_path, write_segment
-from .models import JobStatus, PrintJob
+from .models import ExtractedFields, JobStatus, PrintJob
 from .rules import Decision, evaluate
-from .rules.gate import dedupe_key, excluded_numbers
+from .rules.gate import dedupe_key, excluded_numbers, volume_limit_reason
 from .send.base import Sender
 from .send.templates import RenderedMessage, TemplateStore, render
 from .store import Store
@@ -104,52 +104,77 @@ class Pipeline:
         templates_path = self.templates.path
         changed = False
 
-        if self._stamp(settings_path) != self._stamps.get("settings"):
-            self._stamps["settings"] = self._stamp(settings_path)
+        stamp = self._stamp(settings_path)
+        if self._unreadable(settings_path, stamp):
+            # Present but held open by something else right now. Keep what
+            # is loaded and look again on the next poll; reading it as
+            # missing replaced every setting with the defaults.
+            pass
+        elif stamp != self._stamps.get("settings"):
             try:
-                fresh = Settings.load()
+                fresh = Settings.load(raise_if_unreadable=True)
+            except OSError as exc:
+                log.warning("settings.json could not be opened (%s); will retry", exc)
+                fresh = None
             except Exception:
+                self._stamps["settings"] = stamp
                 log.exception("could not re-read settings.json")
                 return changed
-            before = (
-                self.settings.dry_run,
-                self.settings.phone_number_id,
-                self.settings.graph_api_version,
-                self.settings.force_ipv4,
-            )
-            for name in fresh.__dataclass_fields__:
-                setattr(self.settings, name, getattr(fresh, name))
-            after = (
-                self.settings.dry_run,
-                self.settings.phone_number_id,
-                self.settings.graph_api_version,
-                self.settings.force_ipv4,
-            )
-            changed = True
-            if before != after:
-                try:
-                    self.rebuild_sender()
-                    log.info("settings changed on disk; sender re-wired")
-                except Exception as exc:
-                    from .send.unavailable import UnavailableSender
+            if fresh is not None:
+                self._stamps["settings"] = stamp
+                changed = self._adopt_settings(fresh) or changed
 
-                    # Never keep a test sender after importing live settings.
-                    self.sender = UnavailableSender(str(exc))
-                    log.exception("could not re-wire the sender after a reload")
-
-        if self._stamp(templates_path) != self._stamps.get("templates"):
-            self._stamps["templates"] = self._stamp(templates_path)
+        stamp = self._stamp(templates_path)
+        if not self._unreadable(templates_path, stamp) and stamp != self._stamps.get("templates"):
             try:
-                self.templates.load()
+                self.templates.load(raise_if_unreadable=True)
+                self._stamps["templates"] = stamp
                 log.info("templates changed on disk; reloaded")
                 changed = True
+            except OSError as exc:
+                log.warning("templates.json could not be opened (%s); will retry", exc)
             except Exception:
+                self._stamps["templates"] = stamp
                 log.exception("could not re-read templates.json")
 
         if self.reload_profile():
             changed = True
 
         return changed
+
+    @staticmethod
+    def _unreadable(path: Path, stamp: bytes | None) -> bool:
+        """Whether `path` exists but could not be read just now."""
+        return stamp is None and path.exists()
+
+    def _adopt_settings(self, fresh: Settings) -> bool:
+        """Copy freshly read settings into the shared object; re-wire the
+        sender if anything it was built from changed. Returns True."""
+        before = (
+            self.settings.dry_run,
+            self.settings.phone_number_id,
+            self.settings.graph_api_version,
+            self.settings.force_ipv4,
+        )
+        for name in fresh.__dataclass_fields__:
+            setattr(self.settings, name, getattr(fresh, name))
+        after = (
+            self.settings.dry_run,
+            self.settings.phone_number_id,
+            self.settings.graph_api_version,
+            self.settings.force_ipv4,
+        )
+        if before != after:
+            try:
+                self.rebuild_sender()
+                log.info("settings changed on disk; sender re-wired")
+            except Exception as exc:
+                from .send.unavailable import UnavailableSender
+
+                # Never keep a test sender after importing live settings.
+                self.sender = UnavailableSender(str(exc))
+                log.exception("could not re-wire the sender after a reload")
+        return True
 
     def reload_profile(self, force: bool = False) -> bool:
         """Pick up document types and fields taught since the last read.
@@ -160,6 +185,8 @@ class Pipeline:
         """
         profile_path = paths().profile
         stamp = self._stamp(profile_path)
+        if self._unreadable(profile_path, stamp):
+            return False  # held open elsewhere; keep the taught types we have
         if not force and stamp == self._stamps.get("profile"):
             return False
         self._stamps["profile"] = stamp
@@ -561,7 +588,7 @@ class Pipeline:
             )
 
         # --- link mode ----------------------------------------------------
-        if self.settings.send_mode == "link":
+        if self.hands_off_by_link:
             return self._prepare_link(job, message)
 
         if message.missing:
@@ -573,6 +600,37 @@ class Pipeline:
 
         # --- send ---------------------------------------------------------
         return self._send(job, message, now)
+
+    @_processing
+    def record_unreadable_capture(
+        self,
+        path: Path,
+        reason: str,
+        doc_title: str | None = None,
+        windows_user: str | None = None,
+        now: datetime | None = None,
+    ) -> PrintJob:
+        """Record a print that arrived but could not be turned into a PDF.
+
+        A failed job, so it is in Needs attention with the reason, rather
+        than a file sitting in the inbox that only the log knows about.
+        """
+        job = PrintJob(
+            id=uuid.uuid4().hex[:16],
+            created_at=now or datetime.now(),
+            pdf_path=path,
+            doc_title=doc_title,
+            windows_user=windows_user,
+            fields=ExtractedFields(has_text_layer=False),
+        )
+        self.store.upsert(job)
+        self.store.log(job.id, "captured", str(path))
+        return self._fail(
+            job,
+            f"This print could not be converted for sending, so nothing was "
+            f"sent ({reason}). The file is kept at {path}. Print it again, or "
+            f"save it as a PDF into the spool folder.",
+        )
 
     def _send(self, job: PrintJob, message: RenderedMessage, now: datetime) -> PrintJob:
         """Hand one composed job to the sender and record what came back.
@@ -611,6 +669,19 @@ class Pipeline:
             return job
 
         return self._fail(job, result.error or "Send failed", retryable=result.retryable)
+
+    @property
+    def hands_off_by_link(self) -> bool:
+        """Whether a cleared job goes to a WhatsApp chat rather than a sender.
+
+        Not in test mode. Link mode used to ignore it: with both switched on
+        -- which is how every install ships -- a print still opened the
+        member's chat with the message typed out and the receipt on the
+        clipboard, while the window said "nothing is sent". In test mode a
+        link-mode install records what it would have handed over through
+        the dry-run sender, the same as an API install does.
+        """
+        return self.settings.send_mode == "link" and not self.settings.dry_run
 
     def _prepare_link(self, job: PrintJob, message) -> PrintJob:
         """Compose a click-to-chat link and wait for the operator to open it.
@@ -687,11 +758,26 @@ class Pipeline:
         e164 = parse_typed_number(recipient, self.settings.default_country_code)
         if e164 is None:
             raise ValueError(f"'{recipient}' is not a valid mobile number")
+        # The same rails the gate applies to a number it found. A person
+        # typing the number is no reason to send to the business's own
+        # line, or to let a run of queue sends past the volume caps.
+        if e164 in excluded_numbers(self.settings):
+            raise ValueError(
+                f"{e164} is one of your own numbers or on the blocklist, so "
+                f"nothing is sent to it. Check the customer's number."
+            )
+        limited = volume_limit_reason(self.settings, self.store, now)
+        if limited:
+            raise ValueError(f"{limited} Send it again in a little while.")
 
         if document_kind is not None:
             job.fields = self.fields_for_kind(job.pdf_path, document_kind)
-        if job.fields.classification_error or (
-            job.fields.document_kind is None and self.settings.document_templates
+        # An unconfirmed scan type counts as unknown: the two OCR reads
+        # disagreed about which message it goes out under.
+        if (
+            job.fields.classification_error
+            or not job.fields.document_kind_verified
+            or (job.fields.document_kind is None and self.settings.document_templates)
         ):
             raise ValueError("Choose the document type before sending this document.")
 
@@ -714,7 +800,7 @@ class Pipeline:
 
         job.recipient = e164
         job.hold_reason = None
-        job.dedupe_key = dedupe_key(job.fields, e164)
+        job.dedupe_key = dedupe_key(job.fields, e164, job.pdf_path)
         self.store.log(job.id, "released", f"operator chose {e164}; document type {job.fields.document_kind or 'default'}")
 
         prior = self.store.find_duplicate(
@@ -735,7 +821,7 @@ class Pipeline:
         if message is None:
             return self._hold(job, f"Template '{wanted}' is not configured.")
 
-        if self.settings.send_mode == "link":
+        if self.hands_off_by_link:
             return self._prepare_link(job, message)
 
         return self._send(job, message, now)

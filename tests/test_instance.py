@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import socket
 import threading
 import time
+
+import pytest
 
 from waprinter.instance import SingleInstance
 
@@ -95,3 +98,102 @@ def test_a_failure_to_raise_never_kills_the_listener(tmp_path):
         assert _wait_for(lambda: len(calls) == 2)
     finally:
         owner.release()
+
+
+class TestTheLockDecidesWhoRuns:
+    """Who owns the machine used to be read off the port file, which got a
+    stale file pointing at someone else's port, and two launches at once,
+    both wrong."""
+
+    def test_only_one_process_can_claim(self, tmp_path):
+        first = SingleInstance(tmp_path / "instance.port")
+        second = SingleInstance(tmp_path / "instance.port")
+        try:
+            assert first.claim() is True
+            assert second.claim() is False
+        finally:
+            first.release()
+            second.release()
+
+    def test_releasing_lets_the_next_launch_claim(self, tmp_path):
+        first = SingleInstance(tmp_path / "instance.port")
+        assert first.claim() is True
+        first.release()
+        again = SingleInstance(tmp_path / "instance.port")
+        try:
+            assert again.claim() is True
+        finally:
+            again.release()
+
+    def test_claiming_twice_from_the_owner_is_harmless(self, tmp_path):
+        owner = SingleInstance(tmp_path / "instance.port")
+        try:
+            assert owner.claim() is True
+            assert owner.claim() is True
+        finally:
+            owner.release()
+
+
+class TestStartingTheAgent:
+    @pytest.fixture
+    def started(self, monkeypatch):
+        """Run agent.main with the heavy parts stubbed out; record whether an
+        agent was started."""
+        from waprinter import agent
+
+        runs: list[bool] = []
+
+        class StubAgent:
+            def __init__(self, instance=None):
+                self.instance = instance
+
+            def run(self, visible=True):
+                runs.append(visible)
+
+        monkeypatch.setattr(agent, "Agent", StubAgent)
+        monkeypatch.setattr(agent, "configure_logging", lambda *_a, **_k: None)
+        monkeypatch.setattr("waprinter.provision.apply_if_present", lambda: None)
+        return agent, runs
+
+    def test_a_stale_port_held_by_another_program_does_not_block_startup(
+        self, started, tmp_path
+    ):
+        """After a power cut the port file named a port some other program
+        then took. The launch connected to it, thought an agent was running,
+        and exited -- every time, until that program let go."""
+        from waprinter.config import paths
+
+        agent, runs = started
+        other = socket.socket()
+        other.bind(("127.0.0.1", 0))
+        other.listen(1)
+        try:
+            paths().root.mkdir(parents=True, exist_ok=True)
+            (paths().root / "instance.port").write_text(str(other.getsockname()[1]))
+            assert agent.main(["--hidden"]) == 0
+        finally:
+            other.close()
+        assert runs == [False], "the agent should have started"
+
+    def test_a_second_launch_bows_out_while_the_first_holds_the_lock(self, started):
+        from waprinter.config import paths
+
+        agent, runs = started
+        owner = SingleInstance(paths().root / "instance.port")
+        try:
+            assert owner.claim()
+            assert agent.main(["--hidden"]) == 0
+        finally:
+            owner.release()
+        assert runs == [], "a second agent was started beside the first"
+
+    def test_the_lock_is_let_go_when_the_agent_stops(self, started):
+        from waprinter.config import paths
+
+        agent, _runs = started
+        agent.main(["--hidden"])
+        after = SingleInstance(paths().root / "instance.port")
+        try:
+            assert after.claim() is True
+        finally:
+            after.release()

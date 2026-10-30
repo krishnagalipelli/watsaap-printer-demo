@@ -1107,6 +1107,7 @@ class DesktopWindow:
                 return
         if job is not None and document_kind is None and (
             job.fields.classification_error or
+            not job.fields.document_kind_verified or
             (job.fields.document_kind is None and self.settings.document_templates)
         ):
             self._choose_job_kind(job, recipient)

@@ -20,10 +20,12 @@ import os
 import time
 from pathlib import Path
 
+from .capture import xps
 from .config import Paths, Settings
 
 log = logging.getLogger(__name__)
 
+_PRUNABLE = {".pdf"} | xps.SUFFIXES
 DRY_RUN_LOG_MAX_BYTES = 5_000_000
 CRASH_LOG_MAX_BYTES = 1_000_000
 
@@ -51,7 +53,10 @@ def prune_inbox(
     now = time.time() if now is None else now
     cutoff = now - keep_days * 86_400
     removed = 0
-    for pdf in inbox.glob("*.pdf"):
+    # XPS too: a Windows 7 print that could not be converted stays in the
+    # inbox under its own suffix, and once its failed job is resolved it is
+    # as prunable as any PDF.
+    for pdf in sorted(p for p in inbox.iterdir() if p.suffix.lower() in _PRUNABLE):
         if pdf in protected:
             continue
         try:

@@ -92,6 +92,43 @@ class TestPrintingInLinkMode:
         assert job.id in {j.id for j in link_pipeline.store.pending()}
 
 
+class TestLinkModeInTestMode:
+    """Both switches on is how every install ships, and the window then says
+    "nothing is sent". A print used to open the member's chat anyway."""
+
+    @pytest.fixture
+    def test_mode(self, link_pipeline):
+        link_pipeline.settings.dry_run = True
+        return link_pipeline
+
+    def test_no_chat_link_is_prepared(self, test_mode, chit):
+        job = test_mode.process(chit(), doc_title="Chit Receipt")
+        assert job.status is JobStatus.DRY_RUN
+        assert job.chat_url is None
+
+    def test_the_would_be_message_is_recorded_like_any_test_send(
+        self, test_mode, chit, tmp_path
+    ):
+        test_mode.process(chit(), doc_title="Chit Receipt")
+        logged = (tmp_path / "dry_run.jsonl").read_text(encoding="utf-8")
+        assert "+919000012345" in logged
+
+    def test_nothing_waits_to_be_opened(self, test_mode, chit):
+        test_mode.process(chit(), doc_title="Chit Receipt")
+        assert not test_mode.store.by_status(JobStatus.READY)
+
+    def test_a_queue_send_is_recorded_not_linked(self, test_mode, chit):
+        held = test_mode.process(chit(ChitReceiptSpec(member_phone=None), "nonum.pdf"))
+        sent = test_mode.release(held.id, "9000012345")
+        assert sent.status is JobStatus.DRY_RUN
+        assert sent.chat_url is None
+
+    def test_a_test_reprint_is_suppressed_by_the_test_history(self, test_mode, chit):
+        test_mode.process(chit(), doc_title="Chit Receipt")
+        again = test_mode.process(chit(name="again.pdf"), doc_title="Chit Receipt")
+        assert again.status is JobStatus.DUPLICATE
+
+
 class TestHandingOff:
     def test_opening_the_chat_is_recorded_as_handed_off(self, link_pipeline, chit):
         job = link_pipeline.process(chit(), doc_title="Chit Receipt")

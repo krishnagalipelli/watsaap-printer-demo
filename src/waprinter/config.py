@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +45,29 @@ def atomic_write_text(path: Path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+# A file another program has open -- an antivirus scan, most often -- refuses
+# to open for a moment. Worth a few short retries before giving up on it.
+READ_ATTEMPTS = 3
+READ_RETRY_SECONDS = 0.1
+
+
+def read_text_retrying(path: Path) -> str:
+    """`path`'s text, retrying briefly when it cannot be opened.
+
+    A missing file is not retried: that is an answer, not a busy file.
+    """
+    for attempt in range(READ_ATTEMPTS):
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise
+        except OSError:
+            if attempt == READ_ATTEMPTS - 1:
+                raise
+            time.sleep(READ_RETRY_SECONDS)
+    raise AssertionError("unreachable")
 
 
 def set_aside_corrupt(path: Path) -> Path | None:
@@ -318,15 +342,42 @@ class Settings:
     setup_pin: str = ""
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "Settings":
+    def load(
+        cls, path: Path | None = None, *, raise_if_unreadable: bool = False
+    ) -> "Settings":
+        """The settings on disk, or the defaults.
+
+        A file that cannot be *parsed* is set aside and the defaults used. A
+        file that cannot be *opened* is different: on Windows an antivirus
+        scan or another program holding it open is enough, and the contents
+        are fine. That used to be treated as corruption -- the good file was
+        renamed away and the counter lost its account, mappings and own
+        numbers. It is now retried, then left where it is. At startup the
+        defaults stand in until it can be read; `raise_if_unreadable` lets a
+        reload keep the settings it already has instead.
+        """
         path = path or Paths(data_root()).settings
         if not path.exists():
             return cls()
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            text = read_text_retrying(path)
+        except FileNotFoundError:
+            return cls()
+        except OSError as exc:
+            if raise_if_unreadable:
+                raise
+            log.error(
+                "could not open %s (%s); using defaults until it can be read. "
+                "The file was left in place.",
+                path,
+                exc,
+            )
+            return cls()
+        try:
+            raw = json.loads(text)
             if not isinstance(raw, dict):
                 raise ValueError("settings.json is not a JSON object")
-        except (OSError, ValueError) as exc:
+        except ValueError as exc:
             # A file that cannot be read must not stop the agent starting:
             # the defaults are the safe state (test mode, nothing sent), and
             # the broken file is kept beside them for whoever looks into it.

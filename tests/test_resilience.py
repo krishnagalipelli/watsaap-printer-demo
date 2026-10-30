@@ -19,6 +19,85 @@ import pytest
 from waprinter.config import Settings, atomic_write_text, paths
 
 
+def _locked(monkeypatch, target: Path, failures: int = 99):
+    """Make `target` refuse to open, as a file held by antivirus does.
+
+    Returns a function that lets go of it.
+    """
+    real = Path.read_text
+    left = {"n": failures}
+
+    def read_text(self, *args, **kwargs):
+        if self == target and left["n"] > 0:
+            left["n"] -= 1
+            raise PermissionError(13, "The process cannot access the file", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr("waprinter.config.READ_RETRY_SECONDS", 0)
+    return lambda: left.update(n=0)
+
+
+class TestABusyFileIsNotACorruptOne:
+    """A file another program has open for a moment is fine. It used to be
+    renamed away as corrupt, and the counter lost its whole setup."""
+
+    def test_a_locked_settings_file_is_left_in_place(self, tmp_path, monkeypatch):
+        path = tmp_path / "settings.json"
+        Settings(dry_run=False, phone_number_id="123").save(path)
+        _locked(monkeypatch, path)
+
+        settings = Settings.load(path)
+
+        assert settings.dry_run is True, "the defaults stand in meanwhile"
+        assert path.exists()
+        assert not list(tmp_path.glob("settings.json.corrupt-*"))
+
+    def test_a_briefly_locked_file_is_read_on_a_retry(self, tmp_path, monkeypatch):
+        path = tmp_path / "settings.json"
+        Settings(phone_number_id="123").save(path)
+        _locked(monkeypatch, path, failures=2)
+
+        assert Settings.load(path).phone_number_id == "123"
+
+    def test_a_locked_templates_file_is_left_in_place(self, tmp_path, monkeypatch):
+        from waprinter.send.templates import TemplateStore
+
+        path = tmp_path / "templates.json"
+        TemplateStore(path, "Biz").save()
+        _locked(monkeypatch, path)
+
+        store = TemplateStore(path, "Biz")
+
+        assert store.get("chit_receipt") is not None
+        assert path.exists()
+        assert not list(tmp_path.glob("templates.json.corrupt-*"))
+
+    def test_a_reload_keeps_the_live_settings(self, pipeline, monkeypatch):
+        live = paths().settings
+        pipeline.settings.phone_number_id = "123"
+        pipeline.apply_settings(pipeline.settings)
+        Settings(phone_number_id="456").save()  # the CLI writes a change
+        let_go = _locked(monkeypatch, live)
+
+        pipeline.reload_if_changed()
+        assert pipeline.settings.phone_number_id == "123"
+        assert live.exists()
+
+        let_go()
+        pipeline.reload_if_changed()
+        assert pipeline.settings.phone_number_id == "456"
+
+    def test_a_reload_keeps_the_live_templates(self, pipeline, monkeypatch):
+        tpl = pipeline.templates.get("invoice_document")
+        assert tpl.status == "approved"
+        _locked(monkeypatch, pipeline.templates.path)
+        pipeline.templates.path.write_bytes(pipeline.templates.path.read_bytes() + b" ")
+
+        pipeline.reload_if_changed()
+        assert pipeline.templates.get("invoice_document").status == "approved"
+
+
 class TestABrokenSettingsFileDoesNotStopTheAgent:
     def test_a_truncated_file_yields_defaults_and_is_set_aside(self, tmp_path, caplog):
         path = tmp_path / "settings.json"

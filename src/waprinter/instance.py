@@ -12,15 +12,23 @@ owns the window records its port; a later launch connects, says SHOW, and
 exits, and the copy that owns the window brings itself to the front.
 
 The port is ephemeral and written to a file rather than fixed, because a fixed
-port eventually collides with something else on a client machine. If nothing
-answers on the recorded port the file is stale — the previous copy was killed,
-or the machine lost power — and this process takes over instead.
+port eventually collides with something else on a client machine.
+
+Who owns the machine is decided by a lock, not by the port. Asking "does
+anything answer on the recorded port" got both directions wrong: after a power
+cut the file named a port some other program could since have taken, and a
+launch that reached it bowed out and never started; and two launches at the
+same moment both found nothing answering and both started. An operating-system
+lock on `instance.lock` has neither problem. Exactly one process holds it, and
+it is released the moment that process dies, however it dies. The port is
+then only how a second launch asks the owner to show its window.
 """
 
 from __future__ import annotations
 
 import logging
 import socket
+import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -43,8 +51,30 @@ class SingleInstance:
 
     def __init__(self, port_file: Path):
         self.port_file = port_file
+        self.lock_file = port_file.with_suffix(".lock")
+        self._lock_handle = None
         self._server: socket.socket | None = None
         self._running = False
+
+    # -- who owns the machine ----------------------------------------------
+
+    def claim(self) -> bool:
+        """Take the machine-wide lock. True means this process is the agent.
+
+        False means another live process holds it. Safe to call again once
+        claimed.
+        """
+        if self._lock_handle is not None:
+            return True
+        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(self.lock_file, "a+b")
+        try:
+            _lock(handle)
+        except OSError:
+            handle.close()
+            return False
+        self._lock_handle = handle
+        return True
 
     # -- the second copy ---------------------------------------------------
 
@@ -120,8 +150,16 @@ class SingleInstance:
                     log.exception("could not raise the window")
 
     def release(self) -> None:
-        """Stop listening and clear the port file. Safe to call twice."""
+        """Stop listening, clear the port file and let go of the lock. Safe
+        to call twice."""
         self._running = False
+        if self._lock_handle is not None:
+            try:
+                _unlock(self._lock_handle)
+            except OSError:
+                pass
+            self._lock_handle.close()
+            self._lock_handle = None
         if self._server is not None:
             try:
                 self._server.close()
@@ -132,3 +170,28 @@ class SingleInstance:
             self.port_file.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _lock(handle) -> None:
+    """Lock the first byte of `handle` without waiting, or raise OSError."""
+    handle.seek(0)
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(handle) -> None:
+    handle.seek(0)
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

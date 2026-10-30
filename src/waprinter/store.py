@@ -363,8 +363,10 @@ class Store:
         """
         now = now or datetime.now()
         cutoff = (now - timedelta(hours=window_hours)).isoformat()
-        status = (JobStatus.HANDED_OFF if send_mode == "link" else
-                  JobStatus.DRY_RUN if dry_run else JobStatus.SENT)
+        # Test mode first: a link-mode install in test mode records its
+        # would-be handoffs as DRY_RUN, like any other test send.
+        status = (JobStatus.DRY_RUN if dry_run else
+                  JobStatus.HANDED_OFF if send_mode == "link" else JobStatus.SENT)
         row = self.conn.execute(
             """
             SELECT * FROM jobs
