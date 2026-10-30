@@ -27,7 +27,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from .. import __version__
 from ..archive import folder_for
 from ..models import JobStatus
-from . import icons, theme
+from . import clipboard, icons, theme
 from . import viewmodel as vm
 from .notification import Notification
 
@@ -92,6 +92,7 @@ class DesktopWindow:
         self.root.title("WhatsApp Printer")
         self._size_window()
         theme.apply(self.root)
+        clipboard.install(self.root)
 
         self._build_sidebar()
         ttk.Separator(self.root, orient="vertical").pack(side="left", fill="y")
@@ -114,10 +115,7 @@ class DesktopWindow:
     def _size_window(self) -> None:
         """As roomy as the design wants, but never past the edge of a small
         counter screen: some of them are still 1024 x 768."""
-        width = min(1120, self.root.winfo_screenwidth() - 40)
-        height = min(740, self.root.winfo_screenheight() - 90)
-        self.root.geometry(f"{width}x{height}")
-        self.root.minsize(min(960, width), min(600, height))
+        theme.fit_window(self.root, 1120, 740, 960, 600)
 
     def _icon(self, name: str, colour: str, size: int = 16, **gap) -> object:
         return icons.icon(self.root, name, colour, size, **gap)
@@ -234,12 +232,16 @@ class DesktopWindow:
     def _go(self, key: str) -> None:
         """What a side bar entry does."""
         if key in {k for k, _label, _icon in COUNTER_PAGES}:
+            if self._setup_shown and not self.setup_view.can_leave():
+                return
             self.show_view(key)
             return
         current = self.setup_view.current
         page = "templates" if key == "templates" else (
             current if current and current != "templates" else "connect")
         if self._setup_shown:
+            if page != current and not self.setup_view.can_leave():
+                return
             self.setup_view.show_page(page)   # past the PIN already
         else:
             self.open_setup(page)
@@ -959,7 +961,7 @@ class DesktopWindow:
     def _show_setup_text(self, title: str, text: str) -> None:
         dialog = tk.Toplevel(self.root)
         dialog.title(title)
-        dialog.geometry("640x480")
+        theme.fit_window(dialog, 640, 480)
         dialog.configure(background=theme.PAPER)
         body = ttk.Frame(dialog, padding=12)
         body.pack(fill="both", expand=True)
@@ -1130,7 +1132,7 @@ class DesktopWindow:
         from .setup import Tasks
         dialog = tk.Toplevel(self.root)
         dialog.title("Review document type and message")
-        dialog.geometry("620x440")
+        theme.fit_window(dialog, 620, 440)
         dialog.transient(self.root)
         ttk.Label(dialog, text="Open the PDF, choose its type, then review the message.",
                   padding=12).pack(anchor="w")
@@ -1153,8 +1155,10 @@ class DesktopWindow:
                 name, message = self.pipeline.compose(copy)
                 if message is None:
                     raise ValueError(name)
-                if message.missing:
-                    raise ValueError("Message values missing: " + ", ".join(message.missing))
+                optional = self.pipeline.profile.optional_fields(copy.fields.document_kind)
+                needed = [m for m in message.missing if m not in optional]
+                if needed:
+                    raise ValueError("Message values missing: " + ", ".join(needed))
                 return message.preview
             def done(result):
                 if selected.get() != chosen:

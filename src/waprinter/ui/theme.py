@@ -18,6 +18,7 @@ setupmodel.py.
 
 from __future__ import annotations
 
+import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
@@ -52,6 +53,8 @@ def blend(front: str, back: str, amount: float) -> str:
 FAINT = blend(INK, PAPER, 0.25)          # a count of nothing
 HEAD = blend(WASH, CARD, 0.45)           # table headings
 MINT_OFF = blend(MINT, PAPER, 0.45)      # a primary button that cannot be pressed
+# Selected text in a box: plainly visible, and INK still reads on it.
+SELECTED_TEXT = blend(MINT, CARD, 0.45)
 ON_INK = blend(PAPER, INK, 0.65)         # secondary text on the ink card
 ON_INK_FAINT = blend(PAPER, INK, 0.5)
 
@@ -142,7 +145,7 @@ def apply(root: tk.Tk) -> ttk.Style:
     style.configure(
         ".", background=PAPER, foreground=INK, font=BODY, bordercolor=LINE,
         lightcolor=CARD, darkcolor=CARD, troughcolor=PAPER, focuscolor=MINT,
-        selectbackground=WASH, selectforeground=INK, insertcolor=INK,
+        selectbackground=SELECTED_TEXT, selectforeground=INK, insertcolor=INK,
         fieldbackground=CARD, arrowcolor=SUBTLE,
     )
     style.map(".", foreground=[("disabled", blend(SUBTLE, PAPER, 0.7))])
@@ -224,11 +227,14 @@ def apply(root: tk.Tk) -> ttk.Style:
     # Anything you type into.
     field = dict(fieldbackground=CARD, background=CARD, foreground=INK,
                  bordercolor=LINE, lightcolor=CARD, darkcolor=CARD)
-    style.configure("TEntry", padding=(7, 5), **field)
+    # Text selected in a box has to stand out from the box: in WASH, on white,
+    # it was next to invisible, and nobody could see what they were copying.
+    selected = dict(selectbackground=SELECTED_TEXT, selectforeground=INK)
+    style.configure("TEntry", padding=(7, 5), **field, **selected)
     focus = [("focus", MINT)]
     style.map("TEntry", bordercolor=focus, lightcolor=focus,
               fieldbackground=[("disabled", PAPER), ("readonly", PAPER)])
-    style.configure("TCombobox", padding=(7, 4), arrowsize=13, **field)
+    style.configure("TCombobox", padding=(7, 4), arrowsize=13, **field, **selected)
     style.map("TCombobox", bordercolor=focus, lightcolor=focus,
               fieldbackground=[("readonly", CARD), ("disabled", PAPER)],
               background=[("active", WASH), ("readonly", CARD)],
@@ -294,6 +300,61 @@ px = _px
 # -- shapes ----------------------------------------------------------------------
 
 
+def work_area(widget: tk.Misc) -> tuple[int, int, int, int]:
+    """(x, y, width, height) of the screen a window can use, without the taskbar.
+
+    Windows says exactly, wherever the taskbar is and however tall. Anywhere
+    else, the screen less a taskbar's worth.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            SPI_GETWORKAREA = 48
+            rect = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(
+                SPI_GETWORKAREA, 0, ctypes.byref(rect), 0
+            ):
+                return (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+        except (AttributeError, OSError, ValueError):
+            pass
+    return (0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight() - _px(widget, 50))
+
+
+def fitted_geometry(
+    area: tuple[int, int, int, int], width: int, height: int, chrome: int
+) -> tuple[int, int, int, int]:
+    """(width, height, x, y) for a window centred in `area`, wholly inside it.
+
+    `chrome` is the title bar, which a Tk height does not count and the screen
+    still has to find room for.
+    """
+    left, top, available_width, available_height = area
+    width = min(width, available_width)
+    height = min(height, available_height - chrome)
+    return (
+        width,
+        height,
+        left + (available_width - width) // 2,
+        top + max(0, (available_height - chrome - height) // 2),
+    )
+
+
+def fit_window(window: tk.Misc, width: int, height: int,
+               min_width: int = 0, min_height: int = 0) -> None:
+    """Size and place a window so nothing in it ends up under the taskbar.
+
+    The size asked for if it fits, and otherwise as much as there is: a counter
+    screen can be 1024 x 768, and a window opened taller than that keeps its
+    bottom edge, and whatever buttons are on it, out of reach.
+    """
+    w, h, x, y = fitted_geometry(work_area(window), width, height, _px(window, 40))
+    window.geometry(f"{w}x{h}+{x}+{y}")
+    if min_width or min_height:
+        window.minsize(min(min_width, w), min(min_height, h))
+
+
 def autowrap(label: ttk.Label, margin: int = 6) -> ttk.Label:
     """Wrap the label's text at whatever width it is given, not a fixed one.
 
@@ -348,7 +409,8 @@ def style_text(widget: tk.Text) -> tk.Text:
     widget.configure(
         background=CARD, foreground=INK, font=BODY, relief="flat", borderwidth=0,
         highlightthickness=1, highlightbackground=WASH, highlightcolor=WASH,
-        insertbackground=INK, selectbackground=WASH, selectforeground=INK,
+        insertbackground=INK, selectbackground=SELECTED_TEXT, selectforeground=INK,
+        inactiveselectbackground=SELECTED_TEXT,
     )
     return widget
 

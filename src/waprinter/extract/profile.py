@@ -157,6 +157,12 @@ class FieldRule:
 
     With no label, `pattern` alone finds the value -- for identifiers such as
     "CR1747/26" that stand on the page with nothing beside them.
+
+    `multiline` lets a value carry on down the following lines as far as the
+    label `until`, so one rule reads "Cash" on one receipt and three lines of
+    payment details on the next. `optional` says the value is not on every
+    print of this type -- a transaction ID on a cash receipt -- so its absence
+    is a fact about that print and not a reason to hold it.
     """
 
     name: str
@@ -164,6 +170,9 @@ class FieldRule:
     kind: str = "text"
     pattern: str = ""
     where: str = "right"
+    multiline: bool = False
+    until: str = ""
+    optional: bool = False
 
     def __post_init__(self) -> None:
         self.name = str(self.name).strip()
@@ -172,6 +181,9 @@ class FieldRule:
             self.kind = "text"
         if self.where not in FIELD_WHERE:
             self.where = "right"
+        self.multiline = bool(self.multiline)
+        self.until = str(self.until or "").strip()
+        self.optional = bool(self.optional)
         self.pattern = str(self.pattern or "")
         if self.pattern:
             # A pattern that does not compile would raise on every print.
@@ -354,6 +366,10 @@ class DocumentProfile:
     def rules_for(self, kind: DocumentKind | str | None) -> list[FieldRule]:
         """The taught fields that apply to one kind of document."""
         return list(self.field_rules.get(self.rules_key(kind), []))
+
+    def optional_fields(self, kind: DocumentKind | str | None) -> set[str]:
+        """Fields of this type someone said are not on every print."""
+        return {rule.name for rule in self.rules_for(kind) if rule.optional}
 
     def for_kind(self, kind: DocumentKind | None) -> "DocumentProfile":
         """This profile as it applies to one kind of document.

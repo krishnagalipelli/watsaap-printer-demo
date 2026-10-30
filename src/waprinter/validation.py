@@ -99,11 +99,9 @@ def validate(samples: list[Sample], profile: DocumentProfile, settings: Settings
                 result.errors.append(f"Recipient: expected {sample.recipient or 'none'}, read {got or 'none'}.")
             # Every taught value must have independent expected output. A blank
             # expected value is explicit, but cannot validate a newly taught rule.
-            for rule in (profile.rules_for(sample.kind) if sample.recipient is not None else []):
-                if rule.kind != "phone" and not sample.values.get(rule.name):
-                    result.errors.append(f"Review an expected value for {rule.name}.")
-                if rule.kind == "phone" and not sample.recipient:
-                    result.errors.append("Review the expected customer mobile number.")
+            if sample.recipient is not None:
+                for problem in unreviewed(sample, profile.rules_for(sample.kind)):
+                    result.errors.append(problem)
             if templates is not None:
                 name = settings.document_templates.get(fields.document_kind or "")
                 if fields.document_kind == "receipt":
@@ -116,8 +114,10 @@ def validate(samples: list[Sample], profile: DocumentProfile, settings: Settings
                     else:
                         message = render(template, variable_map(template, settings), fields,
                                          extra={"business_name": settings.business_name})
-                        if message.missing:
-                            result.errors.append("Message values missing: " + ", ".join(message.missing))
+                        optional = profile.optional_fields(fields.document_kind)
+                        needed = [m for m in message.missing if m not in optional]
+                        if needed:
+                            result.errors.append("Message values missing: " + ", ".join(needed))
         except Exception as exc:
             result.errors.append(str(exc))
     if target is not None and len(distinct) < MIN_SAMPLES:
@@ -125,6 +125,29 @@ def validate(samples: list[Sample], profile: DocumentProfile, settings: Settings
     if target is not None and len(distinct) >= MIN_SAMPLES and len(examples) < 2:
         report.errors.append("Use samples with different customer or field values, not repeated copies of one document.")
     return report
+
+
+def unreviewed(sample: Sample, rules) -> list[str]:
+    """What this sample has no expected answer for, given the rules as they are.
+
+    A field that is not on every document may be blank; any other has to have
+    a value, which is how a field taught after the sample was reviewed shows up.
+    """
+    problems = []
+    for rule in rules:
+        if rule.kind == "phone":
+            if not sample.recipient:
+                problems.append("Review the expected customer mobile number.")
+        elif not sample.values.get(rule.name) and not rule.optional:
+            problems.append(
+                f"Review an expected value for {rule.name}. If this document does not "
+                f"have one, mark the field 'Not on every document'."
+            )
+    return problems
+
+
+def digest_of(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def unique_paths(pdfs: list[Path]) -> list[Path]:
@@ -152,7 +175,15 @@ def saved_samples(except_kind: str | None = None) -> list[Sample]:
     return samples
 
 
-def save_samples(samples: list[Sample]) -> None:
+def save_samples(samples: list[Sample], replacing: str | None = None) -> None:
+    """Store reviewed samples. `replacing` names a type whose stored samples
+    are exactly these from now on, so one removed from the list stays removed."""
+    if replacing is not None:
+        key = DocumentProfile.rules_key(replacing)
+        kept = {digest_of(s.path) for s in samples if DocumentProfile.rules_key(s.kind) == key}
+        for record in (paths().samples / "validation" / key).glob("*"):
+            if record.stem not in kept:
+                record.unlink()
     for sample in samples:
         key = DocumentProfile.rules_key(sample.kind)
         if key != "_default" and field_name(key) != key:

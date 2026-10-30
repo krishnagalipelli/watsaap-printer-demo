@@ -381,9 +381,10 @@ class Pipeline:
             f"template."
         )
 
-    def missing_required(self, message: RenderedMessage) -> list[str]:
+    def missing_required(self, message: RenderedMessage, kind: str | None = None) -> list[str]:
         """Mapped values this print did not supply, for templates set up on
-        the mapping screen. Empty for everything else.
+        the mapping screen. Empty for everything else, and never a field
+        taught as not being on every print of this kind.
 
         A template someone mapped by hand says which values belong in the
         message. Sending "Member ID: -" to a member is the silent failure the
@@ -395,7 +396,10 @@ class Pipeline:
         from .extract.rules import display_name
 
         names = []
+        optional = self.profile.optional_fields(kind)
         for source in message.missing:
+            if source in optional:
+                continue
             if source.startswith("{{"):
                 names.append(source)
             else:
@@ -578,7 +582,7 @@ class Pipeline:
         carrying = self.attachment_problem(message.template, message.attachment)
         if carrying:
             return self._hold(job, carrying)
-        required = self.missing_required(message)
+        required = self.missing_required(message, job.fields.document_kind)
         if required:
             return self._hold(
                 job,

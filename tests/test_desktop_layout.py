@@ -23,6 +23,7 @@ import tkinter as tk
 
 import pytest
 
+from waprinter.config import Settings
 from waprinter.extract.profile import DEFAULT_KIND
 
 
@@ -799,3 +800,479 @@ def test_review_samples_collects_corrected_expectations(window, tmp_path, sync_t
     finally:
         if dialog.winfo_exists():
             dialog.destroy()
+
+
+class TestNothingUnderTheTaskbar:
+    """The buttons that finish a job must never depend on scrolling to them."""
+
+    def test_the_teaching_buttons_do_not_scroll(self, restore, tmp_path, sync_tasks):
+        from test_cash_and_online import receipt
+        from waprinter.ui.teach import TeachWindow
+
+        window = TeachWindow(restore.setup_view, receipt(tmp_path / "s.pdf", ["CASH"]), None,
+                             on_saved=lambda key: None)
+        try:
+            canvases = [str(w) for w in _descendants(window) if w.winfo_class() == "Canvas"]
+            for wanted in ("Save", "Cancel", "Try on recent prints"):
+                button = next(w for w in _descendants(window) if w.winfo_class() == "TButton"
+                              and str(w.cget("text")) == wanted)
+                assert not any(str(button).startswith(f"{c}.") for c in canvases), wanted
+        finally:
+            window.close()
+
+    def test_the_review_buttons_do_not_scroll(self, restore, tmp_path, sync_tasks):
+        dialog = _review(restore, tmp_path, 1)
+        try:
+            canvases = [str(w) for w in _descendants(dialog) if w.winfo_class() == "Canvas"]
+            assert not any(str(dialog.next).startswith(f"{c}.") for c in canvases)
+        finally:
+            dialog.destroy()
+
+    def test_a_teaching_window_opens_no_larger_than_the_screen(self, restore, tmp_path, sync_tasks):
+        from test_cash_and_online import receipt
+        from waprinter.ui.teach import TeachWindow
+
+        window = TeachWindow(restore.setup_view, receipt(tmp_path / "s.pdf", ["CASH"]), None,
+                             on_saved=lambda key: None)
+        try:
+            window.update_idletasks()
+            size, _, position = window.geometry().partition("+")
+            height = int(size.split("x")[1])
+            assert int(position.split("+")[1]) + height <= window.winfo_screenheight()
+        finally:
+            window.close()
+
+
+def _review(window, tmp_path, count, **options):
+    from test_cash_and_online import KIND, receipt
+    from waprinter.extract.profile import DocumentProfile
+    from waprinter.ui.validation import ReviewSamples
+    from waprinter.validation import Reader
+
+    profile = DocumentProfile(custom_kinds=[KIND])
+    pdfs = [receipt(tmp_path / f"r{n}.pdf", ["CASH"], bill=f"I-{n}") for n in range(count)]
+    reviewed = options.pop("done", lambda samples: None)
+    return ReviewSamples(window.root, pdfs, "lab", profile, Settings(), Reader(), reviewed, **options)
+
+
+class TestAWrongDocumentCanBeTakenBack:
+    def test_going_back_keeps_what_was_typed(self, window, tmp_path, sync_tasks):
+        dialog = _review(window, tmp_path, 2)
+        try:
+            dialog.entries["recipient"].set("9000012345")
+            dialog.accept()
+            assert dialog.index == 1
+            dialog.back()
+            assert dialog.index == 0
+            assert dialog.entries["recipient"].get() == "+919000012345"
+        finally:
+            dialog.destroy()
+
+    def test_closing_part_way_keeps_what_was_checked(self, window, tmp_path, sync_tasks):
+        got = []
+        dialog = _review(window, tmp_path, 3, done=got.extend)
+        dialog.accept()
+        dialog.finish()
+        assert [s.path.name for s in got] == ["r0.pdf"]
+
+    def test_a_document_of_another_type_cannot_be_accepted(self, window, tmp_path, sync_tasks):
+        import fitz
+
+        dialog = _review(window, tmp_path, 1)
+        try:
+            other = fitz.open()
+            other.new_page().insert_text((30, 30), "SOMETHING ELSE ENTIRELY, a long sentence here")
+            other.save(tmp_path / "other.pdf")
+            dialog.pdfs = [tmp_path / "other.pdf"]
+            dialog.load()
+            assert str(dialog.next.cget("state")) == "disabled"
+            assert str(dialog.remove_button.cget("state")) == "normal"
+            assert "cannot be a sample" in dialog.warning.cget("text")
+        finally:
+            dialog.destroy()
+
+    def test_removing_it_moves_on_and_says_so(self, window, tmp_path, sync_tasks):
+        rejected, got = [], []
+        dialog = _review(window, tmp_path, 2, done=got.extend, on_reject=rejected.append)
+        dialog.reject()
+        assert [p.name for p in rejected] == ["r0.pdf"]
+        assert dialog.index == 0 and dialog.pdfs[0].name == "r1.pdf"
+        dialog.accept()
+        assert [s.path.name for s in got] == ["r1.pdf"]
+
+    def test_a_blank_field_can_be_marked_as_not_on_every_document(
+        self, window, tmp_path, sync_tasks, monkeypatch
+    ):
+        from test_cash_and_online import KIND, lab_profile, receipt
+        from waprinter.ui import validation as screen
+        from waprinter.validation import Reader
+
+        marked, got = [], []
+        monkeypatch.setattr(screen.messagebox, "askyesno", lambda *a, **k: True)
+        dialog = screen.ReviewSamples(
+            window.root, [receipt(tmp_path / "c.pdf", ["CASH"])], KIND.name, lab_profile(),
+            Settings(), Reader(), got.extend, on_optional=marked.append,
+        )
+        dialog.accept()
+        assert marked == ["transaction_id"]
+        assert got[0].values["transaction_id"] == ""
+
+
+class TestTheSampleList:
+    @pytest.fixture
+    def teacher(self, restore, tmp_path, sync_tasks, monkeypatch):
+        from test_cash_and_online import receipt
+        from waprinter.ui import teach
+
+        window = teach.TeachWindow(restore.setup_view, receipt(tmp_path / "taught.pdf", ["CASH"]),
+                                   None, on_saved=lambda key: None)
+        window.name_var.set("Lab")
+        window.title_var.set("LAB RECEIPT")
+        window.info = []
+        monkeypatch.setattr(teach.messagebox, "showinfo", lambda *a, **k: window.info.append(a[1]))
+        yield window
+        window.close()
+
+    def _add(self, window, monkeypatch, *paths):
+        from waprinter.ui import teach
+
+        monkeypatch.setattr(teach.filedialog, "askopenfilenames", lambda **k: [str(p) for p in paths])
+        monkeypatch.setattr(window, "review_samples", lambda: None)
+        window.add_samples()
+
+    def test_the_sample_it_was_taught_from_is_listed_first(self, teacher):
+        rows = teacher._sample_rows()
+        assert [r[1].name for r in rows] == ["taught.pdf"]
+        assert rows[0][2] == "Not reviewed yet"
+        assert teacher.sample_count.cget("text").startswith("0 of 3")
+
+    def test_a_pdf_picked_by_mistake_can_be_removed(self, teacher, tmp_path, monkeypatch):
+        from test_cash_and_online import receipt
+
+        wrong = receipt(tmp_path / "wrong.pdf", ["CASH"], bill="W")
+        self._add(teacher, monkeypatch, wrong)
+        digest = next(r[0] for r in teacher._sample_rows() if r[1].name == "wrong.pdf")
+        teacher.sample_tree.selection_set(digest)
+        teacher.remove_sample()
+        assert [r[1].name for r in teacher._sample_rows()] == ["taught.pdf"]
+
+    def test_a_reviewed_one_comes_out_of_the_count_when_removed(self, teacher, tmp_path, monkeypatch):
+        from test_cash_and_online import receipt
+        from waprinter.validation import Sample
+
+        wrong = receipt(tmp_path / "wrong.pdf", ["CASH"], bill="W")
+        teacher._samples_reviewed([Sample(wrong, "lab", {}, "")])
+        assert teacher.sample_count.cget("text").startswith("1 of 3")
+        teacher.sample_tree.selection_set(teacher._digest(wrong))
+        teacher.remove_sample()
+        assert teacher.sample_count.cget("text").startswith("0 of 3")
+
+    def test_the_pdf_taught_from_stays(self, teacher):
+        teacher.sample_tree.selection_set(teacher._sample_rows()[0][0])
+        teacher.remove_sample()
+        assert len(teacher._sample_rows()) == 1
+        assert "Cancel and start again" in teacher.info[0]
+
+    def test_adding_the_same_pdf_again_says_why_the_count_did_not_move(
+        self, teacher, tmp_path, monkeypatch
+    ):
+        import shutil
+
+        copy = tmp_path / "copy-of-taught.pdf"
+        shutil.copy(teacher.pdf, copy)
+        self._add(teacher, monkeypatch, copy)
+        assert len(teacher._sample_rows()) == 1
+        assert "already in this list" in teacher.sample_count.cget("text")
+
+    def test_a_reviewed_sample_is_not_reviewed_again_for_a_new_one(self, teacher, tmp_path, monkeypatch):
+        from test_cash_and_online import receipt
+        from waprinter.ui import validation as screen
+        from waprinter.validation import Sample
+
+        opened = []
+        monkeypatch.setattr(screen, "ReviewSamples", lambda parent, pdfs, *a, **k: opened.append(pdfs))
+        teacher._samples_reviewed([Sample(teacher.pdf, "lab", {}, "")])
+        new = receipt(tmp_path / "new.pdf", ["CASH"], bill="N")
+        teacher.pending.append(new)
+        teacher._refresh_samples()
+        teacher.review_samples()
+        assert [p.name for p in opened[0]] == ["new.pdf"]
+
+    def test_a_field_added_later_asks_for_that_sample_again(self, teacher):
+        from waprinter.extract.profile import FieldRule
+        from waprinter.validation import Sample
+
+        teacher._samples_reviewed([Sample(teacher.pdf, "lab", {}, "+919876543210")])
+        assert teacher._sample_rows()[0][2] == "Reviewed"
+        teacher.rules = [FieldRule(name="bill", label="Bill no", kind="code")]
+        teacher.refresh_fields()
+        assert teacher._sample_rows()[0][2].startswith("Review again")
+
+    def test_dragging_over_two_lines_selects_both(self, restore, tmp_path, sync_tasks):
+        from test_cash_and_online import ONLINE, receipt
+        from waprinter.ui.teach import TeachWindow
+
+        window = TeachWindow(restore.setup_view, receipt(tmp_path / "o.pdf", ONLINE), None,
+                             on_saved=lambda key: None)
+        try:
+            def at(text):
+                hit = next(h for h in window._hits
+                           if window._rows[h[4]].words[h[5]].text == text)
+                return hit[4], hit[5]
+
+            window._anchor = at("ONLINE-UPI")
+            window._select_to(*at("T9981234"))
+            assert window.selection.value == "ONLINE-UPI Txn ID: T9981234"
+            assert window.lines_var.get() is True
+            assert len(window.canvas.find_withtag("select")) == 2
+        finally:
+            window.close()
+
+    def test_pointing_at_a_label_is_what_the_field_is_found_by(self, restore, tmp_path, sync_tasks):
+        from test_cash_and_online import receipt
+        from waprinter.ui.teach import TeachWindow
+
+        window = TeachWindow(restore.setup_view, receipt(tmp_path / "c.pdf", ["CASH"]), None,
+                             on_saved=lambda key: None)
+        try:
+            def at(text):
+                hit = next(h for h in window._hits
+                           if window._rows[h[4]].words[h[5]].text == text)
+                return hit[4], hit[5]
+
+            window._anchor = at("CASH")
+            window._select_to(*at("CASH"))
+            window.choose_label()
+            window._pick_label(*at("Paymode"))
+            assert "Paymode" in window.found_label.cget("text")
+            window.field_var.set("Payment mode")
+            window.add_field()
+            assert window.rules[0].label == "Paymode"
+        finally:
+            window.close()
+
+
+class TestChangingATemplate:
+    @pytest.fixture
+    def photo(self, restore):
+        from waprinter.send.templates import MessageTemplate
+
+        restore.pipeline.templates.put(MessageTemplate(
+            name="photo_receipt", status="approved", header_format="IMAGE",
+            header_document=False, body="Hello",
+        ))
+        yield "photo_receipt"
+        restore.pipeline.templates._templates.pop("photo_receipt@en", None)
+        restore.pipeline.templates.save()
+
+    def test_a_photo_template_is_saved_with_the_image_setting(self, restore, photo, monkeypatch):
+        from waprinter.ui import setup
+
+        monkeypatch.setattr(setup.messagebox, "showinfo", lambda *a, **k: None)
+        restore.settings.document_templates = {"removal_notice": "removal_notice"}
+        page = _messages(restore)
+        page.select_kind("removal_notice")
+        _choose(page.template_box, lambda v: v.startswith(photo))
+        assert page.attachment() == "image"
+        assert page.unsaved.cget("text") == "Not saved yet"
+        assert page.save() is True
+        assert page.unsaved.cget("text") == ""
+        assert restore.settings.document_templates["removal_notice"] == photo
+        assert restore.settings.document_attachments["removal_notice"] == "image"
+
+    def test_it_reads_as_usable_on_the_templates_page(self, restore, photo):
+        restore.show_setup("templates")
+        page = restore.setup_view.pages["templates"]
+        page.tree.selection_set(f"{photo}@en")
+        page._show_selected()
+        assert page.problem.cget("text").startswith("Can be used, with its image header")
+
+    def test_receipts_going_to_images_leave_the_notices_as_pdfs(self, restore, photo, monkeypatch):
+        from waprinter.ui import setup
+
+        monkeypatch.setattr(setup.messagebox, "showinfo", lambda *a, **k: None)
+        restore.settings.attachment_format = "pdf"
+        restore.settings.document_attachments = {}
+        restore.settings.document_templates = {"removal_notice": "removal_notice"}
+        page = _messages(restore)
+        page.select_kind(DEFAULT_KIND)
+        _choose(page.template_box, lambda v: v.startswith(photo))
+        page.save()
+        assert restore.settings.attachment_format == "image"
+        assert restore.settings.document_attachments["removal_notice"] == "pdf"
+
+    def test_leaving_with_a_choice_unsaved_asks_first(self, restore, photo, monkeypatch):
+        from waprinter.ui import setup
+
+        asked = []
+        restore.settings.document_templates = {"removal_notice": "removal_notice"}
+        page = _messages(restore)
+        page.select_kind("removal_notice")
+        _choose(page.template_box, lambda v: v.startswith(photo))
+        monkeypatch.setattr(setup.messagebox, "askyesnocancel",
+                            lambda *a, **k: asked.append(a) or None)
+
+        restore.setup_view._nav_selected("templates")
+        assert restore.setup_view.current == "messages"   # Cancel stays
+        assert page.template_ref() == photo
+
+        _choose(page.kind_box, lambda v: v == "Receipts")
+        assert page.kind_key() == "removal_notice"        # Cancel again
+        assert len(asked) == 2
+
+        monkeypatch.setattr(setup.messagebox, "askyesnocancel", lambda *a, **k: False)
+        restore.setup_view._nav_selected("templates")     # discard
+        assert restore.setup_view.current == "templates"
+        assert restore.settings.document_templates["removal_notice"] == "removal_notice"
+        assert not page.dirty()
+
+    def test_changing_send_as_keeps_the_choices_already_made(self, restore, monkeypatch):
+        restore.settings.document_templates = {"removal_notice": "removal_notice"}
+        page = _messages(restore)
+        page.select_kind("removal_notice")
+        row = next(iter(page._rows.values()))
+        row[0].set(sm_label := "Leave blank (sends -)")
+        _choose(page.attachment_box, lambda v: v.startswith("Image"))
+        assert next(iter(page._rows.values()))[0].get() == sm_label
+
+    def test_manual_sending_warns_the_image_does_nothing_yet(self, restore):
+        restore.settings.send_mode = "link"
+        page = _messages(restore)
+        page.select_kind(DEFAULT_KIND)
+        _choose(page.attachment_box, lambda v: v.startswith("Image"))
+        assert "does nothing yet" in page.status.cget("text")
+
+
+class TestCopyAndPaste:
+    @pytest.fixture
+    def box(self, window):
+        import tkinter as tk
+        from tkinter import ttk
+
+        top = tk.Toplevel(window.root)
+        yield ttk.Entry(top), ttk.Combobox(top, values=["one"], state="readonly"), tk.Text(top)
+        top.destroy()
+
+    @pytest.fixture
+    def menu(self, window):
+        from waprinter.ui import clipboard
+
+        menu = clipboard._menu(window.root)
+        yield menu
+        menu.destroy()
+
+    @staticmethod
+    def _items(menu):
+        return {menu.entrycget(i, "label"): menu.entrycget(i, "state")
+                for i in range(menu.index("end") + 1) if menu.type(i) == "command"}
+
+    def test_pasting_takes_the_line_break_off(self, window, box):
+        entry = box[0]
+        window.root.clipboard_clear()
+        window.root.clipboard_append("9876543210\r\n")
+        entry.event_generate("<<Paste>>")
+        window.root.update()
+        assert entry.get() == "9876543210"
+
+    def test_pasting_replaces_what_is_selected(self, window, box):
+        entry = box[0]
+        entry.insert(0, "old")
+        entry.selection_range(0, "end")
+        window.root.clipboard_clear()
+        window.root.clipboard_append("new")
+        entry.event_generate("<<Paste>>")
+        window.root.update()
+        assert entry.get() == "new"
+
+    def test_a_read_only_drop_down_cannot_be_pasted_into(self, window, box):
+        combo = box[1]
+        combo.current(0)
+        window.root.clipboard_clear()
+        window.root.clipboard_append("nope")
+        combo.event_generate("<<Paste>>")
+        window.root.update()
+        assert combo.get() == "one"
+
+    def test_the_menu_on_a_box_offers_what_is_possible(self, box, menu):
+        from waprinter.ui import clipboard
+
+        entry = box[0]
+        entry.insert(0, "text")
+        clipboard._box_items(menu, entry)
+        items = self._items(menu)
+        assert items["Paste"] == "normal" and items["Select all"] == "normal"
+        assert items["Copy"] == "disabled"     # nothing selected yet
+
+    def test_with_a_selection_it_can_be_copied(self, window, box, menu):
+        from waprinter.ui import clipboard
+
+        entry = box[0]
+        entry.insert(0, "text")
+        entry.selection_range(0, "end")
+        clipboard._box_items(menu, entry)
+        assert self._items(menu)["Copy"] == "normal"
+        entry.event_generate("<<Copy>>")
+        window.root.update()
+        assert window.root.clipboard_get() == "text"
+
+    def test_a_read_only_drop_down_can_still_be_copied(self, window, box, menu):
+        from waprinter.ui import clipboard
+
+        combo = box[1]
+        combo.current(0)
+        clipboard._box_items(menu, combo)
+        assert list(self._items(menu)) == ["Copy"]
+        menu.invoke(0)
+        assert window.root.clipboard_get() == "one"
+
+    def test_a_read_only_text_can_be_selected_and_copied(self, window, box, menu):
+        from waprinter.ui import clipboard
+
+        text = box[2]
+        text.insert("1.0", "shown")
+        text.configure(state="disabled")
+        clipboard._select_all(text)
+        clipboard._box_items(menu, text)
+        items = self._items(menu)
+        assert items["Copy"] == "normal" and items["Paste"] == "disabled"
+
+    def test_a_hidden_token_can_be_pasted_but_not_copied(self, window, box, menu):
+        from waprinter.ui import clipboard
+
+        entry = box[0]
+        entry.configure(show="•")
+        clipboard.guard_secret(entry)
+        entry.insert(0, "SECRET")
+        entry.selection_range(0, "end")
+        window.root.clipboard_clear()
+        window.root.clipboard_append("kept")
+        entry.event_generate("<<Copy>>")
+        window.root.update()
+        assert window.root.clipboard_get() == "kept"
+        clipboard._box_items(menu, entry)
+        assert self._items(menu)["Copy"] == "disabled"
+        assert self._items(menu)["Paste"] == "normal"
+
+    def test_selected_text_stands_out_from_its_box(self):
+        from waprinter.ui import theme
+
+        assert theme.SELECTED_TEXT != theme.WASH
+        channel = lambda colour, i: int(colour[i:i + 2], 16)
+        red_gap = channel(theme.CARD, 1) - channel(theme.SELECTED_TEXT, 1)
+        assert red_gap > 60
+
+    def test_a_table_row_copies_as_tab_separated_text(self, window):
+        from tkinter import ttk
+        from types import SimpleNamespace
+
+        from waprinter.ui import clipboard
+
+        tree = ttk.Treeview(window.root, columns=("a", "b"))
+        try:
+            tree.pack()
+            tree.insert("", "end", iid="r", text="Name", values=("Lab", "9"))
+            window.root.update()
+            box = tree.bbox("r")
+            assert clipboard._row_text(tree, SimpleNamespace(y=box[1] + 2)) == "Name\tLab\t9"
+        finally:
+            tree.destroy()

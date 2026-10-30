@@ -35,7 +35,7 @@ from ..extract.profile import DEFAULT_KIND
 from ..extract.rules import display_name
 from ..send.attachment import IMAGE
 from ..send.templates import FIXED_TEXT_PREFIX, PLACEHOLDER, STATUS_WORDS
-from . import icons, theme
+from . import clipboard, icons, theme
 from . import setupmodel as sm
 
 log = logging.getLogger(__name__)
@@ -168,6 +168,10 @@ class Page:
     def on_show(self) -> None:
         pass
 
+    def can_leave(self) -> bool:
+        """Whether the screen may move away from this page. May ask first."""
+        return True
+
     def apply(self, changed) -> bool:
         """Commit a changed copy of the settings. False, with a message, if not."""
         try:
@@ -201,6 +205,7 @@ class ConnectPage(Page):
         self.token = tk.StringVar()
         self.token_entry = ttk.Entry(row, textvariable=self.token, show="•")
         self.token_entry.pack(side="left", fill="x", expand=True)
+        clipboard.guard_secret(self.token_entry)
         # Pasting a 200-character token blind is how half of one gets saved.
         self.show_button = ttk.Button(row, text="Show", width=6, command=self._toggle_token)
         self.show_button.pack(side="left", padx=(6, 0))
@@ -436,8 +441,9 @@ class TemplatesPage(Page):
             text += f"\n\n{template.footer}"
         _set_text(self.body, text)
         self.problem.configure(
-            text=sm.template_problem(template, "api")
-            or "Can be used. Values in «» are Meta's examples."
+            text=sm.template_standing(template, "api")
+            or f"Can be used, with its {sm.header_word(template)}. "
+               f"Values in «» are Meta's examples."
         )
 
     def refresh_from_meta(self) -> None:
@@ -608,6 +614,8 @@ class MessagesPage(Page):
         bottom.pack(side="bottom", fill="x", pady=(10, 0))
         ttk.Button(bottom, text="Save", style="Mint.TButton", command=self.save).pack(
             side="right")
+        self.unsaved = ttk.Label(bottom, style="Warn.TLabel")
+        self.unsaved.pack(side="right", padx=(0, 10))
         self.problems = _wrapping(bottom, style="Bad.TLabel")
         self.problems.pack(side="left", fill="x", expand=True, padx=(0, 12))
 
@@ -618,7 +626,7 @@ class MessagesPage(Page):
         ttk.Label(top, text="Document type").grid(row=0, column=0, sticky="w", pady=3)
         self.kind_box = ttk.Combobox(top, state="readonly")
         self.kind_box.grid(row=0, column=1, sticky="ew", pady=3, padx=(10, 0))
-        self.kind_box.bind("<<ComboboxSelected>>", lambda _e: self.load_kind())
+        self.kind_box.bind("<<ComboboxSelected>>", lambda _e: self._kind_picked())
         ttk.Label(top, text="WhatsApp template").grid(row=1, column=0, sticky="w", pady=3)
         self.template_box = ttk.Combobox(top, state="readonly")
         self.template_box.grid(row=1, column=1, sticky="ew", pady=3, padx=(10, 0))
@@ -630,7 +638,7 @@ class MessagesPage(Page):
             values=[label for _value, label in sm.ATTACHMENT_CHOICES],
         )
         self.attachment_box.grid(row=2, column=1, sticky="ew", pady=3, padx=(10, 0))
-        self.attachment_box.bind("<<ComboboxSelected>>", lambda _e: self.build_rows())
+        self.attachment_box.bind("<<ComboboxSelected>>", lambda _e: self._attachment_picked())
         ttk.Label(top, text="File named").grid(row=3, column=0, sticky="w", pady=3)
         self.noun = tk.StringVar()
         ttk.Entry(top, textvariable=self.noun).grid(row=3, column=1, sticky="ew",
@@ -657,10 +665,14 @@ class MessagesPage(Page):
         self._fields: list[str] = []
         self._values: dict[str, str] = {}
         self._template = None
+        self._loaded_key = ""
+        self._loaded_state: tuple | None = None
 
     # which document, which template
 
     def on_show(self) -> None:
+        if self.dirty():
+            return  # back on the same page: what is on the screen is still wanted
         current = self.kind_key()
         self._kinds = self.view.pages["documents"].kinds()
         self.kind_box.configure(values=[label for _k, label in self._kinds])
@@ -679,6 +691,50 @@ class MessagesPage(Page):
         self.kind_box.current(keys.index(key) if key in keys else 0)
         self.load_kind()
 
+    def _kind_picked(self) -> None:
+        picked = self.kind_box.current()
+        if self.dirty():
+            # The changes belong to the type they were made on. Back to it while
+            # asking, so that is the one a Save goes to.
+            keys = [k for k, _label in self._kinds]
+            self.kind_box.current(keys.index(self._loaded_key))
+            if not self.can_leave():
+                return
+            self.kind_box.current(picked)
+        self.load_kind()
+
+    # unsaved changes
+
+    def _state(self) -> tuple:
+        return (self.template_ref(), self.attachment(), self.noun.get().strip(), self.mapping())
+
+    def dirty(self) -> bool:
+        return self._loaded_state is not None and self._state() != self._loaded_state
+
+    def _remember_state(self) -> None:
+        self._loaded_key = self.kind_key()
+        self._loaded_state = self._state()
+        self._show_unsaved()
+
+    def _show_unsaved(self) -> None:
+        self.unsaved.configure(text="Not saved yet" if self.dirty() else "")
+
+    def can_leave(self) -> bool:
+        """Offer to save, because a choice left unsaved used to vanish silently
+        and the next print went out under the old template."""
+        if not self.dirty():
+            return True
+        answer = messagebox.askyesnocancel(
+            TITLE, f"Save your changes to {teaching.kind_label(self._loaded_key)}?",
+            parent=self.root,
+        )
+        if answer is None:
+            return False
+        if answer:
+            return self.save()
+        self.load_kind()
+        return True
+
     def load_kind(self) -> None:
         key = self.kind_key()
         s = self.settings
@@ -692,7 +748,7 @@ class MessagesPage(Page):
 
         store = self.pipeline.templates
         choices = [] if key == DEFAULT_KIND else [(self.NONE_CHOICE, "")]
-        for t in sorted(store.all(), key=lambda t: (bool(sm.template_problem(t, s.send_mode)), t.name)):
+        for t in sorted(store.all(), key=lambda t: (bool(sm.template_standing(t, s.send_mode)), t.name)):
             ref = store.ref_for(t)
             choices.append((sm.template_choice(t, ref), ref))
         chosen = s.default_template if key == DEFAULT_KIND else s.document_templates.get(key, "")
@@ -716,6 +772,7 @@ class MessagesPage(Page):
             else (s.document_attachments.get(key) or s.attachment_format)
         )
         self.build_rows()
+        self._remember_state()
 
     def template_ref(self) -> str:
         index = self.template_box.current()
@@ -733,6 +790,20 @@ class MessagesPage(Page):
         if implied:
             self.select_attachment(implied)
         self.build_rows()
+        self._show_unsaved()
+
+    def _attachment_picked(self) -> None:
+        """Only what depends on it. Rebuilding the rows here would throw away
+        whatever has just been chosen for each variable."""
+        self._show_status()
+        self._update_filename()
+        self._show_unsaved()
+
+    def _show_status(self) -> None:
+        template, mode = self._template, self.settings.send_mode
+        problem = sm.template_problem(template, mode, self.attachment()) if template else ""
+        self.status.configure(text=problem or (
+            sm.attachment_note(mode, self.attachment()) if template else ""))
 
     def attachment(self) -> str:
         """What this kind of document is attached as, as the screen stands."""
@@ -760,8 +831,7 @@ class MessagesPage(Page):
             self._update_filename()
             return
 
-        self.status.configure(text=sm.template_problem(
-            template, self.settings.send_mode, self.attachment()))
+        self._show_status()
         saved = self.settings.template_mappings.get(template.name)
         guess = sm.suggest_mapping(
             template, self._fields,
@@ -831,11 +901,13 @@ class MessagesPage(Page):
                                            self.settings.business_name))
         problems = sm.mapping_problems(template, mapping)
         self.problems.configure(text=" ".join(problems))
+        self._show_unsaved()
 
     def _update_filename(self) -> None:
         from ..models import ExtractedFields
         from ..send.templates import _filename
 
+        self._show_unsaved()
         noun = self.noun.get().strip() or "Document"
         number = self._values.get("invoice_number") or "CR1747/26"
         attachment = self.attachment()
@@ -854,7 +926,7 @@ class MessagesPage(Page):
         else:
             self.filename.configure(text=f"The member sees: {name}")
 
-    def save(self) -> None:
+    def save(self) -> bool:
         key = self.kind_key()
         ref = self.template_ref()
         template = self._template
@@ -867,21 +939,24 @@ class MessagesPage(Page):
             problems = sm.mapping_problems(template, mapping)
             if problems:
                 messagebox.showerror(TITLE, "\n".join(problems), parent=self.root)
-                return
+                return False
             blocker = sm.template_problem(template, s.send_mode, self.attachment())
             if blocker and not messagebox.askyesno(
                 TITLE, f"{template.name}: {blocker}\n\nSave anyway?", parent=self.root
             ):
-                return
+                return False
             changed.template_mappings = {**changed.template_mappings, template.name: mapping}
 
         if key == DEFAULT_KIND:
             if not ref:
                 messagebox.showerror(TITLE, "Receipts need a message.", parent=self.root)
-                return
+                return False
             changed.default_template = ref
             if noun:
                 changed.document_noun = noun
+            others = [k for k, _label in self._kinds if k != DEFAULT_KIND]
+            changed.document_attachments = sm.pinned_attachments(
+                changed, self.attachment(), [*others, *changed.document_templates])
             changed.attachment_format = self.attachment()
         else:
             if ref:
@@ -894,11 +969,20 @@ class MessagesPage(Page):
                 changed.document_nouns.pop(key, None)
             changed.document_attachments[key] = self.attachment()
 
-        if self.apply(changed):
-            self.view.pages["documents"].on_show()
-            messagebox.showinfo(TITLE, f"Saved. {teaching.kind_label(key)} will use "
-                                f"{ref or 'no message'} from the next print.",
-                                parent=self.root)
+        if not self.apply(changed):
+            return False
+        self.view.pages["documents"].on_show()
+        self._remember_state()
+        carried = "an image" if self.attachment() == IMAGE else "a PDF"
+        messagebox.showinfo(
+            TITLE,
+            f"Saved. {teaching.kind_label(key)} will use {ref} as {carried} from the next "
+            f"print. To test it, print a new document: a reprint of one already sent is "
+            f"treated as a duplicate." if ref else
+            f"Saved. {teaching.kind_label(key)} will wait for a person from the next print.",
+            parent=self.root,
+        )
+        return True
 
 
 # -- 5. try it -------------------------------------------------------------------------
@@ -1193,8 +1277,12 @@ class SetupView(ttk.Frame):
         self._steps: dict[str, sm.Step] = {}
 
     def _nav_selected(self, key: str) -> None:
-        if key != self.current:
+        if key != self.current and self.can_leave():
             self.show_page(key)
+
+    def can_leave(self) -> bool:
+        page = self.pages.get(self.current)
+        return page is None or page.can_leave()
 
     def show_page(self, key: str) -> None:
         if self.current and self.current in self.pages:

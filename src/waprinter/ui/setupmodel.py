@@ -40,9 +40,11 @@ _SYNONYMS = {
                        "letter_no", "document_no", "ref", "reference", "number", "no"},
     "invoice_date": {"date", "receipt_date", "invoice_date", "dated", "notice_date",
                      "letter_date"},
-    "total_amount": {"total", "total_amount", "amount_figures", "amount_paid_figures"},
+    "total_amount": {"total", "total_amount", "total_amt", "amount_figures",
+                     "amount_paid_figures"},
     "amount_words": {"amount", "amount_words", "amount_in_words", "amount_paid"},
-    "payment_mode": {"mode", "payment_mode", "payment", "paid_by"},
+    "payment_mode": {"mode", "payment_mode", "payment", "paid_by", "paymode", "pay_mode",
+                     "mode_of_payment", "payment_method"},
     BUSINESS_FIELD: {"business", "business_name", "company", "company_name", "firm",
                      "branch_name"},
 }
@@ -122,10 +124,52 @@ def attachment_for_label(label: str) -> str:
     return PDF
 
 
+def template_standing(template: MessageTemplate | None, send_mode: str) -> str:
+    """Why this template cannot be used for what its own header carries, or "".
+
+    The question to ask of a template on its own, before any document has been
+    given to it. Asked as "can it carry a PDF", a perfectly good image-header
+    template was reported as unusable.
+    """
+    return template_problem(template, send_mode, attachment_implied(template) or PDF)
+
+
+def header_word(template: MessageTemplate) -> str:
+    """Which file a template's header takes, as the drop-down says it."""
+    if template.carries(IMAGE):
+        return "image header"
+    if template.carries(PDF):
+        return "PDF header"
+    return "no file header"
+
+
 def template_choice(template: MessageTemplate, ref: str) -> str:
     """How a template reads in the drop-down."""
     status = STATUS_WORDS.get(template.status, template.status)
-    return f"{ref} · {template.language} · {status}"
+    return f"{ref} · {template.language} · {status} · {header_word(template)}"
+
+
+def attachment_note(send_mode: str, attachment: str) -> str:
+    """What this choice of attachment will not do yet, or ""."""
+    if send_mode != "api" and format_for(attachment) == IMAGE:
+        return ("Sending is manual at the moment, so this does nothing yet: WhatsApp opens "
+                "with the text and a person attaches the file. The image goes out once "
+                "sending is automatic (Counter settings).")
+    return ""
+
+
+def pinned_attachments(settings, attachment: str, kinds) -> dict[str, str]:
+    """`document_attachments`, with `kinds` kept as they are when receipts change.
+
+    A kind with no entry of its own follows attachment_format. So moving
+    receipts to images also moved every such kind, whose PDF-header template
+    could then carry nothing, and all of them were held.
+    """
+    current = dict(settings.document_attachments)
+    if format_for(attachment) != format_for(settings.attachment_format):
+        for kind in kinds:
+            current.setdefault(kind, settings.attachment_format)
+    return current
 
 
 # -- mapping -----------------------------------------------------------------

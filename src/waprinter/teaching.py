@@ -29,7 +29,7 @@ from pathlib import Path
 from .config import Settings, paths
 from .extract import pdf_text
 from .extract.profile import DEFAULT_KIND, DocumentKind, DocumentProfile, FieldRule
-from .extract.rules import BUILTIN_FIELDS, field_name, read_rule
+from .extract.rules import BUILTIN_FIELDS, field_name, literal_only, read_rule
 
 log = logging.getLogger(__name__)
 
@@ -202,13 +202,24 @@ def rule_problems(
     """Rules that would not read back what was clicked on the sample.
 
     The usual cause is a label that appears twice -- "Date" in a heading and
-    again beside the value -- where the first one wins.
+    again beside the value -- where the first one wins. A text rule reading
+    more than was clicked is not one of these: it takes the whole value, which
+    the table shows, and clicking one word of a name should not be refused.
+    A rule that can only find the exact word it was taught on is reported too,
+    because it reads back perfectly here and nothing on the next print.
     """
     problems = []
     read = check_rules(doc, rules)
     for rule in rules:
-        want = clicked.get(rule.name, "")
-        got = read.get(rule.name, "")
+        want = _comparable(clicked.get(rule.name, ""))
+        got = _comparable(read.get(rule.name, ""))
+        if literal_only(rule):
+            problems.append(
+                f"{rule.name.replace('_', ' ').capitalize()}: there is no label to "
+                f"find it by, so only the exact words '{want or rule.pattern}' would "
+                f"ever be read. Press 'Choose its label' and click the label."
+            )
+            continue
         if rule.kind == "phone":
             want_digits = re.sub(r"\D", "", want)
             if want_digits and want_digits not in re.sub(r"\D", "", got):
@@ -217,13 +228,17 @@ def rule_problems(
                     f"{want} on this page."
                 )
             continue
-        if want and got != want:
+        if want and got != want and not (rule.kind == "text" and got.startswith(want)):
             problems.append(
                 f"{rule.name.replace('_', ' ').capitalize()}: the label "
                 f"'{rule.label or '(none)'}' reads '{got or 'nothing'}' on this "
                 f"page, not '{want}'. Click the value again, or rename the label."
             )
     return problems
+
+
+def _comparable(value: str) -> str:
+    return re.sub(r"\s+", " ", value or "").strip(" .,:-–")
 
 
 def save_teaching(

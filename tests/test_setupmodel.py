@@ -237,3 +237,40 @@ class TestSettingsShape:
         assert any("Invalid document types" in w for w in result.warnings)
         assert settings.branch_name == "before"
         assert target.exists()
+
+
+class TestAPhotoTemplate:
+    @pytest.fixture
+    def photo(self):
+        return MessageTemplate(name="photo", status="approved", header_format="IMAGE",
+                               header_document=False)
+
+    @pytest.fixture
+    def pdf_template(self):
+        return MessageTemplate(name="file", status="approved", header_format="DOCUMENT",
+                               header_document=True)
+
+    def test_on_its_own_it_is_not_called_unusable(self, photo):
+        assert sm.template_standing(photo, "api") == ""
+
+    def test_one_with_no_file_header_still_is(self):
+        template = MessageTemplate(name="t", status="approved", header_document=False)
+        assert "nowhere to go" in sm.template_standing(template, "api")
+
+    def test_the_drop_down_says_which_header(self, photo, pdf_template):
+        assert sm.template_choice(photo, "photo").endswith("image header")
+        assert sm.template_choice(pdf_template, "file").endswith("PDF header")
+
+    def test_manual_sending_says_the_image_does_nothing_yet(self):
+        assert "does nothing yet" in sm.attachment_note("link", "image")
+        assert sm.attachment_note("api", "image") == ""
+        assert sm.attachment_note("link", "pdf") == ""
+
+    def test_moving_receipts_to_images_does_not_move_the_other_types(self):
+        settings = Settings(attachment_format="pdf", document_attachments={"letter": "image"})
+        pinned = sm.pinned_attachments(settings, "image", ["notice", "letter"])
+        assert pinned == {"notice": "pdf", "letter": "image"}
+
+    def test_leaving_receipts_as_they_were_changes_nothing(self):
+        settings = Settings(attachment_format="pdf")
+        assert sm.pinned_attachments(settings, "pdf", ["notice"]) == {}
