@@ -151,11 +151,18 @@ def _single_page(doc: "pymupdf.Document"):
         canvas = joined.new_page(width=width, height=height)
         top = 0.0
         for page in doc:
-            canvas.show_pdf_page(
-                pymupdf.Rect(0, top, page.rect.width, top + page.rect.height),
-                doc,
-                page.number,
-            )
+            try:
+                canvas.show_pdf_page(
+                    pymupdf.Rect(0, top, page.rect.width, top + page.rect.height),
+                    doc,
+                    page.number,
+                )
+            except ValueError:
+                # A blank page. The PyMuPDF the Windows 7 build is held to
+                # refuses to place one ("source page empty") where later
+                # releases draw nothing; either way it stays white space.
+                if page.get_contents():
+                    raise
             top += page.rect.height
         yield joined
     finally:
