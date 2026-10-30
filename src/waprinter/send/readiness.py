@@ -39,7 +39,12 @@ def problems(
     from ..secrets import load_token, token_problem
     from .templates import TemplateStore
 
+    from .. import licence
+
     found: list[str] = []
+    unlicensed = licence.status().hold_reason()
+    if unlicensed:
+        found.append(unlicensed)
 
     if not settings.own_numbers:
         found.append(

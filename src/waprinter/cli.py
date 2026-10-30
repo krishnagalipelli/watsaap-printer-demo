@@ -10,6 +10,7 @@
     waprinter go-live             turn dry-run off, with the checks that implies
     waprinter connect             store a token and choose the number it reaches
     waprinter export-setup FILE   write this counter's setup for the others
+    waprinter licence [FILE]      show this computer's code, or import a licence
 """
 
 from __future__ import annotations
@@ -656,6 +657,28 @@ def cmd_go_live(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_licence(args: argparse.Namespace) -> int:
+    from . import licence
+
+    if args.file:
+        try:
+            installed = licence.install(Path(args.file).read_text(encoding="utf-8"))
+        except (OSError, licence.LicenceError) as exc:
+            print(f"Not imported: {exc}")
+            return 1
+        print(f"Licensed to {installed.licensee}. Updates until "
+              f"{installed.updates_until:%d %b %Y}.")
+        return 0
+    state = licence.status()
+    print(f"Machine code:  {state.machine}")
+    print(f"Status:        {state.summary()}")
+    if state.licence is not None:
+        print(f"Updates until: {state.licence.updates_until:%d %b %Y}")
+    if state.note:
+        print(f"Note:          {state.note}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="waprinter", description=__doc__)
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -707,6 +730,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("export-setup", help="write this counter's setup for the others")
     p.add_argument("file")
     p.set_defaults(func=cmd_export_setup)
+
+    p = sub.add_parser("licence", help="show this computer's code, or import a licence")
+    p.add_argument("file", nargs="?", help="the licence file to import")
+    p.set_defaults(func=cmd_licence)
 
     p = sub.add_parser("provision", help="configure this install from a file")
     p.add_argument("file", nargs="?", help=f"path to the provisioning file")

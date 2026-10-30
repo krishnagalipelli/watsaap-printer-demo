@@ -18,6 +18,8 @@ settings.json
 # machine unattended. provision.example.json is the documented template and is
 # safe; a filled-in provision.json is not.
 provision.json
+# Issued licences name a client and one of their computers.
+licence-*.txt
 
 # Downloaded build artifacts and stray archives in the repo root.
 *.zip

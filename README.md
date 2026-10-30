@@ -430,11 +430,45 @@ every print failed on the missing column the next morning.
 { "version": "1.1.0",
   "url": "https://.../WhatsAppPrinter-Setup-1.1.0.exe",
   "sha256": "…",
+  "released": "2026-11-01",
   "notes": "Fixes the receipt-number pattern for branch 4." }
 ```
 
 Publishing a release is what makes it visible — pushing code does not. That tag
 is the switch, and rolling back means publishing the older version number.
+
+## Licences
+
+Each counter needs its own licence: one computer, plus the date until which it
+takes updates (the AMC). Sending never stops when that date passes; only newer
+builds stop installing, until a renewed licence covers them. Everything is
+offline: a licence is a signed text file, checked against the public key in
+[`licence.py`](src/waprinter/licence.py).
+
+1. On the counter, Setup → Licence (or `waprinter licence`) shows its machine
+   code, e.g. `HYGR-W2VX-IY7L-LRBH-GINC`.
+2. On the issuing machine:
+
+   ```
+   python tools/issue_licence.py issue --machine HYGR-W2VX-IY7L-LRBH-GINC \
+       --licensee "Sri Chits, Kukatpally"
+   ```
+
+   Updates default to a year from today (year one's AMC is included); pass
+   `--updates-until` for a renewal. Every licence issued is listed in
+   `issued.csv` beside the signing key.
+3. Import the file in Setup → Licence, or paste its last line there, or run
+   `waprinter licence FILE`.
+
+Without a licence a counter works for a 14-day trial. After that, prints are
+still captured, read and kept, but held with "no licence" instead of sent;
+once a licence is in, they are sent from Needs attention. Test mode is never
+held.
+
+The signing key lives at `~/.waprinter-licensing/signing-key.txt` on the
+issuing machine only. Back it up. Losing it means no counter can be licensed or
+renewed until a release with a new public key reaches all of them.
+`tools/issue_licence.py keygen` made it, and refuses to replace it.
 
 ## Building the installer
 
@@ -488,6 +522,8 @@ to `logs/dry_run.jsonl`, but nothing is sent.
 | [`ui/viewmodel.py`](src/waprinter/ui/viewmodel.py) | What it says, testable without a display |
 | [`ui/notification.py`](src/waprinter/ui/notification.py) | The corner panel after a print |
 | [`update.py`](src/waprinter/update.py) | Version check, verified download, silent install |
+| [`licence.py`](src/waprinter/licence.py) | Machine code, signed licence check, trial, AMC update cut-off |
+| [`tools/issue_licence.py`](tools/issue_licence.py) | Signs licences; runs on the issuing machine only |
 | [`capture/watcher.py`](src/waprinter/capture/watcher.py) | Drains the spool folder; waits for the format's end marker before claiming a file |
 | [`capture/xps.py`](src/waprinter/capture/xps.py) | Converts what the Windows 7 XPS queue writes into the PDF everything else reads |
 | [`extract/split.py`](src/waprinter/extract/split.py) | Splits a batch print into one job per receipt |

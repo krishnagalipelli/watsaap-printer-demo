@@ -349,11 +349,17 @@ STEP_TITLES = [
     ("test", "Try it"),
     ("preferences", "Counter settings"),
     ("share", "Share setup"),
+    ("licence", "Licence"),
 ]
 
 
-def checklist(settings, templates, profile, token_problem: str | None) -> list[Step]:
+def checklist(settings, templates, profile, token_problem: str | None,
+              licence=None) -> list[Step]:
     """Where setup stands, one line per step, for the side bar."""
+    if licence is None:
+        from .. import licence as licensing
+
+        licence = licensing.status()
     connected = not token_problem and bool(settings.phone_number_id)
     usable = [t for t in templates.all() if t.usable]
     in_use = [settings.default_template, *settings.document_templates.values()]
@@ -379,6 +385,7 @@ def checklist(settings, templates, profile, token_problem: str | None) -> list[S
         "test": "Check a PDF before going live",
         "preferences": "Test mode on" if settings.dry_run else "Live",
         "share": "PIN set" if settings.setup_pin else "No PIN",
+        "licence": licence.summary(),
     }
     done = {
         "connect": connected,
@@ -388,6 +395,7 @@ def checklist(settings, templates, profile, token_problem: str | None) -> list[S
         "test": False,
         "preferences": True,
         "share": bool(settings.setup_pin),
+        "licence": licence.licensed,
     }
     return [Step(key, title, done[key], details[key]) for key, title in STEP_TITLES]
 

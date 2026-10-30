@@ -587,6 +587,10 @@ class Pipeline:
                 f"sending it from here fills the gap with \"-\".",
             )
 
+        unlicensed = self.licence_hold()
+        if unlicensed:
+            return self._hold(job, unlicensed)
+
         # --- link mode ----------------------------------------------------
         if self.hands_off_by_link:
             return self._prepare_link(job, message)
@@ -669,6 +673,18 @@ class Pipeline:
             return job
 
         return self._fail(job, result.error or "Send failed", retryable=result.retryable)
+
+    def licence_hold(self) -> str:
+        """Why nothing may go out from this computer, or "" if it may.
+
+        Link mode is held too: handing the member's chat to a person is how
+        most counters send. Test mode is not, because it sends nothing.
+        """
+        if self.settings.dry_run:
+            return ""
+        from . import licence
+
+        return licence.status().hold_reason()
 
     @property
     def hands_off_by_link(self) -> bool:
@@ -769,6 +785,9 @@ class Pipeline:
         limited = volume_limit_reason(self.settings, self.store, now)
         if limited:
             raise ValueError(f"{limited} Send it again in a little while.")
+        unlicensed = self.licence_hold()
+        if unlicensed:
+            raise ValueError(unlicensed)
 
         if document_kind is not None:
             job.fields = self.fields_for_kind(job.pdf_path, document_kind)

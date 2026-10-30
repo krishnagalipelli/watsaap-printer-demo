@@ -122,6 +122,15 @@ class Agent:
         except Exception:
             log.exception("could not record the update check")
 
+        if result.available:
+            from . import licence
+
+            refused = licence.status().update_refusal(
+                result.release.version, result.release.released)
+            if refused:
+                log.info("update not covered by the licence: %s", refused)
+                return refused
+
         if result.failed or not result.available or not install:
             return result.message
 

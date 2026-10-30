@@ -112,6 +112,7 @@ class SetupNeed:
 # Which setup step fixes each problem send/readiness.py can report, found by
 # the words it uses. First match wins.
 _FIXED_BY = (
+    ("licence", ("no licence",)),
     ("connect", ("phone number id", "access token")),
     ("templates", ("approved by meta", "is not configured")),
     # "has nowhere to go" is a template whose header cannot carry what these
@@ -121,6 +122,7 @@ _FIXED_BY = (
     ("preferences", ("own numbers",)),
 )
 SETUP_ACTIONS = {
+    "licence": "Import a licence",
     "connect": "Open setup",
     "templates": "View templates",
     "messages": "Fill in messages",

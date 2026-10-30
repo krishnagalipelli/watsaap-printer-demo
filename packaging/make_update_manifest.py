@@ -4,10 +4,11 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
-def manifest(folder: Path, repository: str, tag: str) -> dict:
+def manifest(folder: Path, repository: str, tag: str, released: str | None = None) -> dict:
     version = tag[1:] if tag.startswith('v') else tag
     import re
     if not re.fullmatch(r'\d+\.\d+\.\d+', version):
@@ -22,8 +23,10 @@ def manifest(folder: Path, repository: str, tag: str) -> dict:
             "url": "https://github.com/{}/releases/download/{}/{}".format(repository, tag, name),
             "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
         }
+    # A licence covers builds released up to its updates-until date.
+    released = released or datetime.now(timezone.utc).date().isoformat()
     return {"version": version, **builds["x64"], "builds": builds,
-            "notes": "WhatsApp Printer " + version}
+            "released": released, "notes": "WhatsApp Printer " + version}
 
 
 if __name__ == '__main__':

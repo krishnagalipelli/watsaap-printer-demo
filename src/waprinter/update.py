@@ -36,7 +36,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -102,6 +102,9 @@ class Release:
     url: str
     sha256: str = ""
     notes: str = ""
+    # The day the build was published. A licence covers updates released up
+    # to its date; a manifest older than this field covers everything.
+    released: date | None = None
 
 
 @dataclass
@@ -162,6 +165,7 @@ def check(
             url=_https_only(entry["url"], "installer"),
             sha256=str(entry.get("sha256") or "").strip().lower(),
             notes=str(payload.get("notes", "")),
+            released=date.fromisoformat(payload["released"]) if payload.get("released") else None,
         )
         if not release.sha256:
             raise ValueError("the manifest names no sha256 for the installer")

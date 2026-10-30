@@ -1356,6 +1356,10 @@ class DesktopWindow:
                 text=f"{value:02d}", foreground=theme.INK if value else theme.FAINT)
         self.counter_captions["sent"].configure(text=vm.sent_caption(self.settings).upper())
         self.total_sent_label.configure(text=f"Total messages sent: {counters.total_sent:,}")
+        from .. import licence
+
+        self.version_label.configure(
+            text=f"WhatsApp Printer · Version {__version__} · {licence.status().summary()}")
 
         self.nav_buttons["attention"].configure(
             text=f"Needs attention ({waiting})" if waiting else "Needs attention")

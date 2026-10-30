@@ -3,7 +3,7 @@
 The operator's side bar opens three pages -- Status, Needs attention, Recent
 documents -- because that is all a clerk printing receipts needs. Everything
 that decides *what* goes out lives here instead, behind an optional PIN, as
-seven steps in the order they are done:
+eight steps in the order they are done:
 
     Connect WhatsApp     paste a token; the account and number are looked up
     Message templates    what Meta has approved, and what each one needs
@@ -12,6 +12,7 @@ seven steps in the order they are done:
     Try it               check a PDF, or re-read the last thirty prints
     Counter settings     sending behaviour, scanned pages, the receipts folder
     Share setup          copy all of this to the other counters; set the PIN
+    Licence              this computer's code, and the licence issued for it
 
 Widgets and wiring only. What the pages say and decide is in setupmodel.py and
 teaching.py, where it is tested without a display. Anything that talks to
@@ -1048,6 +1049,101 @@ class SharePage(Page):
             self.on_show()
 
 
+# -- 8. licence ----------------------------------------------------------------------------
+
+
+class LicencePage(Page):
+    def build(self) -> None:
+        from .. import licence
+
+        f = _scrolling(self.frame)
+        code = theme.card(f, "This computer", padding=(20, 18))
+        code.pack(fill="x")
+        _hint(code, "Each counter needs its own licence. Send this code to get "
+                    "one; it changes only if Windows is reinstalled or the "
+                    "computer is replaced.")
+        row = ttk.Frame(code)
+        row.pack(fill="x")
+        self.code = ttk.Label(row, style="Head.TLabel")
+        self.code.pack(side="left")
+        ttk.Button(row, text="Copy", command=self.copy_code).pack(side="left", padx=12)
+
+        state = theme.card(f, "Licence", padding=(20, 18))
+        state.pack(fill="x", pady=(12, 0))
+        self.state = theme.autowrap(ttk.Label(state, style="Field.TLabel", justify="left"))
+        self.state.pack(anchor="w", fill="x", pady=(0, 6))
+        self.detail = _hint(state, "")
+        _hint(state, f"Without a licence everything works for a {licence.TRIAL_DAYS}-day "
+                     "trial. After it, prints are still read and kept, but nothing "
+                     "is sent until a licence is imported.")
+        row = ttk.Frame(state)
+        row.pack(fill="x")
+        ttk.Button(row, text="Import licence file…", style="Mint.TButton",
+                   command=self.import_file).pack(side="left")
+        ttk.Button(row, text="Paste licence…", command=self.paste).pack(side="left", padx=6)
+
+    def on_show(self) -> None:
+        from .. import licence
+
+        status = licence.status()
+        self.code.configure(text=status.machine)
+        self.state.configure(text=status.summary())
+        lines = []
+        if status.licence is not None:
+            lines.append(f"Updates until {status.licence.updates_until:%d %b %Y}. "
+                         f"Sending never stops when that date passes; only newer "
+                         f"versions do not install.")
+        elif status.trial_ends is not None:
+            lines.append(f"The trial {'ends' if status.can_send else 'ended'} on "
+                         f"{status.trial_ends:%d %b %Y}.")
+        if status.note:
+            lines.append(f"A licence file is here but was not used: {status.note}.")
+        self.detail.configure(text=" ".join(lines))
+
+    def copy_code(self) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.code.cget("text"))
+
+    def import_file(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self.root, title="Import licence",
+            filetypes=[("Licence", "*.txt"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            messagebox.showerror(TITLE, f"Could not read that file.\n\n{exc}", parent=self.root)
+            return
+        self._install(text)
+
+    def paste(self) -> None:
+        text = simpledialog.askstring(TITLE, "Paste the licence line (it starts WAP1.):",
+                                      parent=self.root)
+        if text:
+            self._install(text)
+
+    def _install(self, text: str) -> None:
+        from .. import licence
+
+        try:
+            installed = licence.install(text)
+        except licence.LicenceError as exc:
+            messagebox.showerror(TITLE, f"Not imported. {exc}", parent=self.root)
+            return
+        except OSError as exc:
+            messagebox.showerror(TITLE, f"Could not save the licence.\n\n{exc}",
+                                 parent=self.root)
+            return
+        messagebox.showinfo(
+            TITLE, f"Licensed to {installed.licensee}. Anything held while this "
+                   f"computer was unlicensed can be sent from Needs attention.",
+            parent=self.root)
+        self.on_show()
+        self.view.refresh_checklist()
+        self.window.refresh()
+
+
 # -- the view ------------------------------------------------------------------------------
 
 
@@ -1091,6 +1187,7 @@ class SetupView(ttk.Frame):
             "test": TestPage(self),
             "preferences": Page(self),   # the window builds the form into it
             "share": SharePage(self),
+            "licence": LicencePage(self),
         }
         self.current = ""
         self._steps: dict[str, sm.Step] = {}
