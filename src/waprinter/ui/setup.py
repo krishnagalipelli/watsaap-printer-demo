@@ -104,9 +104,9 @@ def _hint(parent, text: str) -> ttk.Label:
     return label
 
 
-def _wrapping(parent, **options) -> ttk.Label:
-    """A label that wraps at the width it is given. The caller packs it."""
-    return theme.autowrap(ttk.Label(parent, justify="left", **options))
+def _wrapping(parent, **options) -> theme.Readout:
+    """Selectable status text that wraps at the available width."""
+    return theme.Readout(parent, **options)
 
 
 def _scrolling(frame: ttk.Frame) -> ttk.Frame:
@@ -132,6 +132,8 @@ def _readonly_text(parent, height: int) -> tk.Text:
 
 
 def _set_text(widget: tk.Text, value: str) -> None:
+    if widget.get("1.0", "end-1c") == value:
+        return
     widget.configure(state="normal")
     widget.delete("1.0", "end")
     widget.insert("1.0", value)
@@ -393,7 +395,7 @@ class TemplatesPage(Page):
             ("status", "Status", 130), ("pdf", "Can attach", 90),
             ("fills", "Fills in", 130),
         ))
-        self.tree.pack(fill="x")
+        theme.pack_table(self.tree, fill="x", expand=False)
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._show_selected())
 
         self.problem = _wrapping(f, style="Warn.TLabel")
@@ -491,7 +493,7 @@ class DocumentsPage(Page):
             ("#0", "Document type", 170), ("title", "Recognised by", 130),
             ("fields", "Fields taught", 150), ("message", "Message", 120),
         ))
-        self.tree.pack(fill="x")
+        theme.pack_table(self.tree, fill="both", expand=True)
         buttons = ttk.Frame(f)
         buttons.pack(fill="x", pady=(12, 0))
         ttk.Button(buttons, text="Teach a new type from a PDF…", style="Mint.TButton",
@@ -1052,7 +1054,7 @@ def trial_table(parent) -> ttk.Treeview:
         ("#0", "Print", 150), ("kind", "Read as", 110),
         ("mobile", "Mobile", 120), ("values", "Values", 240),
     ))
-    table.pack(fill="both", expand=True)
+    theme.pack_table(table)
     return table
 
 
@@ -1257,8 +1259,8 @@ class SetupView(ttk.Frame):
         self.caption.pack(anchor="w")
         self.title = ttk.Label(head, style="Title.TLabel")
         self.title.pack(anchor="w", pady=(4, 0))
-        self.detail = ttk.Label(head, style="Hint.TLabel")
-        self.detail.pack(anchor="w", pady=(2, 0))
+        self.detail = theme.autowrap(ttk.Label(head, style="Hint.TLabel"))
+        self.detail.pack(anchor="w", fill="x", pady=(2, 0))
         ttk.Separator(self.body).pack(fill="x", pady=(14, 16))
         self.stack = ttk.Frame(self.body)
         self.stack.pack(fill="both", expand=True)

@@ -118,6 +118,132 @@ class TestPaidOnline:
         assert "+919876543210" not in numbers
 
 
+# Enough words that a short test page still counts as having a text layer.
+LETTERHEAD = "SRINIDHI CHITS (HYDERABAD) PVT. LTD. Karimnagar Branch Office, Bus Stand Road"
+
+
+def cheque_cell(number: str = "351768", date: str = "05/10/2026") -> str:
+    """The payment cell of a receipt paid by cheque, as the branch prints it."""
+    return f"Cheque Number {number}\ndated {date} of Bank\nSBI-PDPL"
+
+
+def cheque_receipt(**changes) -> ChitReceiptSpec:
+    return ChitReceiptSpec(**{
+        "receipt_number": "CHQ4551/26",
+        "receipt_date": "06-Oct-26",
+        "payment_mode": cheque_cell(),
+        **changes,
+    })
+
+
+class TestPaidByCheque:
+    """The same form, numbered CHQ rather than CR, with the cheque's number,
+    date and bank where a cash receipt has one word. It used to be held as an
+    unknown document, and released it had no mode and could carry the cheque's
+    date as the receipt's."""
+
+    def test_it_is_recognised_as_a_receipt(self, receipt):
+        fields = extract_fields(receipt(cheque_receipt()))
+        assert fields.document_kind == "receipt"
+
+    def test_the_receipt_number_keeps_its_prefix(self, receipt):
+        assert extract_fields(receipt(cheque_receipt())).invoice_number == "CHQ4551/26"
+
+    def test_the_mode_is_the_word_before_the_cheque_number(self, receipt):
+        assert extract_fields(receipt(cheque_receipt())).payment_mode == "Cheque"
+
+    def test_the_receipt_keeps_its_own_date(self, receipt):
+        """A cheque dated the 5th, receipted on the 6th, is the 6th."""
+        assert extract_fields(receipt(cheque_receipt())).invoice_date == "06-Oct-26"
+
+    def test_the_date_is_kept_when_the_cheque_is_on_one_line(self, receipt):
+        spec = cheque_receipt(payment_mode="Cheque Number 351768 dated 05/10/2026 of Bank")
+        assert extract_fields(receipt(spec)).invoice_date == "06-Oct-26"
+
+    def test_the_members_mobile_is_still_the_recipient(self, receipt):
+        assert extract_fields(receipt(cheque_receipt())).best.e164 == "+919000012345"
+
+    def test_a_demand_draft_prints_the_same_way(self, receipt):
+        spec = cheque_receipt(payment_mode="DD Number 351768\ndated 05/10/2026 of Bank\nSBI")
+        fields = extract_fields(receipt(spec))
+        assert (fields.payment_mode, fields.invoice_date) == ("DD", "06-Oct-26")
+
+
+class TestOneChitThreeWaysToPay:
+    """The same chit receipted for cash, UPI and cheque. Each is a receipt,
+    keeps its own number, and tells the member how they paid."""
+
+    @pytest.mark.parametrize("number, cell, mode", [
+        ("SKCR5/26", "Cash", "Cash"),
+        ("CHQ10860/25", upi_cell(), "UPI"),
+        ("CHQ4551/26", cheque_cell(), "Cheque"),
+    ])
+    def test_each_is_a_receipt_saying_how_it_was_paid(self, receipt, number, cell, mode):
+        fields = extract_fields(receipt(ChitReceiptSpec(
+            receipt_number=number, receipt_date="06-Oct-26", payment_mode=cell)))
+        assert (fields.document_kind, fields.invoice_number, fields.payment_mode,
+                fields.invoice_date) == ("receipt", number, mode, "06-Oct-26")
+
+    def test_the_first_receipts_of_the_year_have_short_numbers(self, receipt):
+        """The count restarts each year, and a branch prints its letters in
+        front: "SKCR5/26" used to be no number and no receipt at all."""
+        fields = extract_fields(receipt(ChitReceiptSpec(receipt_number="SKCR5/26")))
+        assert (fields.document_kind, fields.invoice_number) == ("receipt", "SKCR5/26")
+
+
+class TestNotEveryNumberedPageIsAReceipt:
+    """Thanking someone for a payment they did not make is worse than holding
+    the page, so a number that does not start CR has to come with how it was
+    paid."""
+
+    def letter(self, tmp_path, *lines):
+        import fitz
+
+        doc = fitz.open()
+        page = doc.new_page()
+        y = 50
+        for line in (LETTERHEAD, "DN1234/26", "Sri/Smt/M/s . ANITHA RAMESH",
+                     "Rupees Five Thousand Only", *lines):
+            page.insert_text((40, y), line, fontsize=10)
+            y += 16
+        path = tmp_path / "letter.pdf"
+        doc.save(path)
+        doc.close()
+        return path
+
+    def test_a_numbered_letter_saying_nothing_of_payment_is_not_a_receipt(self, tmp_path):
+        fields = extract_fields(self.letter(tmp_path))
+        assert fields.has_text_layer and fields.document_kind is None
+
+    def test_a_sentence_offering_ways_to_pay_is_not_a_payment(self, tmp_path):
+        path = self.letter(tmp_path, "is due. You may pay through online or at the branch.")
+        assert extract_fields(path).document_kind is None
+
+    def test_a_form_with_room_for_a_cheque_number_says_nothing(self, tmp_path):
+        path = self.letter(tmp_path, "Cheque Number :")
+        fields = extract_fields(path)
+        assert fields.document_kind is None and fields.payment_mode is None
+
+    def test_a_number_with_how_it_was_paid_is_a_receipt(self, tmp_path):
+        assert extract_fields(self.letter(tmp_path, "Cash")).document_kind == "receipt"
+
+
+class TestADatedLabelIsStillADate:
+    """Taking the cheque's date off the page must not take the document's."""
+
+    @pytest.mark.parametrize("line", ["Dated 12/05/2026", "Dated : 12/05/2026"])
+    def test_a_document_dated_on_its_own_line(self, tmp_path, line):
+        import fitz
+
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((40, 50), LETTERHEAD, fontsize=10)
+        page.insert_text((40, 66), line, fontsize=10)
+        doc.save(tmp_path / "d.pdf")
+        doc.close()
+        assert extract_fields(tmp_path / "d.pdf").invoice_date == "12/05/2026"
+
+
 class TestOneProfileReadsBothLayouts:
     """A single default profile must handle every client seen so far."""
 

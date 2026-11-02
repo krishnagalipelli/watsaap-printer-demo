@@ -90,6 +90,7 @@ class DesktopWindow:
         self._sending: set[str] = set()
         self.root = tk.Tk()
         self.root.title("WhatsApp Printer")
+        icons.set_app_icon(self.root)
         self._size_window()
         theme.apply(self.root)
         clipboard.install(self.root)
@@ -143,15 +144,21 @@ class DesktopWindow:
         brand.pack(fill="x")
         row = ttk.Frame(brand)
         row.pack(fill="x")
-        size = theme.px(self.root, 30)
-        mark = tk.Canvas(row, width=size, height=size, highlightthickness=0,
-                         borderwidth=0, background=theme.MINT)
-        mark.create_image(size // 2, size // 2, image=self._icon("printer", theme.CARD))
-        mark.pack(side="left")
-        ttk.Label(row, text="WhatsApp Printer", style="Brand.TLabel").pack(
-            side="left", padx=(10, 0))
+        logo = icons.logo(self.root, SIDEBAR_WIDTH - 34)
+        if logo:
+            ttk.Label(row, image=logo).pack(side="left")
+            indent = 0
+        else:
+            size = theme.px(self.root, 30)
+            mark = tk.Canvas(row, width=size, height=size, highlightthickness=0,
+                             borderwidth=0, background=theme.MINT)
+            mark.create_image(size // 2, size // 2, image=self._icon("printer", theme.CARD))
+            mark.pack(side="left")
+            ttk.Label(row, text="WhatsApp Printer", style="Brand.TLabel").pack(
+                side="left", padx=(10, 0))
+            indent = size + 10
         theme.eyebrow(brand, f"Operations / v{__version__}").pack(
-            anchor="w", padx=(size + 10, 0), pady=(8, 0))
+            anchor="w", padx=(indent, 0), pady=(8, 0))
 
         nav = ttk.Frame(side, padding=(12, 0))
         nav.pack(fill="x")
@@ -364,7 +371,7 @@ class DesktopWindow:
 
     def _history_table(self, parent, height: int) -> ttk.Treeview:
         table = ttk.Treeview(parent, columns=[c for c, _h, _w in HISTORY_COLUMNS],
-                             show="headings", height=height, selectmode="browse")
+                             show="headings", height=height, selectmode="extended")
         theme.headings(table, HISTORY_COLUMNS)
         # Only the rows that mean something different from the rest are
         # coloured: failures, and what was ignored.
@@ -504,16 +511,16 @@ class DesktopWindow:
 
         top = ttk.Frame(box)
         top.pack(fill="x")
-        ttk.Label(top, text=vm.document_of(job), style="Head.TLabel").pack(side="left")
         label, tone = vm.label_of(job)
         ttk.Label(top, text=label.upper(), style=f"{tone.title()}Tag.TLabel").pack(
             side="right")
-        ttk.Label(box, text=vm.queue_caption(job), style="MonoHint.TLabel").pack(
-            anchor="w", pady=(2, 0))
+        theme.Readout(top, text=vm.document_of(job), style="Head.TLabel").pack(
+            side="left", fill="x", expand=True)
+        theme.Readout(box, text=vm.queue_caption(job), style="MonoHint.TLabel").pack(
+            fill="x", pady=(2, 0))
         reason = job.error or job.hold_reason or ""
         if reason:
-            theme.autowrap(ttk.Label(box, text=reason, style="Warn.TLabel", justify="left")
-                           ).pack(fill="x", anchor="w", pady=(10, 0))
+            theme.Readout(box, text=reason, style="Warn.TLabel").pack(fill="x", pady=(10, 0))
 
         row = ttk.Frame(box)
         row.pack(fill="x", pady=(14, 0))
@@ -593,14 +600,11 @@ class DesktopWindow:
         holder = ttk.Frame(page)
         holder.pack(fill="both", expand=True)
         self.recent = self._history_table(holder, height=12)
-        scroll = ttk.Scrollbar(holder, orient="vertical", command=self.recent.yview)
-        self.recent.configure(yscrollcommand=scroll.set)
-        self.recent.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        theme.pack_table(self.recent)
 
     def _render_recent(self) -> None:
         rows = tuple(
-            (vm.history_row(job), vm.label_of(job)[1])
+            (job.id, vm.history_row(job), vm.label_of(job)[1])
             for job in self.pipeline.store.recent(80)
         )
         # Redraw only when something changed. This runs every two seconds,
@@ -610,9 +614,18 @@ class DesktopWindow:
             return
         self._recent_shown = rows
         for table, shown in ((self.recent, rows), (self.activity, rows[:5])):
-            table.delete(*table.get_children())
-            for values, tone in shown:
-                table.insert("", "end", values=values, tags=(tone,))
+            position = table.yview()[0]
+            keep = {job_id for job_id, _values, _tone in shown}
+            for row in table.get_children():
+                if row not in keep:
+                    table.delete(row)
+            for index, (job_id, values, tone) in enumerate(shown):
+                if table.exists(job_id):
+                    table.item(job_id, values=values, tags=(tone,))
+                    table.move(job_id, "", index)
+                else:
+                    table.insert("", index, iid=job_id, values=values, tags=(tone,))
+            table.yview_moveto(position)
         self.recent_count.configure(
             text=f"{len(rows)} record{'' if len(rows) == 1 else 's'}".upper())
         self.recent_date.configure(text=datetime.now().strftime("%d %b"))
@@ -963,6 +976,7 @@ class DesktopWindow:
         dialog.title(title)
         theme.fit_window(dialog, 640, 480)
         dialog.configure(background=theme.PAPER)
+        ttk.Button(dialog, text="Close", command=dialog.destroy).pack(side="bottom", pady=(0, 12))
         body = ttk.Frame(dialog, padding=12)
         body.pack(fill="both", expand=True)
         view = theme.style_text(tk.Text(body, wrap="word", padx=10, pady=10))
@@ -972,7 +986,6 @@ class DesktopWindow:
         view.pack(fill="both", expand=True)
         view.insert("1.0", text)
         view.configure(state="disabled")
-        ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=(0, 12))
 
     def export_setup(self) -> None:
         from ..setup_profile import export_setup
@@ -1141,11 +1154,11 @@ class DesktopWindow:
         selected = tk.StringVar()
         box = ttk.Combobox(dialog, values=kinds, textvariable=selected, state="readonly")
         box.pack(fill="x", padx=12, pady=8)
-        preview = tk.Text(dialog, height=12, wrap="word", state="disabled")
-        preview.pack(fill="both", expand=True, padx=12)
-        tasks = Tasks(dialog)
         send = ttk.Button(dialog, text="Confirm type and send", state="disabled")
-        send.pack(pady=12)
+        send.pack(side="bottom", pady=12)
+        from .setup import _readonly_text
+        preview = _readonly_text(dialog, height=12)
+        tasks = Tasks(dialog)
         def refresh(_event=None):
             chosen = selected.get()
             send.configure(state="disabled")

@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import logging
 import tkinter as tk
+import sys
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from copy import deepcopy
@@ -146,8 +147,8 @@ class TeachWindow(tk.Toplevel):
         self.page_label = ttk.Label(bar, text="Reading…")
         self.page_label.pack(side="left", padx=8)
         ttk.Button(bar, text="▶", width=3, command=lambda: self.turn(1)).pack(side="left")
-        ttk.Label(bar, text="Click a value. Drag or shift-click to take more words or lines.",
-                  style="Hint.TLabel").pack(side="left", padx=12)
+        theme.autowrap(ttk.Label(bar, text="Click a value. Drag or shift-click to take more words or lines.",
+                                style="Hint.TLabel")).pack(side="left", fill="x", expand=True, padx=12)
 
         holder = ttk.Frame(left, style="Card.TFrame", padding=1)
         holder.pack(fill="both", expand=True)
@@ -160,6 +161,10 @@ class TeachWindow(tk.Toplevel):
         hbar.pack(side="bottom", fill="x")
         self.canvas.pack(side="left", fill="both", expand=True)
         self.canvas.bind("<Button-1>", self.on_click)
+        self.canvas.bind("<<Copy>>", self.copy_selection)
+        self.canvas.bind("<Control-c>", self.copy_selection)
+        if sys.platform == "darwin":
+            self.canvas.bind("<Command-c>", self.copy_selection)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<Motion>", self.on_hover)
         self.canvas.bind(
@@ -188,12 +193,10 @@ class TeachWindow(tk.Toplevel):
 
         picked = theme.card(right, "Selected value", padding=14)
         picked.pack(fill="x", pady=(10, 0))
-        self.value_label = ttk.Label(picked, text="Click a value on the page.",
-                                     wraplength=SIDE_WRAP, justify="left")
-        self.value_label.pack(anchor="w")
-        self.found_label = ttk.Label(picked, style="Hint.TLabel",
-                                     wraplength=SIDE_WRAP, justify="left")
-        self.found_label.pack(anchor="w", pady=(2, 6))
+        self.value_label = theme.Readout(picked, text="Click a value on the page.")
+        self.value_label.pack(fill="x")
+        self.found_label = theme.Readout(picked, style="Hint.TLabel")
+        self.found_label.pack(fill="x", pady=(2, 6))
         ttk.Label(picked, text="Call it").pack(anchor="w")
         self.field_var = tk.StringVar()
         self.field_box = ttk.Combobox(picked, textvariable=self.field_var, width=36)
@@ -221,7 +224,7 @@ class TeachWindow(tk.Toplevel):
                                  height=6, selectmode="browse")
         theme.headings(self.tree, (("#0", "Field", 100), ("label", "Found by", 90),
                                    ("reads", "Reads here", 110)))
-        self.tree.pack(fill="both", expand=True)
+        theme.pack_table(self.tree)
         row = ttk.Frame(taught)
         row.pack(fill="x", pady=(6, 0))
         ttk.Button(row, text="Not on every document", command=self.toggle_optional).pack(side="left")
@@ -234,7 +237,7 @@ class TeachWindow(tk.Toplevel):
         self.sample_tree = ttk.Treeview(samples, columns=("state",), show="tree headings",
                                         height=4, selectmode="browse")
         theme.headings(self.sample_tree, (("#0", "PDF", 150), ("state", "Status", 150)))
-        self.sample_tree.pack(fill="x")
+        theme.pack_table(self.sample_tree, fill="x", expand=False)
         row = ttk.Frame(samples)
         row.pack(fill="x", pady=(6, 0))
         ttk.Button(row, text="Add PDFs…", command=self.add_samples).pack(side="left")
@@ -331,6 +334,7 @@ class TeachWindow(tk.Toplevel):
         self.canvas.coords("hover", *coords)
 
     def on_click(self, event) -> None:
+        self.canvas.focus_set()
         hit = self._hit(event)
         self._dragging = False
         if hit is None or self.doc is None:
@@ -349,6 +353,12 @@ class TeachWindow(tk.Toplevel):
             self.optional_var.set(False)
         self._dragging = True
         self._select_to(r, w)
+
+    def copy_selection(self, _event=None):
+        if self.selection is not None:
+            self.canvas.clipboard_clear()
+            self.canvas.clipboard_append(self.selection.value)
+        return "break"
 
     def on_drag(self, event) -> None:
         if not self._dragging:

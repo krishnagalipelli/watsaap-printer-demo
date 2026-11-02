@@ -58,6 +58,12 @@ MinVersion=10.0
 #endif
 WizardStyle=modern
 UninstallDisplayIcon={app}\waprinter-agent.exe
+; Made from the logo artwork by tools/make_brand_assets.py. Each image is
+; listed at several sizes and setup picks the one nearest the display's
+; scaling, so the mark is not stretched on a 125% or 150% screen.
+SetupIconFile=..\src\waprinter\ui\assets\icon.ico
+WizardSmallImageFile=wizard-small-55.bmp,wizard-small-69.bmp,wizard-small-83.bmp,wizard-small-97.bmp,wizard-small-110.bmp,wizard-small-124.bmp,wizard-small-138.bmp
+WizardImageFile=wizard-large-164.bmp,wizard-large-246.bmp,wizard-large-328.bmp
 DisableProgramGroupPage=yes
 CloseApplications=yes
 CloseApplicationsFilter=waprinter-agent.exe,waprinter.exe
@@ -172,6 +178,8 @@ Filename: "powershell.exe"; \
 [Code]
 var
   CounterSetupPage: TInputFileWizardPage;
+  ConnectPage: TInputQueryWizardPage;
+  SendLiveCheck: TNewCheckBox;
 
 function GetModuleHandle(ModuleName: string): LongWord;
   external 'GetModuleHandleW@kernel32.dll stdcall';
@@ -207,12 +215,107 @@ begin
   CounterSetupPage.Add('Setup file (optional):', 'Setup files|*.json', '.json');
   if FileExists(ExpandConstant('{src}\provision.json')) then
     CounterSetupPage.Values[0] := ExpandConstant('{src}\provision.json');
+
+  // The client's own Meta account, typed in at the counter. Written to
+  // connect.json in the data folder, which the agent applies on first start
+  // after any setup file, seals the token with DPAPI, and deletes. Leave it
+  // blank to keep what an earlier install or the setup file already has.
+  ConnectPage := CreateInputQueryPage(CounterSetupPage.ID,
+    'Connect WhatsApp', 'The client''s WhatsApp Cloud API account',
+    'From Meta''s WhatsApp Manager / API Setup. Leave all of these blank to keep ' +
+    'the current connection, or to connect later in Setup > Connect WhatsApp.');
+  ConnectPage.Add('Access token (permanent system-user token):', True);
+  ConnectPage.Add('Phone number ID:', False);
+  ConnectPage.Add('WhatsApp Business Account ID:', False);
+  ConnectPage.Add('Receipt message template:', False);
+  ConnectPage.Values[3] := 'chit_details1';
+
+  SendLiveCheck := TNewCheckBox.Create(ConnectPage);
+  SendLiveCheck.Parent := ConnectPage.Surface;
+  SendLiveCheck.Top := ConnectPage.Edits[3].Top + ConnectPage.Edits[3].Height + ScaleY(12);
+  SendLiveCheck.Width := ConnectPage.SurfaceWidth;
+  SendLiveCheck.Height := ScaleY(17);
+  SendLiveCheck.Caption := 'Send to members straight away (turn test mode off)';
+  SendLiveCheck.Checked := True;
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := (PageID = CounterSetupPage.ID) and
     FileExists(ExpandConstant('{src}\provision.json'));
+end;
+
+// Only the characters Meta uses, so what is written needs no JSON escaping
+// and a stray space pasted with the token is caught here, not on first send.
+function OnlyChars(const Value, Allowed: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := Value <> '';
+  for I := 1 to Length(Value) do
+    if Pos(Value[I], Allowed) = 0 then
+    begin
+      Result := False;
+      Exit;
+    end;
+end;
+
+function ConnectTyped: Boolean;
+begin
+  Result := (Trim(ConnectPage.Values[0]) <> '') or (Trim(ConnectPage.Values[1]) <> '') or
+    (Trim(ConnectPage.Values[2]) <> '');
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  Digits, Letters: String;
+begin
+  Result := True;
+  if (CurPageID <> ConnectPage.ID) or not ConnectTyped then
+    Exit;
+  Digits := '0123456789';
+  Letters := 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  if not OnlyChars(Trim(ConnectPage.Values[0]), Letters + Digits + '_-') or
+     (Length(Trim(ConnectPage.Values[0])) < 50) then
+  begin
+    MsgBox('The access token does not look complete. Copy the whole token from Meta and paste it again.', mbError, MB_OK);
+    Result := False;
+  end
+  else if not OnlyChars(Trim(ConnectPage.Values[1]), Digits) then
+  begin
+    MsgBox('The phone number ID is the long number Meta shows under the phone number, digits only. It is not the phone number itself.', mbError, MB_OK);
+    Result := False;
+  end
+  else if not OnlyChars(Trim(ConnectPage.Values[2]), Digits) then
+  begin
+    MsgBox('The WhatsApp Business Account ID is digits only.', mbError, MB_OK);
+    Result := False;
+  end
+  else if not OnlyChars(Trim(ConnectPage.Values[3]), Letters + Digits + '_') then
+  begin
+    MsgBox('The template name is the name as it appears in WhatsApp Manager, for example chit_details1.', mbError, MB_OK);
+    Result := False;
+  end;
+end;
+
+// Receipts go out as an image under the template typed here, so it has to be
+// one Meta approved with an image header.
+procedure WriteConnectFile;
+var
+  Json, DryRun: String;
+begin
+  if SendLiveCheck.Checked then DryRun := 'false' else DryRun := 'true';
+  Json := '{' + #13#10 +
+    '  "access_token": "' + Trim(ConnectPage.Values[0]) + '",' + #13#10 +
+    '  "phone_number_id": "' + Trim(ConnectPage.Values[1]) + '",' + #13#10 +
+    '  "business_account_id": "' + Trim(ConnectPage.Values[2]) + '",' + #13#10 +
+    '  "send_mode": "api",' + #13#10 +
+    '  "dry_run": ' + DryRun + ',' + #13#10 +
+    '  "default_template": "' + Trim(ConnectPage.Values[3]) + '",' + #13#10 +
+    '  "document_attachments": {"receipt": "image"}' + #13#10 +
+    '}' + #13#10;
+  if not SaveStringToFile(ExpandConstant('{#DataDir}\connect.json'), Json, False) then
+    RaiseException('Could not save the WhatsApp connection. Run setup again.');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -225,6 +328,8 @@ begin
       if CompareText(CounterSetupPage.Values[0], ExpandConstant('{#DataDir}\provision.json')) <> 0 then
         if not FileCopy(CounterSetupPage.Values[0], ExpandConstant('{#DataDir}\provision.json'), False) then
           RaiseException('Could not copy the counter setup file. Check that it is accessible and run setup again.');
+    if ConnectTyped then
+      WriteConnectFile;
 
     // [Run] ignores a program's failure exit code. A failed printer creation
     // must be visible before setup offers to launch an apparently ready app.

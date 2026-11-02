@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import base64
 import logging
+import sys
 import tkinter as tk
+from pathlib import Path
 
 from .theme import px
 
@@ -88,3 +90,51 @@ def _draw(master: tk.Misc, name: str, colour: str, pixels: int, before: int,
     except Exception:
         log.debug("could not draw the %s icon", name, exc_info=True)
         return None
+
+
+# The app's own icon and logo, made from the artwork by
+# tools/make_brand_assets.py. Shipped beside this module, and by build.ps1
+# beside it in the frozen app.
+ASSETS = Path(__file__).resolve().parent / "assets"
+
+
+def set_app_icon(root: tk.Tk) -> None:
+    """The icon on the title bar and taskbar, for this window and every
+    window opened from it.
+
+    On Windows the .ico, which carries a hand-checked image for each size the
+    shell asks for; elsewhere the PNGs, which is what Tk can read there. A
+    missing icon leaves Tk's own: never a reason not to start.
+    """
+    try:
+        if sys.platform == "win32":
+            root.iconbitmap(default=str(ASSETS / "icon.ico"))
+            return
+        images = [tk.PhotoImage(master=root, file=str(ASSETS / f"icon-{s}.png"))
+                  for s in (16, 32, 48, 256)]
+        root.iconphoto(True, *images)
+        root._app_icons = images  # Tk drops an image Python stops referring to.
+    except Exception:
+        log.debug("could not set the window icon", exc_info=True)
+
+
+def logo(master: tk.Misc, width: int) -> tk.PhotoImage | str:
+    """The logo, `width` pixels wide at 100% and scaled with the display.
+
+    Drawn once from one large PNG: Tk can only shrink an image by whole
+    numbers, which would leave it the wrong size at most scalings.
+    """
+    key = (id(master.tk), "logo", px(master, width))
+    if key not in _cache:
+        try:
+            import fitz
+
+            source = fitz.Pixmap(str(ASSETS / "logo.png"))
+            wide = min(key[2], source.width)
+            scaled = fitz.Pixmap(source, wide, round(wide * source.height / source.width))
+            data = base64.b64encode(scaled.tobytes("png"))
+            _cache[key] = tk.PhotoImage(master=master, data=data)
+        except Exception:
+            log.debug("could not draw the logo", exc_info=True)
+            _cache[key] = None
+    return _cache[key] or ""

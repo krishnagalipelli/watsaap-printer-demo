@@ -188,3 +188,93 @@ class TestValuesAreCheckedNotJustCopied:
         assert settings.dry_run is False
         assert settings.own_numbers == ["9876543210"]
         assert settings.max_sends_per_minute == 3
+
+
+class TestConnectedFromTheInstaller:
+    """The installer asks for the token, the number and the account, and writes
+    them to connect.json. First start applies it after any shared setup file,
+    fetches the account's templates, and fills in the receipt's message when
+    every variable says plainly what it holds."""
+
+    def chit_details(self, body: str):
+        from waprinter.send.templates import MessageTemplate
+
+        return MessageTemplate(name="chit_details1", body=body, status="approved",
+                               header_document=False, header_format="IMAGE")
+
+    @pytest.fixture
+    def meta(self, monkeypatch):
+        fetched: list = []
+
+        def fake_fetch(token, account_id, api_version="v21.0", client=None):
+            assert (token, account_id) == (GOOD_TOKEN, "987654321098765")
+            return list(fetched)
+
+        monkeypatch.setattr("waprinter.send.sync.fetch_templates", fake_fetch)
+        return fetched
+
+    def connect(self, written, **extra):
+        from waprinter.config import paths
+
+        target = paths().root / "connect.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({
+            "access_token": GOOD_TOKEN,
+            "phone_number_id": "123456789012345",
+            "business_account_id": "987654321098765",
+            "send_mode": "api",
+            "default_template": "chit_details1",
+            "document_attachments": {"receipt": "image"},
+            **extra,
+        }), encoding="utf-8")
+        return target
+
+    def test_what_was_typed_wins_over_the_shared_file(self, written, meta):
+        from waprinter.config import paths
+
+        written({"phone_number_id": "111111111111111", "branch_name": "Karimnagar"},
+                folder=paths().root)
+        source = self.connect(written)
+
+        result = apply_if_present()
+
+        settings = Settings.load()
+        assert settings.phone_number_id == "123456789012345"
+        assert settings.branch_name == "Karimnagar"
+        assert settings.document_attachments == {"receipt": "image"}
+        assert load_token() == GOOD_TOKEN
+        assert result.removed and not source.exists()
+
+    def test_templates_arrive_and_the_receipt_message_is_filled(self, written, meta):
+        meta.append(self.chit_details(
+            "Dear {{1}}, Receipt No: {{2}} Date: {{3}} Amount: {{4}} "
+            "Mode of Payment: {{5}}"))
+        self.connect(written)
+
+        result = apply_if_present()
+
+        assert "templates" in result.applied
+        assert Settings.load().template_mappings["chit_details1"] == {
+            "1": "customer_name", "2": "invoice_number", "3": "invoice_date",
+            "4": "total_amount", "5": "payment_mode"}
+
+    def test_a_variable_nothing_explains_is_left_for_a_person(self, written, meta):
+        meta.append(self.chit_details("Dear {{1}}, your payment to {{2}} is received."))
+        self.connect(written)
+
+        result = apply_if_present()
+
+        assert "chit_details1" not in Settings.load().template_mappings
+        assert any("Fill in messages" in w for w in result.warnings)
+
+    def test_no_internet_still_starts(self, written, monkeypatch):
+        def offline(*_args, **_kwargs):
+            raise OSError("no route to graph.facebook.com")
+
+        monkeypatch.setattr("waprinter.send.sync.fetch_templates", offline)
+        self.connect(written)
+
+        result = apply_if_present()
+
+        assert result.token_stored
+        assert any("Templates not fetched" in w for w in result.warnings)

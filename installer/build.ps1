@@ -144,12 +144,17 @@ try {
     # src\waprinter\. PyInstaller runs its entry script as __main__, and those
     # modules use relative imports, which fail instantly when run that way.
     # Frozen --windowed that failure is invisible: the exe just does nothing.
+    # --add-data carries the window icon and the side bar's logo, read from
+    # beside icons.py. ';' is the separator PyInstaller 5 wants on Windows,
+    # and cmd /c passes it through.
     Write-Host '== Freezing the agent ==' -ForegroundColor Cyan
     if (Test-Path 'dist') { Remove-Item -Recurse -Force 'dist' }
     Invoke-Step (
         "$Python -m PyInstaller --noconfirm --clean --windowed " +
         "--name waprinter-agent " +
         "--paths src " +
+        "--icon src\waprinter\ui\assets\icon.ico " +
+        "--add-data src\waprinter\ui\assets;waprinter\ui\assets " +
         "--hidden-import win32timezone " +
         "packaging\waprinter_agent.py"
     )
@@ -158,6 +163,7 @@ try {
     Invoke-Step (
         "$Python -m PyInstaller --noconfirm --clean --console " +
         "--name waprinter --distpath dist\cli --paths src " +
+        "--icon src\waprinter\ui\assets\icon.ico " +
         "packaging\waprinter_cli.py"
     )
 

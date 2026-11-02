@@ -96,6 +96,15 @@ which swap in the setup screens in the same window. A PIN can be set so a clerk
 does not change a member's message by accident; it keeps honest people out and
 is not a password.
 
+Use **Ctrl+A/C/X/V** to select all, copy, cut, and paste in text fields;
+**Command** shortcuts also work on macOS. Queue details, setup status messages,
+and previews support mouse-drag highlighting. In **Recent documents**, select
+one or more rows and press **Ctrl+C** to copy them as spreadsheet columns.
+Right-click a table for **Copy cell** or **Select row text…** to read and select
+values that do not fit on screen. Other labels offer **Copy** and **Select text…**.
+**Shift+F10** opens a focused field or table's menu. **Tab / Shift+Tab** moves
+between controls and scrolls off-screen fields into view.
+
 ## Setting up a counter
 
 Setup is seven steps down the left-hand side, each ticked when it is done:
@@ -385,6 +394,18 @@ waprinter provision \\share\it\provision.json
 ```
 
 See [`provision.example.json`](provision.example.json) for the full set.
+
+**Or type the account in during setup.** The **Connect WhatsApp** page asks
+for the access token, the phone number ID, the WhatsApp Business Account ID and
+the receipt template (`chit_details1` unless changed), with a box for sending
+straight away rather than in test mode. Setup writes these to `connect.json`
+in the data folder, and the agent applies it after any `provision.json`, so
+what was typed at this counter wins. Receipts go out as an image, so the
+template must be approved with an image header. On first start the account's
+templates are fetched, and the receipt template's variables are filled in
+when every one is named or labelled plainly ("Receipt No: {{2}}"); otherwise
+receipts are held until Setup → Fill in messages is done. Left blank, the page
+changes nothing.
 
 **The token is not compiled into the build, and must not be.** This repository
 is public and the installer is published on GitHub Releases, so a token in the

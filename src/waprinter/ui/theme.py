@@ -198,7 +198,7 @@ def apply(root: tk.Tk) -> ttk.Style:
               darkcolor=[("disabled", PAPER), ("pressed", WASH), ("active", WASH)],
               bordercolor=[("focus", MINT)])
     style.configure("Mint.TButton", background=MINT, foreground=CARD, bordercolor=MINT,
-                    lightcolor=MINT, darkcolor=MINT, font=BOLD, focuscolor=MINT)
+                    lightcolor=MINT, darkcolor=MINT, font=BOLD, focuscolor=INK)
     mint_states = [("disabled", MINT_OFF), ("pressed", MINT_DARK), ("active", MINT_DARK)]
     style.map("Mint.TButton", background=mint_states, lightcolor=mint_states,
               darkcolor=mint_states, bordercolor=mint_states,
@@ -214,11 +214,11 @@ def apply(root: tk.Tk) -> ttk.Style:
               foreground=[("active", INK)])
     on = dict(background=WASH, lightcolor=WASH, darkcolor=WASH, bordercolor=WASH)
     style.configure("NavOn.TButton", foreground=INK, anchor="w", padding=(10, 8),
-                    focuscolor=WASH, **on)
+                    focuscolor=INK, **on)
     style.map("NavOn.TButton", **{k: [("active", v)] for k, v in on.items()})
     # A link: "Open setup →".
     style.configure("Link.TButton", background=PAPER, foreground=INK, font=BOLD,
-                    padding=(0, 2), focuscolor=PAPER, **flat)
+                    padding=(0, 2), focuscolor=INK, **flat)
     style.map("Link.TButton", foreground=[("active", MINT_TEXT)],
               background=[("active", PAPER), ("pressed", PAPER)],
               lightcolor=[("active", PAPER)], darkcolor=[("active", PAPER)],
@@ -238,7 +238,7 @@ def apply(root: tk.Tk) -> ttk.Style:
     style.map("TCombobox", bordercolor=focus, lightcolor=focus,
               fieldbackground=[("readonly", CARD), ("disabled", PAPER)],
               background=[("active", WASH), ("readonly", CARD)],
-              selectbackground=[("readonly", CARD)],
+              selectbackground=[("readonly", SELECTED_TEXT)],
               selectforeground=[("readonly", INK)],
               arrowcolor=[("disabled", LINE)])
     root.option_add("*TCombobox*Listbox.background", CARD)
@@ -251,7 +251,7 @@ def apply(root: tk.Tk) -> ttk.Style:
     style.configure("TCheckbutton", background=PAPER, foreground=INK,
                     indicatorbackground=CARD, indicatorforeground=CARD,
                     upperbordercolor=LINE, lowerbordercolor=LINE,
-                    indicatormargin=(0, 0, 8, 0), focuscolor=PAPER)
+                    indicatormargin=(0, 0, 8, 0), focuscolor=INK)
     style.map("TCheckbutton",
               background=[("active", PAPER)],
               indicatorbackground=[("selected", MINT), ("pressed", WASH)],
@@ -261,7 +261,7 @@ def apply(root: tk.Tk) -> ttk.Style:
     # Tables: white rows, a pale heading in small capitals, no grid.
     style.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=INK,
                     bordercolor=WASH, lightcolor=WASH, darkcolor=WASH, rowheight=_px(root, 30))
-    style.map("Treeview", background=[("selected", WASH)], foreground=[("selected", INK)])
+    style.map("Treeview", background=[("selected", SELECTED_TEXT)], foreground=[("selected", INK)])
     style.configure("Treeview.Heading", background=HEAD, foreground=SUBTLE, font=MONO,
                     relief="flat", bordercolor=WASH, lightcolor=HEAD, darkcolor=HEAD,
                     padding=(8, 6))
@@ -415,6 +415,83 @@ def style_text(widget: tk.Text) -> tk.Text:
     return widget
 
 
+class Readout(tk.Text):
+    """Selectable, read-only prose that grows to its wrapped content."""
+
+    def __init__(self, parent, text="", style="TLabel"):
+        super().__init__(parent, width=1, height=1, wrap="word", padx=0, pady=0,
+                         borderwidth=0, highlightthickness=0, relief="flat",
+                         cursor="xterm", takefocus=True, exportselection=False,
+                         selectbackground=SELECTED_TEXT, selectforeground=INK,
+                         inactiveselectbackground=SELECTED_TEXT)
+        self._text = ""
+        self._style = style
+        self._resize_pending = None
+        self.configure(style=style, text=text, state="disabled")
+        self.bind("<Configure>", self._schedule_resize)
+        self.bind("<Destroy>", self._cancel_resize)
+
+    def configure(self, cnf=None, **kwargs):
+        if cnf:
+            kwargs.update(cnf)
+        if "style" in kwargs:
+            self._style = kwargs.pop("style")
+            style = ttk.Style(self)
+            kwargs.setdefault("foreground", style.lookup(self._style, "foreground") or INK)
+            kwargs.setdefault("background", style.lookup(self._style, "background") or PAPER)
+            kwargs.setdefault("font", style.lookup(self._style, "font") or BODY)
+        if "text" in kwargs:
+            value = str(kwargs.pop("text"))
+            if value != self._text:
+                self._text = value
+                super().configure(state="normal")
+                self.delete("1.0", "end")
+                self.insert("1.0", value)
+                super().configure(state="disabled")
+                self._schedule_resize()
+        return super().configure(**kwargs)
+
+    config = configure
+
+    def cget(self, key):
+        if key == "text":
+            return self._text
+        if key == "style":
+            return self._style
+        return super().cget(key)
+
+    def _schedule_resize(self, _event=None):
+        if self._resize_pending is None:
+            self._resize_pending = self.after_idle(self._resize)
+
+    def _resize(self):
+        self._resize_pending = None
+        if self.winfo_width() <= 1:
+            return
+        lines = max(1, int(self.tk.call(self._w, "count", "-update", "-displaylines", "1.0", "end")))
+        if int(self.cget("height")) != lines:
+            super().configure(height=lines)
+
+    def _cancel_resize(self, _event=None):
+        if self._resize_pending is not None:
+            self.after_cancel(self._resize_pending)
+            self._resize_pending = None
+
+
+def pack_table(tree: ttk.Treeview, **options) -> None:
+    """Pack a table with both scrollbars, keeping all rows and columns reachable."""
+    holder = ttk.Frame(tree.master)
+    holder.pack(fill=options.pop("fill", "both"), expand=options.pop("expand", True), **options)
+    vertical = ttk.Scrollbar(holder, orient="vertical", command=tree.yview)
+    horizontal = ttk.Scrollbar(holder, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+    holder.rowconfigure(0, weight=1)
+    holder.columnconfigure(0, weight=1)
+    tree.grid(in_=holder, row=0, column=0, sticky="nsew")
+    vertical.grid(row=0, column=1, sticky="ns")
+    horizontal.grid(row=1, column=0, sticky="ew")
+
+
 def headings(tree: ttk.Treeview, columns) -> None:
     """Name and size a table's columns: (column, heading, width) triples.
 
@@ -457,10 +534,55 @@ def scrollable(parent: tk.Misc) -> ttk.Frame:
     def wheel(event: "tk.Event") -> None:
         path = str(event.widget)
         if path == str(canvas) or path.startswith(f"{canvas}."):
+            # Text and tables already scroll themselves through class bindings.
+            # Do not move the whole page as well on the same wheel event.
+            if event.widget.winfo_class() in ("Text", "Treeview", "Listbox", "TCombobox"):
+                if not isinstance(event.widget, Readout):
+                    return
             # Only when there is something to scroll: a page shorter than the
             # window would otherwise creep up by a line per notch.
             if canvas.yview() != (0.0, 1.0):
-                canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+                number = getattr(event, "num", None)
+                delta = getattr(event, "delta", 0)
+                if number in (4, 5):
+                    steps = -1 if number == 4 else 1
+                elif delta:
+                    steps = -int(delta) if sys.platform == "darwin" else -int(delta / 120) or (-1 if delta > 0 else 1)
+                else:
+                    return
+                canvas.yview_scroll(steps, "units")
 
-    parent.winfo_toplevel().bind("<MouseWheel>", wheel, add="+")
+    def reveal_focus(event):
+        widget = event.widget
+        if not str(widget).startswith(f"{inner}."):
+            return
+        canvas.update_idletasks()
+        top = widget.winfo_rooty() - canvas.winfo_rooty()
+        bottom = top + widget.winfo_height()
+        height = canvas.winfo_height()
+        if top >= 0 and bottom <= height:
+            return
+        bounds = canvas.bbox("all")
+        if bounds and bounds[3] > height:
+            offset = top if top < 0 or widget.winfo_height() > height else bottom - height
+            canvas.yview_moveto(max(0, canvas.canvasy(0) + offset) / bounds[3])
+
+    top = parent.winfo_toplevel()
+    bindings = [(sequence, top.bind(sequence, callback, add="+")) for sequence, callback in (
+        ("<MouseWheel>", wheel), ("<Button-4>", wheel), ("<Button-5>", wheel),
+        ("<FocusIn>", reveal_focus),
+    )]
+
+    def cleanup(event):
+        if event.widget == canvas:
+            for sequence, identifier in bindings:
+                # Older Python/Tk builds unbind every handler even with an
+                # identifier. Remove only this canvas's callback on Win7 too.
+                prefix = f'if {{"[{identifier} '
+                script = top.bind(sequence)
+                top.bind(sequence, "\n".join(line for line in script.splitlines()
+                                            if not line.startswith(prefix)))
+                top.deletecommand(identifier)
+
+    canvas.bind("<Destroy>", cleanup)
     return inner

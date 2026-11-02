@@ -75,9 +75,10 @@ DOCUMENT_NUMBER_LABELS = [
 ]
 
 # Unlabelled identifiers, as full regexes with one capture group. Needed where a
-# number stands alone on a line, e.g. the chit receipt's "CR1747/26".
+# number stands alone on a line, e.g. the chit receipt's "CR1747/26". The
+# count restarts each year, so the first receipts of one are "SKCR5/26".
 DOCUMENT_NUMBER_PATTERNS = [
-    r"\b([A-Z]{2,4}\d{3,8}/\d{2,4})\b",   # CR1747/26
+    r"\b([A-Z]{2,4}\d{1,8}/\d{2,4})\b",   # CR1747/26, SKCR5/26
 ]
 
 # Labels whose value is the document date.
@@ -352,10 +353,29 @@ class DocumentProfile:
                          and re.search(r"\ban amount of rupees\b", text, re.I))
         # The untitled chit form has an identifier plus an amount in words
         # and a customer anchor. A random unknown page is not a receipt.
-        chit = (re.search(r"\bCR\d{1,8}/\d{2,4}\b", text, re.I)
+        #
+        # The prefix follows how the member paid, CR1747/26 or CHQ4551/26,
+        # with the branch's letters in front at some branches (SKCR5/26), and
+        # the same shape heads other paperwork. So a number not ending CR has
+        # to come with how it was paid: a dues letter with a reference and a
+        # sum in words must not be thanked for a payment.
+        numbered = (re.search(r"\b[A-Z]{0,2}CR\d{1,8}/\d{2,4}\b", text, re.I)
+                    or (any(p.search(text) for p in self.document_number_pattern_res)
+                        and self._says_how_paid(text)))
+        chit = (numbered
                 and any(p.search(text) for p in self.amount_words_res)
                 and self.customer_anchor_re.search(text))
         return receipt if payment_words or chit else None
+
+    def _says_how_paid(self, text: str) -> bool:
+        """Whether a line of `text` opens by stating a payment.
+
+        From the start of the line, because "you may pay through online" in
+        the middle of a sentence is not a payment.
+        """
+        patterns = (self.payment_mode_labelled_re, self.payment_mode_bare_re,
+                    self.payment_mode_numbered_re, self.payment_mode_through_re)
+        return any(p.match(line) for line in text.splitlines() for p in patterns)
 
     @staticmethod
     def rules_key(kind: DocumentKind | str | None) -> str:
@@ -464,6 +484,13 @@ class DocumentProfile:
         )
         self.payment_mode_bare_re = re.compile(
             rf"^\s*({_alt(self.payment_modes)})\s*$", re.IGNORECASE
+        )
+        # A cheque is not labelled either. Its cell reads "Cheque Number 351768
+        # / dated 31/10/2026 of Bank / SBI-PDPL", and the figures are what say
+        # one was given: a form can print "Cheque Number :" with nothing after.
+        self.payment_mode_numbered_re = re.compile(
+            rf"^\s*({_alt(self.payment_modes)})\s+(?:number|no\.?|#)\s*[:\-–]?\s*\d",
+            re.IGNORECASE,
         )
         # An online payment is not labelled at all on a chit receipt: the cell
         # reads "Transaction Number / 048669201016 dated 06/10/2026 / Through

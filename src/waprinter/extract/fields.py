@@ -88,9 +88,13 @@ def _amount_words(doc: pdf_text.Document, profile: DocumentProfile) -> str | Non
 _MODE_INITIALS = {"upi", "dd", "neft", "rtgs", "imps"}
 
 # The date a payment was made online, printed beside its transaction number:
-# "048669201016 dated 06/10/2026". Not the receipt's date, and "dated" is a
-# date label, so it has to be taken off the row before dates are read.
-_TRANSACTION_DATED = re.compile(r"\b\d{6,}\s+dated\s+\S+", re.IGNORECASE)
+# "048669201016 dated 06/10/2026", or a cheque's on the line under its number:
+# "dated 31/10/2026 of Bank". Not the receipt's date, and "dated" is a date
+# label, so it has to be taken off the row before dates are read. A row that
+# only starts "dated" is left alone: that is how an invoice gives its own date.
+_TRANSACTION_DATED = re.compile(
+    r"\b\d{6,}\s+dated\s+\S+|\bdated\s+\S+\s+of\s+bank\b", re.IGNORECASE
+)
 
 
 def _mode_name(word: str) -> str:
@@ -103,9 +107,9 @@ def _payment_mode(doc: pdf_text.Document, profile: DocumentProfile) -> str | Non
     """How the customer paid.
 
     A labelled value first ("Mode of Payment  Cash"), then the bare word alone
-    on a row — which is all a pre-printed form leaves in the text layer — and
-    last "Through ONLINE-UPI", which is how an online payment is printed
-    under its transaction number.
+    on a row — which is all a pre-printed form leaves in the text layer — then
+    "Cheque Number 351768", and last "Through ONLINE-UPI", which is how an
+    online payment is printed under its transaction number.
     """
     for row in doc.rows:
         m = profile.payment_mode_labelled_re.search(row.text)
@@ -113,6 +117,10 @@ def _payment_mode(doc: pdf_text.Document, profile: DocumentProfile) -> str | Non
             return _mode_name(m.group(1))
     for row in doc.rows:
         m = profile.payment_mode_bare_re.match(row.text)
+        if m:
+            return _mode_name(m.group(1))
+    for row in doc.rows:
+        m = profile.payment_mode_numbered_re.match(row.text)
         if m:
             return _mode_name(m.group(1))
     for row in doc.rows:

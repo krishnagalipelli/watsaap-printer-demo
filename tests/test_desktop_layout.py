@@ -1263,8 +1263,6 @@ class TestCopyAndPaste:
 
     def test_a_table_row_copies_as_tab_separated_text(self, window):
         from tkinter import ttk
-        from types import SimpleNamespace
-
         from waprinter.ui import clipboard
 
         tree = ttk.Treeview(window.root, columns=("a", "b"))
@@ -1272,7 +1270,271 @@ class TestCopyAndPaste:
             tree.pack()
             tree.insert("", "end", iid="r", text="Name", values=("Lab", "9"))
             window.root.update()
-            box = tree.bbox("r")
-            assert clipboard._row_text(tree, SimpleNamespace(y=box[1] + 2)) == "Name\tLab\t9"
+            assert clipboard._row_text(tree, "r") == "Name\tLab\t9"
         finally:
             tree.destroy()
+
+
+@pytest.fixture
+def interaction_panel(window):
+    panel = tk.Toplevel(window.root)
+    panel.geometry("480x320")
+    yield panel
+    panel.destroy()
+
+
+def _key(widget, sequence):
+    widget.winfo_toplevel().update()
+    widget.focus_force()
+    widget.update()
+    widget.event_generate(sequence)
+    widget.update()
+
+
+@pytest.mark.parametrize("modifier", ["Control", pytest.param("Command", marks=pytest.mark.skipif(
+    __import__("sys").platform != "darwin", reason="macOS shortcut"))])
+def test_keyboard_select_copy_cut_and_paste(interaction_panel, modifier):
+    from tkinter import ttk
+
+    entry = ttk.Entry(interaction_panel)
+    entry.pack()
+    entry.insert(0, "Customer 123")
+    _key(entry, f"<{modifier}-a>")
+    assert entry.selection_present()
+    _key(entry, f"<{modifier}-c>")
+    assert entry.clipboard_get() == "Customer 123"
+    _key(entry, f"<{modifier}-x>")
+    assert entry.get() == ""
+    _key(entry, f"<{modifier}-v>")
+    assert entry.get() == "Customer 123"
+
+
+def test_keyboard_copy_readonly_choice_without_selection(interaction_panel):
+    from tkinter import ttk
+
+    combo = ttk.Combobox(interaction_panel, values=["Document"], state="readonly")
+    combo.pack()
+    combo.current(0)
+    combo.selection_clear()
+    _key(combo, "<Control-c>")
+    assert combo.clipboard_get() == "Document"
+
+
+def test_table_copy_preserves_empty_cells_display_order_and_multiple_rows(interaction_panel):
+    from tkinter import ttk
+
+    tree = ttk.Treeview(interaction_panel, columns=("a", "b", "c"),
+                        displaycolumns=("c", "b", "a"), show="headings")
+    tree.pack()
+    tree.insert("", "end", iid="r1", text="hidden", values=("First", "", "Last"))
+    tree.insert("", "end", iid="r2", values=("Next", "", "End"))
+    _key(tree, "<Control-a>")
+    _key(tree, "<Control-c>")
+    assert tree.clipboard_get() == "Last\t\tFirst\nEnd\t\tNext"
+
+
+def test_table_context_menu_keeps_selection_and_copies_cell(interaction_panel, monkeypatch):
+    from tkinter import ttk
+    from types import SimpleNamespace
+    from waprinter.ui import clipboard
+
+    tree = ttk.Treeview(interaction_panel, columns=("value",), show="headings")
+    tree.pack()
+    tree.insert("", "end", iid="first", values=("First value",))
+    tree.insert("", "end", iid="second", values=("Second value",))
+    tree.selection_set("first", "second")
+    interaction_panel.update()
+    menus = []
+    monkeypatch.setattr(tk.Menu, "tk_popup", lambda menu, *_: menus.append(menu))
+    x, y, _width, height = tree.bbox("first")
+    clipboard._show_menu(SimpleNamespace(widget=tree, x=x+10, y=y+height//2, x_root=10, y_root=10))
+    menu = menus[0]
+    try:
+        assert menu.winfo_exists(), "a nonblocking popup must stay alive for the user"
+        assert set(tree.selection()) == {"first", "second"}
+        menu.invoke(0)
+        assert tree.clipboard_get() == "First value"
+        menu.invoke(1)
+        assert tree.clipboard_get() == "First value\nSecond value"
+    finally:
+        menu.destroy()
+
+
+def test_hidden_token_is_protected_from_keyboard_cut_and_copy(interaction_panel):
+    from tkinter import ttk
+    from waprinter.ui import clipboard
+
+    entry = ttk.Entry(interaction_panel, show="•")
+    entry.pack()
+    clipboard.guard_secret(entry)
+    entry.insert(0, "test-secret")
+    entry.clipboard_clear()
+    entry.clipboard_append("unchanged")
+    _key(entry, "<Control-a>")
+    _key(entry, "<Control-c>")
+    _key(entry, "<Control-x>")
+    assert entry.clipboard_get() == "unchanged"
+    assert entry.get() == "test-secret"
+
+
+def test_readout_wraps_can_be_highlighted_and_remains_readonly(interaction_panel):
+    from waprinter.ui import theme
+
+    prose = "A long document status with a customer name and an explanation. " * 4
+    readout = theme.Readout(interaction_panel, text=prose)
+    readout.pack(fill="x")
+    interaction_panel.update()
+    large_height = int(readout.cget("height"))
+    interaction_panel.geometry("240x320")
+    interaction_panel.update()
+    assert int(readout.cget("height")) > large_height
+    _key(readout, "<Control-a>")
+    _key(readout, "<Control-c>")
+    assert readout.clipboard_get() == prose
+    readout.configure(text=prose)
+    assert readout.tag_ranges("sel"), "an unchanged refresh must preserve highlighting"
+    _key(readout, "<Control-x>")
+    _key(readout, "<Control-v>")
+    _key(readout, "<BackSpace>")
+    assert readout.get("1.0", "end-1c") == prose
+    # Dragging should also select a substring, not require Select All.
+    readout.tag_remove("sel", "1.0", "end")
+    readout.event_generate("<Button-1>", x=3, y=5)
+    readout.event_generate("<B1-Motion>", x=95, y=5)
+    readout.event_generate("<ButtonRelease-1>", x=95, y=5)
+    assert readout.tag_ranges("sel")
+    assert 0 < len(readout.get("sel.first", "sel.last")) < len(prose)
+
+
+def test_tab_reveals_controls_below_scrolling_page(interaction_panel):
+    from tkinter import ttk
+    from waprinter.ui import theme
+
+    inner = theme.scrollable(interaction_panel)
+    entries = []
+    for index in range(25):
+        entry = ttk.Entry(inner)
+        entry.pack(fill="x", pady=5)
+        entries.append(entry)
+    interaction_panel.update()
+    _key(entries[-2], "<Tab>")
+    last = entries[-1]
+    canvas = inner.master
+    assert last.focus_get() == last
+    assert last.winfo_rooty() >= canvas.winfo_rooty()
+    assert last.winfo_rooty() + last.winfo_height() <= canvas.winfo_rooty() + canvas.winfo_height() + 1
+
+
+def test_nested_text_wheel_does_not_also_scroll_page(interaction_panel):
+    from tkinter import ttk
+    from waprinter.ui import theme
+
+    inner = theme.scrollable(interaction_panel)
+    text = tk.Text(inner, height=3)
+    text.pack()
+    text.insert("1.0", "line\n" * 40)
+    ttk.Frame(inner, height=1000).pack()
+    interaction_panel.update()
+    canvas = inner.master
+    start = canvas.yview()
+    text.event_generate("<MouseWheel>", delta=-120)
+    interaction_panel.update()
+    assert text.yview()[0] > 0
+    assert canvas.yview() == start
+
+
+def test_history_refresh_keeps_selected_document(window):
+    from copy import deepcopy
+
+    job = _held_job(window)
+    newer = deepcopy(job)
+    newer.id = "newer-history-test"
+    try:
+        window.refresh()
+        window.recent.selection_set(job.id)
+        window.recent.focus(job.id)
+        window.pipeline.store.upsert(newer)
+        window.refresh()
+        assert window.recent.selection() == (job.id,)
+        assert window.recent.focus() == job.id
+    finally:
+        window.pipeline.store.conn.execute("DELETE FROM jobs WHERE id IN (?, ?)", (job.id, newer.id))
+        window.pipeline.store.conn.commit()
+        window.refresh()
+
+
+def test_clipped_text_viewer_exposes_full_copyable_value(interaction_panel):
+    from waprinter.ui import clipboard
+
+    value = "Long customer and document details " * 100
+    dialog = clipboard.show_text(interaction_panel, value)
+    try:
+        text = next(w for w in _descendants(dialog) if w.winfo_class() == "Text")
+        _key(text, "<Control-a>")
+        _key(text, "<Control-c>")
+        assert text.clipboard_get() == value
+        assert str(text.cget("state")) == "disabled"
+    finally:
+        dialog.destroy()
+
+
+@pytest.mark.parametrize("page", ["connect", "templates", "documents", "messages", "test",
+                                  "preferences", "share", "licence"])
+@pytest.mark.parametrize("width", [960, 1024])
+def test_setup_actions_fit_small_screen(window, page, width):
+    original = window.root.geometry()
+    try:
+        window.root.geometry(f"{width}x678")
+        window.show_setup(page)
+        if page == "connect":
+            window.setup_view.pages[page].account_row.pack(fill="x")
+        window.root.update()
+        right = window.root.winfo_rootx() + window.root.winfo_width()
+        frame = window.setup_view.pages[page].frame
+        for widget in _descendants(frame):
+            if widget.winfo_class() != "TButton":
+                continue
+            assert widget.winfo_ismapped(), f"{page}: {widget.cget('text')} is squeezed out"
+            assert widget.winfo_rootx() + widget.winfo_width() <= right, (
+                f"{page}: {widget.cget('text')} extends beyond the window"
+            )
+            assert widget.winfo_width() >= widget.winfo_reqwidth(), (
+                f"{page}: {widget.cget('text')} is clipped"
+            )
+    finally:
+        if page == "connect":
+            window.setup_view.pages[page].account_row.pack_forget()
+        window.root.geometry(original)
+        window.show_setup("preferences")
+
+
+class TestTheLogo:
+    """The app's own icon and logo, made by tools/make_brand_assets.py."""
+
+    def test_the_icon_has_an_image_for_every_size_windows_asks_for(self):
+        import struct
+
+        from waprinter.ui.icons import ASSETS
+
+        # The .ico directory: a 6-byte header, then 16 bytes per image whose
+        # first byte is the width, 0 meaning 256. Read by hand, because
+        # nothing that ships can open an .ico.
+        data = (ASSETS / "icon.ico").read_bytes()
+        _reserved, kind, count = struct.unpack_from("<HHH", data)
+        sizes = {data[6 + 16 * i] or 256 for i in range(count)}
+        assert kind == 1
+        assert {16, 20, 24, 32, 40, 48, 64, 256} <= sizes
+
+    def test_the_side_bar_shows_the_logo_at_its_width(self, window):
+        from tkinter import ttk
+
+        from waprinter.ui import desktop, icons, theme
+
+        image = icons.logo(window.root, desktop.SIDEBAR_WIDTH - 34)
+        assert image, "the logo could not be drawn"
+        expected = theme.px(window.root, desktop.SIDEBAR_WIDTH - 34)
+        assert abs(image.width() - expected) <= 1
+        labels = [w for w in _descendants(window.root)
+                  if isinstance(w, ttk.Label)
+                  and str(image) in map(str, window.root.tk.splitlist(w.cget("image")))]
+        assert labels, "the side bar does not show the logo"

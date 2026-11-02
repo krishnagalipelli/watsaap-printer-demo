@@ -45,6 +45,10 @@ from .secrets import save_token, token_problem
 log = logging.getLogger(__name__)
 
 FILENAME = "provision.json"
+# Written by the installer's "Connect WhatsApp" page from what the engineer
+# typed there: the token, the number and the account. Applied after
+# FILENAME, so what was typed at this counter wins over a shared file.
+CONNECT_FILENAME = "connect.json"
 # Where the installer is told to drop it, in the order we look.
 ENV_VAR = "WAPRINTER_PROVISION"
 
@@ -78,7 +82,7 @@ class Result:
         return f"Applied {' and '.join(parts)} from {self.source}."
 
 
-def find(explicit: str | Path | None = None) -> Path | None:
+def find(explicit: str | Path | None = None, name: str = FILENAME) -> Path | None:
     """The provisioning file, if there is one.
 
     Beside the executable first: that is where the installer puts it, and it is
@@ -89,7 +93,7 @@ def find(explicit: str | Path | None = None) -> Path | None:
         return candidate if candidate.is_file() else None
 
     for folder in _search_path():
-        candidate = folder / FILENAME
+        candidate = folder / name
         if candidate.is_file():
             return candidate
     return None
@@ -237,16 +241,89 @@ def _remove(source: Path, result: Result) -> None:
 
 
 def apply_if_present(settings: Settings | None = None) -> Result | None:
-    """Called at startup. Never raises: a bad file must not stop the printer."""
+    """Called at startup. Never raises: a bad file must not stop the printer.
+
+    The shared setup file first, then what was typed into the installer. When
+    either brought the WhatsApp account, its templates are fetched straight
+    away: a counter installed with a token and nothing else would otherwise
+    hold every receipt as "not on this computer" until someone opened Setup.
+    """
     try:
-        source = find()
-        if source is None:
+        sources = [s for s in (find(), find(name=CONNECT_FILENAME)) if s]
+        if not sources:
             return None
-        result = apply(source, settings)
-        log.info("provisioning: %s", result.summary())
-        for warning in result.warnings:
-            log.warning("provisioning: %s", warning)
-        return result
+        combined = None
+        for source in sources:
+            result = apply(source, settings)
+            log.info("provisioning: %s", result.summary())
+            for warning in result.warnings:
+                log.warning("provisioning: %s", warning)
+            if combined is None:
+                combined = result
+            else:
+                combined.source = result.source
+                combined.applied += result.applied
+                combined.token_stored = combined.token_stored or result.token_stored
+                combined.removed = combined.removed and result.removed
+                combined.warnings += result.warnings
+        if combined.token_stored or "business_account_id" in combined.applied:
+            _connect(combined)
+        return combined
     except Exception:
         log.exception("provisioning failed; carrying on with existing settings")
         return None
+
+
+def _connect(result: Result) -> None:
+    """Fetch the account's templates, and fill in the receipt's message.
+
+    Best effort: a counter with no internet at install time still starts, and
+    Setup → Message templates fetches them later. The receipt template's
+    variables are filled only when every one of them has an answer from its
+    name or the words in front of it; one left over leaves the whole template
+    for a person in Setup → Fill in messages, and receipts are held with that
+    said, rather than sent with a guess where a value belongs.
+    """
+    from .send.sync import sync_templates
+    from .send.templates import TemplateStore
+
+    settings = Settings.load()
+    store = TemplateStore(paths().templates, settings.business_name)
+    try:
+        count = sync_templates(settings, store)
+    except Exception as exc:
+        result.warnings.append(f"Templates not fetched from WhatsApp -- {exc}")
+        log.warning("provisioning: templates not fetched (%s)", exc)
+        return
+    result.applied.append("templates")
+    log.info("provisioning: %d template(s) fetched from WhatsApp", count)
+
+    template = store.get(settings.default_template)
+    if template is None or not template.placeholders:
+        return
+    name = template.name
+    if name in settings.template_mappings:
+        return
+
+    from .extract.profile import DocumentProfile
+    from .send.templates import shared_variables_for
+    from .teaching import available_fields
+    from .ui.setupmodel import mapping_problems, suggest_mapping
+
+    profile = DocumentProfile.load(paths().profile)
+    guess = suggest_mapping(
+        template,
+        available_fields(profile, "receipt"),
+        legacy=shared_variables_for(
+            template, settings.template_variables, settings.default_template
+        ),
+    )
+    if mapping_problems(template, guess):
+        result.warnings.append(
+            f"The '{name}' message needs filling in: Setup → Fill in messages."
+        )
+        return
+    settings.template_mappings[name] = guess
+    settings.save()
+    result.applied.append(f"message for {name}")
+    log.info("provisioning: %s filled as %s", name, guess)

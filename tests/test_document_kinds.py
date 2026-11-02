@@ -62,6 +62,16 @@ class TestRecognisingTheDocument:
         assert job.fields.document_kind == "receipt"
         assert job.template_name == "chit_receipt"
 
+    def test_a_cheque_receipt_goes_out_as_a_receipt(self, link_pipeline, receipt):
+        job = link_pipeline.process_document(receipt(ChitReceiptSpec(
+            receipt_number="CHQ4551/26",
+            receipt_date="06-Oct-26",
+            payment_mode="Cheque Number 351768\ndated 05/10/2026 of Bank\nSBI-PDPL",
+        )))[0]
+        assert job.template_name == "chit_receipt", job.hold_reason
+        assert "Payment Mode: Cheque" in job.message_preview
+        assert "Date: 06-Oct-26" in job.message_preview
+
 
 class TestSendingItUnderTheRightTemplate:
     def test_all_three_reach_the_sender_with_separate_templates(self, link_pipeline, receipt, notice, letter):

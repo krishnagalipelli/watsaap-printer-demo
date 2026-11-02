@@ -23,16 +23,37 @@ _BOXES = ("TEntry", "Entry", "TCombobox", "Text")
 
 def install(root: tk.Tk) -> None:
     """Give every box, label and table in the application its clipboard."""
+    if getattr(root, "_clipboard_installed", False):
+        return
+    root._clipboard_installed = True
+    if sys.platform == "darwin":
+        # Aqua also maps Ctrl+A/V to Emacs line/page movement. Those virtual
+        # events can win over a class key binding, so remove the conflicting
+        # aliases while retaining Home/PageDown and the native Command keys.
+        root.event_delete("<<LineStart>>", "<Control-Key-a>", "<Control-Lock-Key-A>")
+        root.event_delete("<<NextPage>>", "<Control-Key-v>", "<Control-Lock-Key-V>")
     # macOS reports the right button as button 2. Everywhere else button 2 is
     # the middle button, which Tk already uses.
     buttons = ("<Button-2>", "<Control-Button-1>") if sys.platform == "darwin" else ("<Button-3>",)
     for button in buttons:
-        for widget_class in (*_BOXES, "TLabel", "Treeview"):
+        for widget_class in (*_BOXES, "TLabel", "Label", "Treeview"):
             root.bind_class(widget_class, button, _show_menu, add="+")
     for widget_class in ("TEntry", "Entry", "TCombobox"):
         root.bind_class(widget_class, "<<Paste>>", _paste)
-    for widget_class in _BOXES:
+    for widget_class in (*_BOXES, "Treeview"):
         root.bind_class(widget_class, "<Control-Key>", _by_key_position, add="+")
+        root.bind_class(widget_class, "<Shift-F10>", _keyboard_menu)
+        root.bind_class(widget_class, "<Key-Menu>", _keyboard_menu)
+        for modifier in (("Control", "Command") if sys.platform == "darwin" else ("Control",)):
+            for key, name in (("a", "<<SelectAll>>"), ("c", "<<Copy>>"),
+                              ("v", "<<Paste>>"), ("x", "<<Cut>>")):
+                root.bind_class(widget_class, f"<{modifier}-Key-{key}>",
+                                lambda e, n=name: _dispatch(e.widget, n))
+                root.bind_class(widget_class, f"<{modifier}-Lock-Key-{key.upper()}>",
+                                lambda e, n=name: _dispatch(e.widget, n))
+        root.bind_class(widget_class, "<<SelectAll>>", lambda e: _select_all(e.widget))
+    root.bind_class("Treeview", "<<Copy>>", _copy_rows)
+    root.bind_class("TCombobox", "<<Copy>>", _copy_combo)
     # A disabled text does not take the focus when clicked on every platform,
     # and without it a selection made there cannot be copied with the keyboard.
     root.bind_class("Text", "<Button-1>", lambda e: e.widget.focus_set(), add="+")
@@ -119,13 +140,32 @@ def _has_selection(widget: tk.Misc) -> bool:
     return bool(widget.selection_present())
 
 
-def _select_all(widget: tk.Misc) -> None:
+def _select_all(widget: tk.Misc) -> str:
     widget.focus_set()
     if widget.winfo_class() == "Text":
         widget.tag_add("sel", "1.0", "end-1c")
+    elif widget.winfo_class() == "Treeview":
+        if str(widget.cget("selectmode")) == "extended":
+            widget.selection_set(widget.get_children())
     else:
         widget.selection_range(0, "end")
         widget.icursor("end")
+    return "break"
+
+
+def _dispatch(widget, name):
+    widget.event_generate(name)
+    return "break"
+
+
+def _copy_combo(event):
+    widget = event.widget
+    if not _hidden(widget):
+        if widget.selection_present():
+            _put(widget, widget.get()[widget.index("sel.first"):widget.index("sel.last")])
+        elif widget.instate(["readonly"]):
+            _put(widget, widget.get())
+    return "break"
 
 
 def _put(widget: tk.Misc, text: str) -> None:
@@ -133,14 +173,63 @@ def _put(widget: tk.Misc, text: str) -> None:
     widget.clipboard_append(text)
 
 
-def _row_text(tree, event) -> str:
-    """One table row as tab-separated text, which also pastes into Excel."""
-    row = tree.identify_row(event.y)
-    if not row:
-        return ""
-    tree.selection_set(row)
-    cells = [str(tree.item(row, "text")), *(str(v) for v in tree.item(row, "values"))]
-    return "\t".join(cell for cell in cells if cell)
+def _row_text(tree, row) -> str:
+    """Visible columns, including empty cells, in their displayed order."""
+    cells = [str(tree.item(row, "text"))] if "tree" in map(str, tree.tk.splitlist(tree.cget("show"))) else []
+    columns = tuple(map(str, tree.tk.splitlist(tree.cget("displaycolumns"))))
+    if columns == ("#all",):
+        columns = tree.tk.splitlist(tree.cget("columns"))
+    cells.extend(str(tree.set(row, column)) for column in columns)
+    return "\t".join(cells)
+
+
+def _copy_rows(event):
+    tree = event.widget
+    selected = set(tree.selection())
+    rows = [row for row in tree.get_children() if row in selected]
+    if rows:
+        _put(tree, "\n".join(_row_text(tree, row) for row in rows))
+    return "break"
+
+
+def _keyboard_menu(event):
+    widget = event.widget
+    if widget.winfo_class() == "Treeview":
+        row = widget.focus()
+        if not row:
+            return "break"
+        widget.see(row)
+        box = widget.bbox(row)
+        if not box:
+            return "break"
+        event.x, event.y = box[0] + 8, box[1] + box[3] // 2
+    else:
+        event.x, event.y = 8, widget.winfo_height() // 2
+    event.x_root = widget.winfo_rootx() + event.x
+    event.y_root = widget.winfo_rooty() + event.y
+    return _show_menu(event)
+
+
+def show_text(widget, text, title="Select and copy text"):
+    """Read long labels or clipped table cells and select any part of them."""
+    dialog = tk.Toplevel(widget)
+    dialog.title(title)
+    dialog.transient(widget.winfo_toplevel())
+    theme.fit_window(dialog, 640, 360, 320, 180)
+    from tkinter import ttk
+    ttk.Button(dialog, text="Close", command=dialog.destroy).pack(side="bottom", pady=8)
+    body = ttk.Frame(dialog, padding=12)
+    body.pack(fill="both", expand=True)
+    view = theme.style_text(tk.Text(body, wrap="word", width=1, height=1, takefocus=True))
+    bar = ttk.Scrollbar(body, command=view.yview)
+    view.configure(yscrollcommand=bar.set)
+    bar.pack(side="right", fill="y")
+    view.pack(fill="both", expand=True)
+    view.insert("1.0", text)
+    view.configure(state="disabled")
+    view.focus_set()
+    dialog.bind("<Escape>", lambda _e: dialog.destroy())
+    return dialog
 
 
 def _menu(widget: tk.Misc) -> tk.Menu:
@@ -153,19 +242,35 @@ def _menu(widget: tk.Misc) -> tk.Menu:
 def _show_menu(event):
     widget = event.widget
     kind = widget.winfo_class()
-    menu = _menu(widget)
-    if kind == "TLabel":
+    if kind in ("TLabel", "Label"):
         text = str(widget.cget("text"))
         if not text:
             return None
+        menu = _menu(widget)
         menu.add_command(label="Copy", command=lambda: _put(widget, text))
+        menu.add_command(label="Select text…", command=lambda: show_text(widget, text))
     elif kind == "Treeview":
-        text = _row_text(widget, event)
-        if not text:
+        row = widget.identify_row(event.y)
+        if not row:
             return None
-        menu.add_command(label="Copy row", command=lambda: _put(widget, text))
+        widget.focus_set()
+        widget.focus(row)
+        if row not in widget.selection():
+            widget.selection_set(row)
+        text = _row_text(widget, row)
+        menu = _menu(widget)
+        column = widget.identify_column(event.x)
+        if column:
+            cell = widget.item(row, "text") if column == "#0" else widget.set(row, column)
+            menu.add_command(label="Copy cell", command=lambda: _put(widget, str(cell)))
+        menu.add_command(label="Copy selected rows", command=lambda: _copy_rows(event))
+        menu.add_command(label="Select row text…", command=lambda: show_text(widget, text))
     else:
+        menu = _menu(widget)
         _box_items(menu, widget)
+    # tk_popup returns immediately on Windows/X11. Keep the menu alive until
+    # it is dismissed, then release its registered Python callbacks.
+    menu.bind("<Unmap>", lambda _e: menu.after_idle(menu.destroy))
     try:
         menu.tk_popup(event.x_root, event.y_root)
     finally:
