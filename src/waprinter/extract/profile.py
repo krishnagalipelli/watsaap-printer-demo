@@ -477,8 +477,14 @@ class DocumentProfile:
         # A labelled mode ("Mode of Payment: Cash"), or the bare word standing
         # on its own line — which is all the text layer of a pre-printed form
         # actually contains.
+        #
+        # A receipt the chit software prints as a picture is read by OCR,
+        # which spaces the label out and puts specks of the box's border
+        # between it and the value: "Mode   of Payment =» Cash". So the
+        # label's words may be spaced however, and a few marks that are not
+        # letters or digits may stand between the label and the mode.
         self.payment_mode_labelled_re = re.compile(
-            rf"\b(?:{_alt(self.payment_mode_labels)})\b\s*[:\-–]?\s*"
+            rf"\b(?:{_spaced_alt(self.payment_mode_labels)})\b[^\w\n]{{0,8}}"
             rf"({_alt(self.payment_modes)})\b",
             re.IGNORECASE,
         )
@@ -488,7 +494,7 @@ class DocumentProfile:
         # The label with nothing after it, for a form that prints the mode in
         # a box of its own beside the label instead of on the label's line.
         self.payment_mode_label_re = re.compile(
-            rf"\b(?:{_alt(self.payment_mode_labels)})\s*[:\-–]?\s*$", re.IGNORECASE
+            rf"\b(?:{_spaced_alt(self.payment_mode_labels)})[^\w\n]{{0,8}}$", re.IGNORECASE
         )
         # A cheque is not labelled either. Its cell reads "Cheque Number 351768
         # / dated 31/10/2026 of Bank / SBI-PDPL", and the figures are what say
@@ -615,3 +621,10 @@ def _valid_rules(items: object) -> dict[str, list[FieldRule]]:
 def _alt(words: list[str]) -> str:
     """Regex alternation over labels, longest first so "bill to" beats "bill"."""
     return "|".join(re.escape(w) for w in sorted(set(words), key=len, reverse=True))
+
+
+def _spaced_alt(words: list[str]) -> str:
+    """As _alt, but the words of a label may be spaced however: OCR and row
+    joining both turn "Mode of Payment" into "Mode   of Payment"."""
+    return "|".join(r"\s+".join(re.escape(part) for part in w.split())
+                    for w in sorted(set(words), key=len, reverse=True))

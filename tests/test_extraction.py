@@ -222,3 +222,42 @@ class TestPaymentModeInATallBox:
     def test_cash_inside_another_label_is_not_a_payment_mode(self, tmp_path):
         f = self.form(tmp_path, mode=None, above="Cash Discount")
         assert f.payment_mode is None
+
+
+class TestPaymentModeReadByOcr:
+    """The counter's print queue saves a Crystal Reports receipt as a picture.
+
+    OCR read CR2009/26's payment cell at 300 dpi as "=f] Mode   of Payment =»
+    Cash": the label spaced out, and specks of the box's border between it and
+    the value. The receipt was held for want of a payment mode on every print.
+    """
+
+    def test_the_line_ocr_actually_produced_is_read(self):
+        from waprinter.extract.profile import DocumentProfile
+
+        m = DocumentProfile().payment_mode_labelled_re.search(
+            "=f] Mode   of Payment =» Cash"
+        )
+        assert m and m.group(1) == "Cash"
+
+    def test_a_spaced_out_label_on_the_page_is_read(self, tmp_path):
+        import fitz
+
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((60, 80), "SRINIDHI CHITS (HYDERABAD) PVT. LTD.", fontsize=13)
+        page.insert_text((60, 100), "Receipt No CR2009/26 Date 29-Oct-26", fontsize=10)
+        # Two runs on one baseline, as OCR returns them: joined with a gap.
+        page.insert_text((60, 300), "Mode", fontsize=10)
+        page.insert_text((100, 300), "of Payment =» Cash", fontsize=10)
+        path = tmp_path / "ocr-like.pdf"
+        doc.save(path)
+        doc.close()
+        assert extract_fields(path).payment_mode == "Cash"
+
+    def test_the_word_cashier_is_not_a_payment_mode(self):
+        from waprinter.extract.profile import DocumentProfile
+
+        assert not DocumentProfile().payment_mode_labelled_re.search(
+            "Mode of Payment   Cashier / Receiving Clerk"
+        )
