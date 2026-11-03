@@ -20,7 +20,7 @@
 #endif
 
 #define AppName        "WhatsApp Printer"
-#define AppVersion     "2.0.0"
+#define AppVersion     "2.0.1"
 #define AppPublisher   "Sunrise Software"
 #define DataDir        "C:\ProgramData\WAPrinter"
 
