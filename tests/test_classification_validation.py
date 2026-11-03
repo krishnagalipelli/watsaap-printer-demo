@@ -144,21 +144,42 @@ def test_corrupt_sample_fails_validation_instead_of_being_skipped(sample_set):
     assert report.results[2].errors
 
 
-def test_release_manifest_requires_both_exact_version_builds(tmp_path):
+def test_release_manifest_requires_the_exact_version_x64_build(tmp_path):
     module_path = Path(__file__).parents[1] / 'packaging' / 'make_update_manifest.py'
     spec = importlib.util.spec_from_file_location('manifest_test', module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    (tmp_path / 'WhatsAppPrinter-Setup-0.1.6.exe').write_bytes(b'x64')
+    (tmp_path / 'WhatsAppPrinter-Setup-0.1.6-win7-x86.exe').write_bytes(b'x86')
     with pytest.raises(ValueError, match='Missing installer'):
         module.manifest(tmp_path, 'owner/repo', 'v0.1.6')
-    (tmp_path / 'WhatsAppPrinter-Setup-0.1.6-win7-x86.exe').write_bytes(b'x86')
+    (tmp_path / 'WhatsAppPrinter-Setup-0.1.6.exe').write_bytes(b'x64')
     result = module.manifest(tmp_path, 'owner/repo', 'v0.1.6')
     assert result['url'] == result['builds']['x64']['url']
     assert result['builds']['win7-x86']['url'].endswith('-win7-x86.exe')
     assert result['builds']['win7-x86']['sha256'] != result['sha256']
     with pytest.raises(ValueError):
         module.manifest(tmp_path, 'owner/repo', 'v0.1.7')
+
+
+def test_release_manifest_leaves_out_a_windows_7_build_that_was_not_made(tmp_path):
+    import httpx
+    import respx
+
+    from waprinter import update
+
+    module_path = Path(__file__).parents[1] / 'packaging' / 'make_update_manifest.py'
+    spec = importlib.util.spec_from_file_location('manifest_test', module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    (tmp_path / 'WhatsAppPrinter-Setup-0.1.6.exe').write_bytes(b'x64')
+    result = module.manifest(tmp_path, 'owner/repo', 'v0.1.6')
+    assert list(result['builds']) == ['x64']
+    # A Windows 7 counter is offered nothing, never the 64-bit installer.
+    with respx.mock:
+        respx.get('https://u/latest.json').mock(return_value=httpx.Response(200, json=result))
+        check = update.check('https://u/latest.json', current='0.1.5', build='win7-x86')
+    assert not check.available
+    assert check.release is None
 
 
 def test_legacy_samples_still_protect_other_types(tmp_path):

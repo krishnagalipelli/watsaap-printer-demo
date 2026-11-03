@@ -1,4 +1,10 @@
-"""Generate one manifest only after both installers are available."""
+"""Generate the update manifest once the release's installers are available.
+
+The 64-bit installer is required. The Windows 7 one is listed only when it was
+built: a machine whose build is missing from "builds" is offered no update, so
+leaving it out keeps a Windows 7 counter where it is rather than handing it an
+installer it cannot run.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -18,6 +24,8 @@ def manifest(folder: Path, repository: str, tag: str, released: str | None = Non
         name = "WhatsAppPrinter-Setup-{}{}.exe".format(version, suffix)
         artifact = folder / name
         if not artifact.is_file():
+            if target != "x64":
+                continue
             raise ValueError("Missing installer: " + name)
         builds[target] = {
             "url": "https://github.com/{}/releases/download/{}/{}".format(repository, tag, name),
