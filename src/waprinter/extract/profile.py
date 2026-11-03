@@ -485,6 +485,11 @@ class DocumentProfile:
         self.payment_mode_bare_re = re.compile(
             rf"^\s*({_alt(self.payment_modes)})\s*$", re.IGNORECASE
         )
+        # The label with nothing after it, for a form that prints the mode in
+        # a box of its own beside the label instead of on the label's line.
+        self.payment_mode_label_re = re.compile(
+            rf"\b(?:{_alt(self.payment_mode_labels)})\s*[:\-–]?\s*$", re.IGNORECASE
+        )
         # A cheque is not labelled either. Its cell reads "Cheque Number 351768
         # / dated 31/10/2026 of Bank / SBI-PDPL", and the figures are what say
         # one was given: a form can print "Cheque Number :" with nothing after.

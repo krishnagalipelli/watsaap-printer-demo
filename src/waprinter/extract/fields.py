@@ -108,13 +108,17 @@ def _payment_mode(doc: pdf_text.Document, profile: DocumentProfile) -> str | Non
 
     A labelled value first ("Mode of Payment  Cash"), then the bare word alone
     on a row — which is all a pre-printed form leaves in the text layer — then
-    "Cheque Number 351768", and last "Through ONLINE-UPI", which is how an
-    online payment is printed under its transaction number.
+    "Cheque Number 351768", then "Through ONLINE-UPI", which is how an
+    online payment is printed under its transaction number. Last, the bare
+    word on a line of its own, whatever row it ended up in.
     """
     for row in doc.rows:
         m = profile.payment_mode_labelled_re.search(row.text)
         if m:
             return _mode_name(m.group(1))
+    beside = _mode_beside_label(doc, profile)
+    if beside:
+        return beside
     for row in doc.rows:
         m = profile.payment_mode_bare_re.match(row.text)
         if m:
@@ -129,6 +133,42 @@ def _payment_mode(doc: pdf_text.Document, profile: DocumentProfile) -> str | Non
             # "ONLINE-UPI": the last word is the method, the first only says
             # it was not paid at the counter.
             return _mode_name(re.split(r"\s*[-/]\s*", m.group(1))[-1])
+    # Rows are what a reader sees, so a value printed high in a tall box can
+    # join the row above it. The PDF still declares it as a line of its own.
+    for line in doc.lines:
+        m = profile.payment_mode_bare_re.match(line.text)
+        if m:
+            return _mode_name(m.group(1))
+    return None
+
+
+def _mode_beside_label(doc: pdf_text.Document, profile: DocumentProfile) -> str | None:
+    """The mode printed in the box to the right of its label.
+
+    Form XVI prints "Cash" at the top of a box taller than its label. Rows
+    are grouped by height, so a value raised far enough joins the row above
+    ("Sub Total c/d   Cash   2.00 ...") and neither the labelled read nor the
+    bare one sees it. Looking out from the label finds it wherever the box
+    puts it. Only a line holding nothing but the mode counts, so "Cash
+    Discount" on the row above is not taken for it.
+    """
+    for page in doc.pages:
+        for label in page.lines:
+            if not profile.payment_mode_label_re.search(label.text):
+                continue
+            mid = (label.y0 + label.y1) / 2
+            reach = 2 * (label.y1 - label.y0)
+            found = []
+            for line in page.lines:
+                if line is label or line.x0 < label.x1 - 1:
+                    continue
+                m = (profile.payment_mode_bare_re.match(line.text)
+                     or profile.payment_mode_numbered_re.match(line.text))
+                gap = abs((line.y0 + line.y1) / 2 - mid)
+                if m and gap <= reach:
+                    found.append((gap, line.x0, m.group(1)))
+            if found:
+                return _mode_name(min(found)[2])
     return None
 
 

@@ -171,3 +171,54 @@ class TestDriverPunctuationIsFoldedBack:
         grouped = _words_from(raw, page_number=1, from_ocr=False)
         words = [w for ws in grouped.values() for w in ws]
         assert [w.text for w in words] == ["INV-2291"]
+
+
+class TestPaymentModeInATallBox:
+    """Form XVI prints the mode at the top of a box taller than its label.
+
+    CR2009/26 was held for want of a payment mode although "Cash" sits
+    plainly beside "Mode of Payment". Raised far enough, the value joins the
+    row above when rows are grouped by height, and is lost in the middle of
+    "Sub Total c/d   Cash   2.00   Other Charges   0.00".
+    """
+
+    @staticmethod
+    def form(tmp_path, mode="Cash", raised=20, labels=True, above="Sub Total c/d"):
+        import fitz
+
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((60, 80), "SRINIDHI CHITS (HYDERABAD) PVT. LTD.", fontsize=13)
+        page.insert_text((60, 100), "CR2009/26   29-Oct-26   SPT27E-4", fontsize=10)
+        if labels:
+            page.insert_text((60, 470), above, fontsize=10, fontname="hebo")
+            page.insert_text((330, 470), "Other Charges", fontsize=10, fontname="hebo")
+            page.insert_text((60, 492), "Mode of Payment", fontsize=10, fontname="hebo")
+            page.insert_text((330, 512), "Grand Total Rs.", fontsize=10, fontname="hebo")
+        page.insert_text((250, 470), "2.00", fontsize=10)
+        page.insert_text((500, 470), "0.00", fontsize=10)
+        if mode:
+            page.insert_text((180, 492 - raised), mode, fontsize=9)
+        page.insert_text((500, 512), "2.00", fontsize=10)
+        path = tmp_path / "form.pdf"
+        doc.save(path)
+        doc.close()
+        return extract_fields(path)
+
+    def test_a_mode_level_with_its_label_is_read(self, tmp_path):
+        assert self.form(tmp_path, raised=0).payment_mode == "Cash"
+
+    def test_a_mode_raised_into_the_row_above_is_read(self, tmp_path):
+        assert self.form(tmp_path, raised=20).payment_mode == "Cash"
+
+    def test_a_raised_cheque_is_read(self, tmp_path):
+        f = self.form(tmp_path, mode="Cheque Number 351768", raised=20)
+        assert f.payment_mode == "Cheque"
+
+    def test_a_form_without_its_labels_in_the_text_still_reads_it(self, tmp_path):
+        """The chit software can leave the stationery wording out of the text."""
+        assert self.form(tmp_path, raised=20, labels=False).payment_mode == "Cash"
+
+    def test_cash_inside_another_label_is_not_a_payment_mode(self, tmp_path):
+        f = self.form(tmp_path, mode=None, above="Cash Discount")
+        assert f.payment_mode is None
