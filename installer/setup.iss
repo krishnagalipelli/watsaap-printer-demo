@@ -20,7 +20,7 @@
 #endif
 
 #define AppName        "WhatsApp Printer"
-#define AppVersion     "2.0.1"
+#define AppVersion     "2.0.2"
 #define AppPublisher   "Sunrise Software"
 #define DataDir        "C:\ProgramData\WAPrinter"
 
@@ -316,6 +316,25 @@ begin
     '}' + #13#10;
   if not SaveStringToFile(ExpandConstant('{#DataDir}\connect.json'), Json, False) then
     RaiseException('Could not save the WhatsApp connection. Run setup again.');
+end;
+
+// Closing the window only hides the app: it keeps running to catch the next
+// print, and it does not answer Windows' request to close for an update. So
+// installing over it stopped at "the application is still open" with nothing
+// on screen left to close. Stop it here, before setup looks for running
+// copies; [Run] starts the new one when setup finishes. Nothing it holds is
+// lost: a print not yet sent waits in the spool for the next start.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM waprinter-agent.exe', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM waprinter.exe', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Windows lets go of the files a moment after the process ends.
+  Sleep(1000);
+  Result := '';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
