@@ -289,15 +289,18 @@ class Settings:
     # shown in the chat and is read without opening anything. The app converts
     # the print itself -- see send/attachment.py -- but Meta decides what a
     # template's header can hold, so an image send needs a template approved
-    # with an image header. PDF is the default, and is what every install sent
-    # before this existed.
+    # with an image header. Receipts default to images; other kinds use PDF.
     attachment_format: str = "pdf"
     # The same choice per kind of paperwork, keyed like document_templates:
     # {"removal_notice": "pdf"}. A kind with no entry uses attachment_format.
     # Receipts are worth sending as images -- they are glanced at and thrown
     # away -- where a removal notice people keep and forward is better as a
     # file.
-    document_attachments: dict[str, str] = field(default_factory=dict)
+    document_attachments: dict[str, str] = field(default_factory=lambda: {"receipt": "image"})
+
+    @property
+    def receipt_attachment(self) -> str:
+        return self.document_attachments.get("receipt") or self.attachment_format
 
     # --- Keeping the printed receipts --------------------------------------
     # Every PDF that comes off the printer is copied here, filed by date and
@@ -318,15 +321,8 @@ class Settings:
     keep_inbox_days: int = 90
 
     # --- Updates -----------------------------------------------------------
-    # A static JSON file: {"version", "url", "sha256", "notes"}. No server of
-    # ours is involved; if it is unreachable, everything else carries on.
-    # /releases/latest/download/ always resolves to the newest release's copy
-    # of the file, so this address never changes as versions come and go. CI
-    # writes latest.json when a v* tag is built; see build-windows.yml.
-    update_url: str = (
-        "https://github.com/krishnagalipelli/watsaap-printer-demo"
-        "/releases/latest/download/latest.json"
-    )
+    # A counter checks for updates only after an update location is configured.
+    update_url: str = ""
     update_check_enabled: bool = True
     last_update_check: str = ""
 
@@ -402,6 +398,13 @@ class Settings:
                 log.warning("ignoring %s in %s: %s", key, path, problem)
                 continue
             clean[key] = value
+        # Older versions saved the built-in feed alongside user-entered settings.
+        # Only retire that exact default. A feed saved by this version is explicit.
+        if "_settings_version" not in raw and clean.get("update_url") == (
+            "https://github.com/krishnagalipelli/watsaap-printer-demo"
+            "/releases/latest/download/latest.json"
+        ):
+            clean.pop("update_url")
         settings = cls(**clean)
 
         # A variable added in a release has to reach a machine that already
@@ -427,7 +430,7 @@ class Settings:
 
     def save(self, path: Path | None = None) -> None:
         path = path or Paths(data_root()).settings
-        atomic_write_text(path, json.dumps(asdict(self), indent=2))
+        atomic_write_text(path, json.dumps({"_settings_version": 2, **asdict(self)}, indent=2))
 
     def ocr(self) -> "OcrSettings":
         """The OCR configuration, in the form the extractor expects."""

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import secrets
 import sys
@@ -66,7 +67,20 @@ def cmd_issue(args: argparse.Namespace) -> int:
         print("This key's public half is not the PUBLIC_KEY in licence.py, so the "
               "app would reject what it signs.")
         return 1
-    machine = lic.format_code(args.machine)
+    machine_text, _, public_hex = args.machine.strip().partition(".")
+    machine = lic.format_code(machine_text)
+    connection_box = ""
+    if args.connection:
+        from waprinter.activation import seal_connection
+        if not public_hex:
+            print("For WhatsApp setup, copy the activation request from Setup > Licence.")
+            return 1
+        try:
+            config = json.loads(Path(args.connection).read_text(encoding="utf-8-sig"))
+            connection_box = seal_connection(public_hex, config)
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"Could not prepare the activation key: {exc}")
+            return 1
     if len(machine.replace("-", "")) != 20:
         print(f"'{args.machine}' is not a machine code: it should be 20 letters "
               f"and digits, as shown in Setup -> Licence.")
@@ -80,6 +94,7 @@ def cmd_issue(args: argparse.Namespace) -> int:
         machine=machine,
         issued=issued,
         updates_until=until,
+        connection_box=connection_box,
         serial=uuid.uuid4().hex[:12].upper(),
     )
     token = lic.issue(licence, secret)
@@ -108,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("keygen", help="make the signing key, once").set_defaults(func=cmd_keygen)
     p = sub.add_parser("issue", help="write a licence for one computer")
     p.add_argument("--machine", required=True, help="the code shown in Setup -> Licence")
+    p.add_argument("--connection", metavar="FILE", help="private JSON with access_token, phone_number_id, business_account_id and default_template")
     p.add_argument("--licensee", required=True, help="client and branch, as it should read")
     p.add_argument("--updates-until", help="YYYY-MM-DD (default: a year from issue)")
     p.add_argument("--issued", help="YYYY-MM-DD (default: today)")

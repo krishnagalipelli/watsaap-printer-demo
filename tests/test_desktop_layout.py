@@ -565,6 +565,7 @@ class TestFillInMessages:
         store.put(pdf)
         try:
             restore.settings.send_mode = "api"
+            restore.settings.document_attachments = {"receipt": "pdf"}
             page = _messages(restore)
             page.select_kind(DEFAULT_KIND)
             assert page.attachment() == "pdf"

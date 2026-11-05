@@ -364,3 +364,20 @@ class TestGarbledOcrNames:
         from waprinter.extract.fields import _strip_leading_junk
 
         assert _strip_leading_junk("R. K. SHARMA") == "R. K. SHARMA"
+
+
+def test_upi_cell_after_an_amount_in_another_column_is_payment_evidence(receipt, tmp_path):
+    import fitz
+    from waprinter.extract import pdf_text
+
+    path = receipt(ChitReceiptSpec(payment_mode=upi_cell(), receipt_number="CHQ100/26"))
+    with fitz.open(path) as pdf:
+        page = pdf[0]
+        cell = page.search_for("Through ONLINE-UPI")[0]
+        page.insert_text((2, cell.y1 - 2), "0.00", fontsize=7)
+        merged = tmp_path / "two-columns.pdf"
+        pdf.save(merged)
+    doc = pdf_text.read(merged)
+    assert any(row.text.startswith("0.00") and "Through ONLINE-UPI" in row.text for row in doc.rows)
+    fields = extract_fields(merged)
+    assert (fields.document_kind, fields.payment_mode) == ("receipt", "UPI")

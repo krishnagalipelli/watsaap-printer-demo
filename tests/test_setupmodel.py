@@ -272,5 +272,5 @@ class TestAPhotoTemplate:
         assert pinned == {"notice": "pdf", "letter": "image"}
 
     def test_leaving_receipts_as_they_were_changes_nothing(self):
-        settings = Settings(attachment_format="pdf")
+        settings = Settings(attachment_format="pdf", document_attachments={})
         assert sm.pinned_attachments(settings, "pdf", ["notice"]) == {}

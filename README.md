@@ -170,8 +170,7 @@ document types and fields, and the setup PIN. It excludes the access token and
 counter-specific branch, computer and archive-folder values, and starts the
 destination in test mode.
 
-Put the file beside the installer for automatic import, select it on the installer's
-optional **Counter setup** page, or use **Share setup → Import setup** afterwards.
+Put the file beside the installer for automatic import, or use **Share setup → Import setup** afterwards.
 Connect WhatsApp on the new counter and check one sample PDF of each kind before
 turning test mode off. Importing through the app preserves the reusable source
 file. The installer reports printer-creation failures instead of silently
@@ -395,17 +394,9 @@ waprinter provision \\share\it\provision.json
 
 See [`provision.example.json`](provision.example.json) for the full set.
 
-**Or type the account in during setup.** The **Connect WhatsApp** page asks
-for the access token, the phone number ID, the WhatsApp Business Account ID and
-the receipt template (`chit_details1` unless changed), with a box for sending
-straight away rather than in test mode. Setup writes these to `connect.json`
-in the data folder, and the agent applies it after any `provision.json`, so
-what was typed at this counter wins. Receipts go out as an image, so the
-template must be approved with an image header. On first start the account's
-templates are fetched, and the receipt template's variables are filled in
-when every one is named or labelled plainly ("Receipt No: {{2}}"); otherwise
-receipts are held until Setup → Fill in messages is done. Left blank, the page
-changes nothing.
+**For licence-based setup**, install the app and follow the activation steps below.
+The installer opens Setup → Licence on a new counter. Manual connection is also
+available in the app for trial installations.
 
 **The token is not compiled into the build, and must not be.** This repository
 is public and the installer is published on GitHub Releases, so a token in the
@@ -422,10 +413,8 @@ before it is unlinked.
 
 ## Updating 20+ machines
 
-Each installation checks a small JSON file over HTTPS — hosted on GitHub
-Releases or any static host — and installs a newer build silently. There is no
-server of ours involved; if the file is unreachable, printing and sending carry
-on untouched.
+The update location starts blank. To enable checks, enter the HTTPS address
+of your version file under **Setup → Counter settings → Update location**.
 
 Two triggers:
 
@@ -466,20 +455,34 @@ builds stop installing, until a renewed licence covers them. Everything is
 offline: a licence is a signed text file, checked against the public key in
 [`licence.py`](src/waprinter/licence.py).
 
-1. On the counter, Setup → Licence (or `waprinter licence`) shows its machine
-   code, e.g. `HYGR-W2VX-IY7L-LRBH-GINC`.
-2. On the issuing machine:
+1. Install the app on the counter. In **Setup → Licence**, click **Copy activation
+   request** and give that request to the issuer. It contains the machine code
+   and the counter's public encryption key. The private key stays on the PC.
+2. On the issuing machine, keep a private `provision.json` per client with
+   `access_token`, `phone_number_id`, `business_account_id` and `default_template`.
+   Use the name of a Meta-approved **image-header** receipt template
+   (defaults to `chit_details1`). For ambiguous placeholders, include the
+   receipt's `template_mappings` from an exported setup. Include `own_numbers`
+   for any additional office numbers printed on receipts. Install the project
+   dependencies on the issuer, then run:
 
    ```
-   python tools/issue_licence.py issue --machine HYGR-W2VX-IY7L-LRBH-GINC \
-       --licensee "Sri Chits, Kukatpally"
+   python tools/issue_licence.py issue --machine "<copied activation request>" \
+       --licensee "Client and branch" --connection /private/client/provision.json
    ```
 
-   Updates default to a year from today (year one's AMC is included); pass
-   `--updates-until` for a renewal. Every licence issued is listed in
-   `issued.csv` beside the signing key.
-3. Import the file in Setup → Licence, or paste its last line there, or run
-   `waprinter licence FILE`.
+3. Paste the issued file's final line in **Paste licence**, or import the file.
+   The app verifies its signature, opens the encrypted connection on this PC,
+   checks the sending number and receipt template with Meta, and enables live
+   JPEG receipt sends. The sending number joins the counter's own-number list.
+   If Meta cannot be reached, reconnect and paste the same key again.
+   For an existing counter, exit the agent before using `waprinter licence FILE`,
+   or import directly from the running window.
+
+For a licence-only renewal, use the original machine code and omit `--connection`.
+Existing licence files still work. Updates are covered for one year by default.
+Pass `--updates-until` for a different end date. The issuer records the licence
+in `issued.csv` beside the signing key.
 
 Without a licence a counter works for a 14-day trial. After that, prints are
 still captured, read and kept, but held with "no licence" instead of sent;

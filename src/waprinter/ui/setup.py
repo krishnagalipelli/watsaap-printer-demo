@@ -770,7 +770,7 @@ class MessagesPage(Page):
         self.template_box.current(refs.index(chosen) if chosen in refs else 0)
         self.noun.set(s.document_noun if key == DEFAULT_KIND else s.document_nouns.get(key, ""))
         self.select_attachment(
-            s.attachment_format if key == DEFAULT_KIND
+            s.receipt_attachment if key == DEFAULT_KIND
             else (s.document_attachments.get(key) or s.attachment_format)
         )
         self.build_rows()
@@ -959,6 +959,9 @@ class MessagesPage(Page):
             others = [k for k, _label in self._kinds if k != DEFAULT_KIND]
             changed.document_attachments = sm.pinned_attachments(
                 changed, self.attachment(), [*others, *changed.document_templates])
+            changed.document_attachments.pop("receipt", None)
+            if "receipt" in changed.document_templates:
+                changed.document_templates["receipt"] = ref
             changed.attachment_format = self.attachment()
         else:
             if ref:
@@ -1145,14 +1148,13 @@ class LicencePage(Page):
         f = _scrolling(self.frame)
         code = theme.card(f, "This computer", padding=(20, 18))
         code.pack(fill="x")
-        _hint(code, "Each counter needs its own licence. Send this code to get "
-                    "one; it changes only if Windows is reinstalled or the "
-                    "computer is replaced.")
+        _hint(code, "Copy the activation request and send it to your licence issuer. "
+                    "Paste the key they return to connect WhatsApp and enable automatic receipt images.")
         row = ttk.Frame(code)
         row.pack(fill="x")
         self.code = ttk.Label(row, style="Head.TLabel")
         self.code.pack(side="left")
-        ttk.Button(row, text="Copy", command=self.copy_code).pack(side="left", padx=12)
+        ttk.Button(row, text="Copy activation request", command=self.copy_code).pack(side="left", padx=12)
 
         state = theme.card(f, "Licence", padding=(20, 18))
         state.pack(fill="x", pady=(12, 0))
@@ -1187,8 +1189,14 @@ class LicencePage(Page):
         self.detail.configure(text=" ".join(lines))
 
     def copy_code(self) -> None:
+        from ..activation import request_code
+        try:
+            request = request_code()
+        except Exception as exc:
+            messagebox.showerror(TITLE, f"Could not create the activation request. {exc}", parent=self.root)
+            return
         self.root.clipboard_clear()
-        self.root.clipboard_append(self.code.cget("text"))
+        self.root.clipboard_append(request)
 
     def import_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -1212,19 +1220,27 @@ class LicencePage(Page):
     def _install(self, text: str) -> None:
         from .. import licence
 
-        try:
-            installed = licence.install(text)
-        except licence.LicenceError as exc:
-            messagebox.showerror(TITLE, f"Not imported. {exc}", parent=self.root)
-            return
-        except OSError as exc:
-            messagebox.showerror(TITLE, f"Could not save the licence.\n\n{exc}",
-                                 parent=self.root)
-            return
-        messagebox.showinfo(
-            TITLE, f"Licensed to {installed.licensee}. Anything held while this "
-                   f"computer was unlicensed can be sent from Needs attention.",
-            parent=self.root)
+        def work():
+            with self.pipeline.operation_lock:
+                try:
+                    installed = licence.install(text)
+                finally:
+                    self.pipeline.reload_if_changed()
+                if installed.connection_box:
+                    self.pipeline.rebuild_sender()  # also picks up a token-only rotation
+                return installed
+
+        if self.view.tasks.run("activate", work, self._installed):
+            self.detail.configure(text="Checking the licence and WhatsApp settings…")
+
+    def _installed(self, installed) -> None:
+        if isinstance(installed, Exception):
+            messagebox.showerror(TITLE, f"Activation did not finish. {installed}", parent=self.root)
+        else:
+            detail = ("Automatic receipt images are enabled." if installed.connection_box else
+                      "This licence covers the computer. Use Connect WhatsApp to set up sending.")
+            messagebox.showinfo(TITLE, f"Licensed to {installed.licensee}. {detail}", parent=self.root)
+        self.window._load_settings_into_form()
         self.on_show()
         self.view.refresh_checklist()
         self.window.refresh()

@@ -879,7 +879,7 @@ class DesktopWindow:
             # What each message is asked to carry, because that is half of
             # whether it can be used: a template approved with an image header
             # is no use to a counter sending PDFs, and the reverse.
-            attached_as = {s.default_template: s.attachment_format}
+            attached_as = {s.default_template: s.receipt_attachment}
             for kind, name in s.document_templates.items():
                 attached_as.setdefault(
                     name, s.document_attachments.get(kind) or s.attachment_format

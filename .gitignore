@@ -13,6 +13,7 @@ node_modules/
 # the linked account, so they must never reach the repository.
 baileys_auth_info/
 whatsapp_token.*
+activation-key.bin
 settings.json
 # Carries the access token in plain text so one installer can configure a
 # machine unattended. provision.example.json is the documented template and is

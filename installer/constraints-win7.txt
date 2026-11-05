@@ -14,3 +14,7 @@ pymupdf==1.24.11
 # PyInstaller documents itself as "runs in Windows 8 and newer" from 6.0. 5.x
 # still compiles a bootloader that starts on 7.
 pyinstaller==5.13.2
+
+# Sealed activation envelopes on the legacy 32-bit runtime.
+PyNaCl==1.5.0
+cffi==1.15.1

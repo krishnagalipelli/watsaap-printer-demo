@@ -155,14 +155,14 @@ try {
         "--paths src " +
         "--icon src\waprinter\ui\assets\icon.ico " +
         "--add-data src\waprinter\ui\assets;waprinter\ui\assets " +
-        "--hidden-import win32timezone " +
+        "--hidden-import win32timezone --hidden-import _cffi_backend " +
         "packaging\waprinter_agent.py"
     )
 
     Write-Host '== Freezing the CLI ==' -ForegroundColor Cyan
     Invoke-Step (
         "$Python -m PyInstaller --noconfirm --clean --console " +
-        "--name waprinter --distpath dist\cli --paths src " +
+        "--name waprinter --distpath dist\cli --paths src --hidden-import _cffi_backend " +
         "--icon src\waprinter\ui\assets\icon.ico " +
         "packaging\waprinter_cli.py"
     )

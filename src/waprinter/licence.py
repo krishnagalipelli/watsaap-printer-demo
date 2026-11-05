@@ -220,6 +220,7 @@ class Licence:
     issued: date
     updates_until: date
     serial: str
+    connection_box: str = ""
 
     def payload(self) -> bytes:
         return json.dumps(
@@ -229,6 +230,7 @@ class Licence:
                 "issued": self.issued.isoformat(),
                 "updates_until": self.updates_until.isoformat(),
                 "serial": self.serial,
+                **({"connection_box": self.connection_box} if self.connection_box else {}),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -291,6 +293,7 @@ def parse(text: str, public_key: str | None = None) -> Licence:
             issued=date.fromisoformat(fields["issued"]),
             updates_until=date.fromisoformat(fields["updates_until"]),
             serial=str(fields.get("serial", "")),
+            connection_box=str(fields.get("connection_box", "")),
         )
     except (ValueError, KeyError, TypeError):
         raise LicenceError("This licence could not be read. Ask for it to be issued again.")
@@ -309,12 +312,20 @@ def install(text: str) -> Licence:
             f"This licence is for computer {licence.machine}, and this one is {here}. "
             f"Ask for a licence for {here}."
         )
+    if licence.connection_box:
+        from .activation import activate
+        activate(licence, _token_in(text))
+    else:
+        _save(licence, _token_in(text))
+    return licence
+
+
+def _save(licence: Licence, token: str) -> None:
     path = _licence_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, describe(licence, _token_in(text)))
+    atomic_write_text(path, describe(licence, token))
     _cache.clear()
     log.info("licence %s installed for %s", licence.serial, licence.licensee)
-    return licence
 
 
 # -- where this computer stands ------------------------------------------------------

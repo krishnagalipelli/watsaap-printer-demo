@@ -405,7 +405,7 @@ def checklist(settings, templates, profile, token_problem: str | None,
 
         licence = licensing.status()
     connected = not token_problem and bool(settings.phone_number_id)
-    usable = [t for t in templates.all() if t.usable]
+    usable = [t for t in templates.all() if t.usable_for(IMAGE) or t.usable_for(PDF)]
     in_use = [settings.default_template, *settings.document_templates.values()]
     unfinished = []
     for ref in in_use:

@@ -361,13 +361,13 @@ class DocumentProfile:
         # sum in words must not be thanked for a payment.
         numbered = (re.search(r"\b[A-Z]{0,2}CR\d{1,8}/\d{2,4}\b", text, re.I)
                     or (any(p.search(text) for p in self.document_number_pattern_res)
-                        and self._says_how_paid(text)))
+                        and self._says_how_paid(text, document)))
         chit = (numbered
                 and any(p.search(text) for p in self.amount_words_res)
                 and self.customer_anchor_re.search(text))
         return receipt if payment_words or chit else None
 
-    def _says_how_paid(self, text: str) -> bool:
+    def _says_how_paid(self, text: str, document) -> bool:
         """Whether a line of `text` opens by stating a payment.
 
         From the start of the line, because "you may pay through online" in
@@ -375,7 +375,18 @@ class DocumentProfile:
         """
         patterns = (self.payment_mode_labelled_re, self.payment_mode_bare_re,
                     self.payment_mode_numbered_re, self.payment_mode_through_re)
-        return any(p.match(line) for line in text.splitlines() for p in patterns)
+        if any(p.match(line) for line in text.splitlines() for p in patterns):
+            return True
+        # In some printer drivers the amount in a neighbouring column heads
+        # the visual row. Its separate payment cell still reads "Through ONLINE-UPI".
+        if isinstance(document, str):
+            return False
+        return any(
+            any(re.fullmatch(r"transaction\s+(?:no\.?|number)", line.text.strip(), re.I)
+                for line in page.lines)
+            and any(self.payment_mode_through_re.fullmatch(line.text.strip()) for line in page.lines)
+            for page in document.pages
+        )
 
     @staticmethod
     def rules_key(kind: DocumentKind | str | None) -> str:

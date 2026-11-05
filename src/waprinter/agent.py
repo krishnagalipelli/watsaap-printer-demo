@@ -116,9 +116,10 @@ class Agent:
         Never raises — an unreachable update server must not affect printing.
         """
         result = update.check(self.settings.update_url)
-        self.settings.last_update_check = datetime.now().isoformat()
         try:
-            self.settings.save()
+            with self.pipeline.operation_lock:
+                self.settings.last_update_check = datetime.now().isoformat()
+                self.settings.save()
         except Exception:
             log.exception("could not record the update check")
 
@@ -276,7 +277,9 @@ def selftest(check_ocr: bool = False) -> int:
     except Exception:
         traceback.print_exc()
         setup_screens = False
+    from .activation import request_code
     checks = {
+        "licence encryption": bool(request_code()),
         "settings": settings is not None,
         "pipeline": pipeline is not None,
         "message": pipeline.templates.get(settings.default_template) is not None,
@@ -323,7 +326,12 @@ def main(argv: list[str] | None = None) -> int:
             from .provision import apply_if_present
 
             apply_if_present()
-            Agent(instance=guard).run(visible=not hidden)
+            agent = Agent(instance=guard)
+            if "--activate" in argv and not agent.settings.phone_number_id:
+                from . import licence
+                if not licence.status().licensed:
+                    agent.window.root.after_idle(lambda: agent.window.open_setup("licence"))
+            agent.run(visible=not hidden)
         finally:
             guard.release()
         return 0

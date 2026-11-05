@@ -85,9 +85,9 @@ def problems(
             settings.document_attachments.get(kind) or settings.attachment_format
         )
 
-    wanted = [(settings.default_template, attached_as(""))]
+    wanted = [(settings.document_templates.get("receipt") or settings.default_template, attached_as("receipt"))]
     for kind, name in settings.document_templates.items():
-        if name and name not in [chosen for chosen, _ in wanted]:
+        if name and (name, attached_as(kind)) not in wanted:
             wanted.append((name, attached_as(kind)))
     for name, attachment in wanted:
         template = templates.get(name)

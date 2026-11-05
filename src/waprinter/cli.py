@@ -292,7 +292,7 @@ def cmd_templates(args: argparse.Namespace) -> int:
         for kind, name in settings.document_templates.items()
         if name
     }
-    attached_as.setdefault(settings.default_template, settings.attachment_format)
+    attached_as.setdefault(settings.default_template, settings.receipt_attachment)
     used_for.setdefault(settings.default_template, "everything else")
     for template in sorted(templates, key=lambda t: t.name):
         ref = store.ref_for(template)
@@ -411,12 +411,23 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     print(f"  force ipv4       : {s.force_ipv4}")
     _report_receipt_folder(s)
 
-    template = TemplateStore(p.templates, s.business_name).get(s.default_template)
+    # Judged against what a receipt goes out as. Asking whether it can carry
+    # a PDF reported an approved image-header template as "NOT usable" on a
+    # counter sending receipts as images, which was fine.
+    attachment = format_for(s.document_attachments.get("receipt") or s.attachment_format)
+    print(f"  receipts sent as : {'an image' if attachment == IMAGE else 'a PDF'}")
+    store = TemplateStore(p.templates, s.business_name)
+    print(f"  business account : {s.business_account_id or '(not set)'}, "
+          f"{len(store.all())} template(s) on this computer")
+    template = store.get(s.default_template)
     if template is None:
         print(f"  template status  : NOT CONFIGURED")
+    elif template.usable_for(attachment):
+        print(f"  template status  : {template.status} (usable)")
     else:
-        print(f"  template status  : {template.status} "
-              f"({'usable' if template.usable else 'NOT usable'})")
+        print(f"  template status  : {template.status} (NOT usable: it has "
+              f"{template.header_phrase}, and receipts go out as "
+              f"{'an image' if attachment == IMAGE else 'a PDF'})")
 
     try:
         token = load_token()
@@ -661,16 +672,29 @@ def cmd_licence(args: argparse.Namespace) -> int:
     from . import licence
 
     if args.file:
+        from .instance import SingleInstance
+        guard = SingleInstance(paths().root / "instance.port")
+        claimed = False
         try:
-            installed = licence.install(Path(args.file).read_text(encoding="utf-8"))
+            text = Path(args.file).read_text(encoding="utf-8")
+            if licence.parse(text).connection_box:
+                claimed = guard.claim()
+                if not claimed:
+                    raise licence.LicenceError("Import this key in Setup → Licence, or exit the agent and retry.")
+            installed = licence.install(text)
         except (OSError, licence.LicenceError) as exc:
             print(f"Not imported: {exc}")
             return 1
+        finally:
+            if claimed:
+                guard.release()
         print(f"Licensed to {installed.licensee}. Updates until "
               f"{installed.updates_until:%d %b %Y}.")
         return 0
     state = licence.status()
+    from .activation import request_code
     print(f"Machine code:  {state.machine}")
+    print(f"Activation request: {request_code()}")
     print(f"Status:        {state.summary()}")
     if state.licence is not None:
         print(f"Updates until: {state.licence.updates_until:%d %b %Y}")

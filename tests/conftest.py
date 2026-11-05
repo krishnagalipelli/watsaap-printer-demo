@@ -40,6 +40,7 @@ def settings():
         # exercises the Cloud API path. Link mode has its own fixture.
         send_mode="api",
         default_template="invoice_document",
+        document_attachments={},  # this fixture uses a PDF-header invoice template
         template_variables={
             "1": "customer_name",
             "2": "invoice_number",
