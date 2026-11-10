@@ -17,6 +17,8 @@ from waprinter.extract import extract_fields
 from waprinter.extract.profile import DocumentProfile
 from waprinter.models import Confidence
 
+from conftest import needs_tesseract
+
 # The chit fund's own office landline, which appears in the letterhead.
 OFFICE = "08782251999"
 
@@ -89,7 +91,7 @@ class TestPaidOnline:
 
     def test_the_mode_is_read_from_the_through_line(self, receipt):
         fields = extract_fields(receipt(ChitReceiptSpec(payment_mode=upi_cell())))
-        assert fields.payment_mode == "UPI"
+        assert fields.payment_method == "UPI"
 
     def test_cash_is_still_cash(self, receipt):
         assert extract_fields(receipt()).payment_mode == "Cash"
@@ -150,7 +152,7 @@ class TestPaidByCheque:
         assert extract_fields(receipt(cheque_receipt())).invoice_number == "CHQ4551/26"
 
     def test_the_mode_is_the_word_before_the_cheque_number(self, receipt):
-        assert extract_fields(receipt(cheque_receipt())).payment_mode == "Cheque"
+        assert extract_fields(receipt(cheque_receipt())).payment_method == "Cheque"
 
     def test_the_receipt_keeps_its_own_date(self, receipt):
         """A cheque dated the 5th, receipted on the 6th, is the 6th."""
@@ -166,7 +168,7 @@ class TestPaidByCheque:
     def test_a_demand_draft_prints_the_same_way(self, receipt):
         spec = cheque_receipt(payment_mode="DD Number 351768\ndated 05/10/2026 of Bank\nSBI")
         fields = extract_fields(receipt(spec))
-        assert (fields.payment_mode, fields.invoice_date) == ("DD", "06-Oct-26")
+        assert (fields.payment_method, fields.invoice_date) == ("DD", "06-Oct-26")
 
 
 class TestOneChitThreeWaysToPay:
@@ -181,7 +183,7 @@ class TestOneChitThreeWaysToPay:
     def test_each_is_a_receipt_saying_how_it_was_paid(self, receipt, number, cell, mode):
         fields = extract_fields(receipt(ChitReceiptSpec(
             receipt_number=number, receipt_date="06-Oct-26", payment_mode=cell)))
-        assert (fields.document_kind, fields.invoice_number, fields.payment_mode,
+        assert (fields.document_kind, fields.invoice_number, fields.payment_method,
                 fields.invoice_date) == ("receipt", number, mode, "06-Oct-26")
 
     def test_the_first_receipts_of_the_year_have_short_numbers(self, receipt):
@@ -380,4 +382,167 @@ def test_upi_cell_after_an_amount_in_another_column_is_payment_evidence(receipt,
     doc = pdf_text.read(merged)
     assert any(row.text.startswith("0.00") and "Through ONLINE-UPI" in row.text for row in doc.rows)
     fields = extract_fields(merged)
-    assert (fields.document_kind, fields.payment_mode) == ("receipt", "UPI")
+    assert (fields.document_kind, fields.payment_method) == ("receipt", "UPI")
+
+
+def _scanned(*rows: str):
+    """A page as OCR hands it over: rows of text and nothing else."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(rows=[SimpleNamespace(text=text) for text in rows])
+
+
+class TestScannedReceiptTotal:
+    """OCR of a scanned chit receipt runs the amount line into the mobile line.
+
+    The rows below are shaped exactly as Tesseract returned a real scanned
+    receipt (names and numbers invented). Read from the whole row, the member
+    was told "Amount Paid: ₹9876543210".
+    """
+
+    ROWS = (
+        "Receipt No   CR2009/26   Date:   29-Oct-26   Towards   SPT27E-4",
+        "'@   4   | Received from   an amount ofRupees   = Two Only   "
+        "Sri/Smt/M/s . ANITHA RAMESH   Mobile: 9876543210   |   |",
+        "Ss] | Previous Dues   0.00   Sub Total b/d   2.00",
+        "3   Current Installment   2.00   Interest   0.00",
+        "=   Sub Total e/d   2.00   Other Charges   0.00",
+    )
+
+    def test_the_mobile_number_is_never_the_amount(self):
+        from waprinter.extract.fields import _total_amount
+
+        total = _total_amount(_scanned(*self.ROWS), DocumentProfile())
+        assert total != "9876543210"
+        assert total != "4"  # a border speck to the left of the label
+
+    def test_a_spaced_mobile_number_is_not_read_as_two_amounts(self):
+        from waprinter.extract.fields import _total_amount
+
+        doc = _scanned("an amount of Rupees Two Only Mobile: 98765 43210")
+        assert _total_amount(doc, DocumentProfile()) is None
+
+    def test_the_amount_in_words_settles_a_disagreement(self):
+        from waprinter.extract.fields import _settled_total
+
+        # "Sub Total c/d 2.00 Other Charges 0.00" leaves 0.00 furthest right.
+        assert _settled_total("0.00", "2") == "2"
+
+    def test_an_agreeing_figure_keeps_its_printed_form(self):
+        from waprinter.extract.fields import _settled_total
+
+        assert _settled_total("18,450.00", "18450") == "18,450.00"
+
+    def test_either_alone_is_used(self):
+        from waprinter.extract.fields import _settled_total
+
+        assert _settled_total(None, "100") == "100"
+        assert _settled_total("100.00", None) == "100.00"
+
+    def test_grand_total_outranks_a_sub_total_below_it(self):
+        from waprinter.extract.fields import _total_amount
+
+        doc = _scanned("Grand Total Rs.   2.00", "Sub Total c/d   5.00")
+        assert _total_amount(doc, DocumentProfile()) == "2.00"
+
+
+class TestTheMemberIsToldWhichPayment:
+    """A cheque or online receipt names the payment by its own number, and
+    the member should see it: "Payment Mode: Cheque" leaves them unable to
+    tell which of two cheques this receipt is for.
+
+    The number travels in the payment mode line, so the templates already
+    approved with that variable carry it with no new approval from Meta.
+    """
+
+    def test_a_cheque_with_its_date_and_bank(self, receipt):
+        fields = extract_fields(receipt(cheque_receipt()))
+        assert fields.payment_mode == "Cheque No. 351768 dated 05/10/2026, SBI-PDPL"
+        assert (fields.payment_method, fields.payment_reference) == ("Cheque", "351768")
+
+    def test_an_online_payment_with_its_transaction_number(self, receipt):
+        fields = extract_fields(receipt(ChitReceiptSpec(payment_mode=upi_cell())))
+        assert fields.payment_mode == "UPI Transaction No. 048669201016 dated 06/10/2026"
+        assert (fields.payment_method, fields.payment_reference) == ("UPI", "048669201016")
+
+    def test_a_demand_draft(self, receipt):
+        spec = cheque_receipt(payment_mode="DD Number 351768\ndated 05/10/2026 of Bank\nSBI")
+        assert extract_fields(receipt(spec)).payment_mode == "DD No. 351768 dated 05/10/2026, SBI"
+
+    def test_a_cheque_printed_on_one_line_with_no_bank(self, receipt):
+        spec = cheque_receipt(payment_mode="Cheque Number 351768 dated 05/10/2026 of Bank")
+        assert extract_fields(receipt(spec)).payment_mode == "Cheque No. 351768 dated 05/10/2026"
+
+    def test_cash_is_just_cash(self, receipt):
+        fields = extract_fields(receipt())
+        assert (fields.payment_mode, fields.payment_method, fields.payment_reference) == (
+            "Cash", "Cash", None)
+
+    def test_the_number_never_becomes_the_recipient(self, receipt):
+        cell = upi_cell(number="919876543210")
+        fields = extract_fields(receipt(ChitReceiptSpec(payment_mode=cell)))
+        assert fields.payment_reference == "919876543210"
+        assert fields.best.e164 == "+919000012345"
+
+    @pytest.mark.parametrize("next_row", [
+        '"*Cheques accepted subject to realize   For SRINIDHI CHITS (HYDERABAD) PVT.LTD.',
+        "For SRINIDHI CHITS (HYDERABAD) PVT. LTD.",
+    ])
+    def test_a_scan_that_lost_the_bank_line_names_no_bank(self, next_row):
+        """OCR of the real cheque receipt dropped "SBI-PDPL" altogether, and
+        the row after it is the stationery's small print."""
+        from waprinter.extract.fields import _payment_reference, payment_details
+
+        doc = _scanned(
+            "Ww)   Cheque Number   351768",
+            "Sine ls Mac   dated 31/10/2026 of Bank",
+            next_row,
+        )
+        assert payment_details("Cheque", _payment_reference(doc)) == (
+            "Cheque No. 351768 dated 31/10/2026")
+
+    def test_specks_before_the_cheque_label_still_say_cheque(self, tmp_path):
+        """Real OCR of a scanned cheque receipt: "Ww)   Cheque Number   351768"."""
+        from waprinter.extract.fields import _payment_reference
+
+        reference = _payment_reference(_scanned("Ww)   Cheque Number   351768"))
+        assert (reference.paper, reference.number) == ("Cheque", "351768")
+
+    def test_a_label_with_no_number_after_it_is_not_a_payment(self):
+        from waprinter.extract.fields import _payment_reference
+
+        assert _payment_reference(_scanned("Transaction Number", "Through ONLINE-UPI")) is None
+
+    def test_both_halves_can_be_mapped_on_their_own(self, receipt):
+        values = extract_fields(receipt(cheque_receipt())).as_template_vars()
+        assert values["payment_method"] == "Cheque"
+        assert values["payment_reference"] == "351768"
+
+    def test_a_job_stored_before_this_still_has_a_method(self):
+        from waprinter.models import ExtractedFields
+
+        old = ExtractedFields(payment_mode="Cash").as_template_vars()
+        assert (old["payment_mode"], old["payment_method"], old["payment_reference"]) == (
+            "Cash", "Cash", "")
+
+
+@needs_tesseract
+class TestScannedPaymentReferences:
+    """The same receipts printed as pictures, read by OCR."""
+
+    def ocr_fields(self, receipt, cell):
+        from waprinter.extract.ocr import OcrSettings
+
+        path = receipt(ChitReceiptSpec(payment_mode=cell, raster=True))
+        return extract_fields(path, ocr=OcrSettings())
+
+    def test_a_scanned_cheque(self, receipt):
+        fields = self.ocr_fields(receipt, cheque_cell())
+        assert fields.used_ocr
+        assert (fields.payment_method, fields.payment_reference) == ("Cheque", "351768")
+        assert fields.payment_mode.startswith("Cheque No. 351768 dated 05/10/2026")
+
+    def test_a_scanned_online_payment(self, receipt):
+        fields = self.ocr_fields(receipt, upi_cell())
+        assert fields.used_ocr
+        assert fields.payment_mode == "UPI Transaction No. 048669201016 dated 06/10/2026"

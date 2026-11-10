@@ -117,7 +117,8 @@ def cmd_corpus(args: argparse.Namespace) -> int:
         # Mirrors the gate: exactly one high-confidence candidate sends, and an
         # OCR-derived number only when OCR is explicitly trusted.
         picked = highs[0].e164 if len(highs) == 1 else ""
-        if picked and highs[0].from_ocr and not settings.ocr_silent_send:
+        drawn_ok = highs[0].drawn and settings.ocr_drawn_send if highs else False
+        if picked and highs[0].from_ocr and not settings.ocr_silent_send and not drawn_ok:
             picked = ""
         decision = "SEND" if picked else "HOLD"
         if picked:

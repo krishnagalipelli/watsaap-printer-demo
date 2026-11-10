@@ -189,6 +189,12 @@ class Settings:
     # wrong digit is a different real person. Turn this on only after measuring
     # scanned invoices with `waprinter corpus --score`.
     ocr_silent_send: bool = False
+    # Whether an OCR number may be sent to without anyone looking when its
+    # digits are drawn on the page as vector shapes -- printed, but by a driver
+    # that turned the text into outlines -- and both OCR reads agree. On by
+    # default: a counter whose printer does this otherwise holds every
+    # receipt. A scan or a photo is a picture, never shapes, and stays held.
+    ocr_drawn_send: bool = True
 
     # --- Locale ------------------------------------------------------------
     default_country_code: str = "91"

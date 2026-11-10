@@ -44,7 +44,11 @@ _SYNONYMS = {
                      "amount_paid_figures"},
     "amount_words": {"amount", "amount_words", "amount_in_words", "amount_paid"},
     "payment_mode": {"mode", "payment_mode", "payment", "paid_by", "paymode", "pay_mode",
-                     "mode_of_payment", "payment_method"},
+                     "mode_of_payment", "payment_details"},
+    "payment_method": {"payment_method", "method", "paid_via", "payment_type"},
+    "payment_reference": {"payment_reference", "transaction_id", "transaction_no",
+                          "transaction_number", "txn_id", "txn_no", "utr", "utr_no",
+                          "cheque_no", "cheque_number", "chq_no", "instrument_no"},
     BUSINESS_FIELD: {"business", "business_name", "company", "company_name", "firm",
                      "branch_name"},
 }
@@ -187,6 +191,12 @@ shared_map_for = shared_variables_for
 # specific first. Read from the template's own wording, so they work for
 # numbered variables, which carry no name to go on.
 _CUES: list[tuple[str, str]] = [
+    ("transaction id", "payment_reference"),
+    ("transaction no", "payment_reference"),
+    ("transaction number", "payment_reference"),
+    ("cheque no", "payment_reference"),
+    ("cheque number", "payment_reference"),
+    ("utr", "payment_reference"),
     ("mode of payment", "payment_mode"),
     ("payment mode", "payment_mode"),
     ("paid by", "payment_mode"),

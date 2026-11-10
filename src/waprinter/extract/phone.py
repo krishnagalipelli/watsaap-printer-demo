@@ -145,6 +145,15 @@ def parse_typed_number(text: str, country_code: str = "91") -> str | None:
     return found[0] if len(found) == 1 else None
 
 
+def phone_spans(text: str) -> list[tuple[int, int]]:
+    """Where phone-shaped numbers sit in `text`, as (start, end) offsets.
+
+    For readers of other fields that must not mistake a mobile number for
+    their own value -- an amount, chiefly.
+    """
+    return [(start, end) for start, end, _digits in _find_raw_numbers(text)]
+
+
 def _find_raw_numbers(text: str) -> list[tuple[int, int, str]]:
     """Locate phone-shaped digit sequences as (start, end, digits).
 

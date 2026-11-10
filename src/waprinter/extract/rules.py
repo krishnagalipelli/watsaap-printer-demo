@@ -49,7 +49,9 @@ BUILTIN_FIELDS = {
     "invoice_date": "Date",
     "total_amount": "Amount (figures)",
     "amount_words": "Amount (in words)",
-    "payment_mode": "Payment mode",
+    "payment_mode": "Payment mode (with cheque / transaction no.)",
+    "payment_method": "Payment method (Cash, Cheque, UPI)",
+    "payment_reference": "Cheque / transaction no.",
 }
 
 # The one field that is never a template value. See FieldRule.
@@ -58,7 +60,7 @@ RECIPIENT_FIELD = "customer_mobile"
 # Always words, whatever the clicked value looks like. "UPI/5512" guessed as a
 # code would tie the rule to that shape, and "Cash" on the next print would
 # read nothing.
-ALWAYS_TEXT = {"customer_name", "payment_mode"}
+ALWAYS_TEXT = {"customer_name", "payment_mode", "payment_method"}
 
 # How far a value running over several lines may go when nothing ends it.
 MAX_VALUE_LINES = 6

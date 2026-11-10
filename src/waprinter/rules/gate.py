@@ -204,7 +204,11 @@ def evaluate(
     winner = high[0]
 
     # --- OCR results are not trusted for a silent send by default ---------
-    if winner.from_ocr and not settings.ocr_silent_send:
+    # Except a number drawn as sharp shapes, as a printer driver that outlines
+    # text draws it: that is a printed page, read twice and agreed, and
+    # holding it held every receipt a counter printed.
+    drawn_ok = winner.drawn and settings.ocr_drawn_send
+    if winner.from_ocr and not settings.ocr_silent_send and not drawn_ok:
         return GateOutcome(
             Decision.HOLD,
             recipient=winner.e164,

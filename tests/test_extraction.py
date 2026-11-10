@@ -213,7 +213,7 @@ class TestPaymentModeInATallBox:
 
     def test_a_raised_cheque_is_read(self, tmp_path):
         f = self.form(tmp_path, mode="Cheque Number 351768", raised=20)
-        assert f.payment_mode == "Cheque"
+        assert f.payment_method == "Cheque"
 
     def test_a_form_without_its_labels_in_the_text_still_reads_it(self, tmp_path):
         """The chit software can leave the stationery wording out of the text."""

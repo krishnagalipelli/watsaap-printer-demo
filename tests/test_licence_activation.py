@@ -57,10 +57,10 @@ def mock_meta(header="IMAGE"):
     }]})
 
 
-def check_print(path, pipeline, expected_mode, upload, send):
+def check_print(path, pipeline, expected_mode, upload, send, expected_line):
     job, = pipeline.process_document(path)
     assert job.status is JobStatus.SENT, job.hold_reason
-    assert job.fields.payment_mode == expected_mode
+    assert job.fields.payment_method == expected_mode
     assert job.recipient == job.fields.best.e164
     media = upload.calls.last.request.read()
     assert b"image/jpeg" in media and b"\xff\xd8\xff" in media
@@ -68,6 +68,10 @@ def check_print(path, pipeline, expected_mode, upload, send):
     assert msg["to"] == job.recipient.lstrip("+")
     header = msg["template"]["components"][0]
     assert header["parameters"] == [{"type": "image", "image": {"id": "media1"}}]
+    body = next(c for c in msg["template"]["components"] if c["type"] == "body")
+    sent = {p.get("parameter_name"): p["text"] for p in body["parameters"]}
+    # The member is told which payment this was, number and all.
+    assert sent["payment_mode"] == expected_line
     return job
 
 
@@ -85,13 +89,14 @@ def test_pasting_one_key_enables_automatic_cash_and_upi_image_sends(issued, tmp_
     upload = respx.post(f"{BASE}/123/media").respond(json={"id": "media1"})
     send = respx.post(f"{BASE}/123/messages").respond(json={"messages": [{"id": "wamid.test"}]})
     pipeline = build_default()
-    for number, cell, mode in [
-        ("CR11/26", "Cash", "Cash"),
-        ("CHQ12/26", "Transaction Number\n919876543210 dated 06/10/2026\nThrough ONLINE-UPI", "UPI"),
+    for number, cell, mode, line in [
+        ("CR11/26", "Cash", "Cash", "Cash"),
+        ("CHQ12/26", "Transaction Number\n919876543210 dated 06/10/2026\nThrough ONLINE-UPI", "UPI",
+         "UPI Transaction No. 919876543210 dated 06/10/2026"),
     ]:
         path = build_chit_receipt(ChitReceiptSpec(receipt_number=number, payment_mode=cell),
                                   tmp_path / f"{mode}.pdf")
-        job = check_print(path, pipeline, mode, upload, send)
+        job = check_print(path, pipeline, mode, upload, send, line)
         assert job.recipient == "+919000012345"
     assert upload.call_count == send.call_count == 2
 

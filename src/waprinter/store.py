@@ -118,6 +118,7 @@ def _fields_from_json(raw: str) -> ExtractedFields:
             label=c.get("label"),
             reasons=c.get("reasons", []),
             from_ocr=c.get("from_ocr", False),
+            drawn=c.get("drawn", False),
         )
         for c in payload.get("candidates", [])
     ]
@@ -129,6 +130,8 @@ def _fields_from_json(raw: str) -> ExtractedFields:
         total_amount=payload.get("total_amount"),
         amount_words=payload.get("amount_words"),
         payment_mode=payload.get("payment_mode"),
+        payment_method=payload.get("payment_method"),
+        payment_reference=payload.get("payment_reference"),
         document_kind=payload.get("document_kind"),
         # Written since the field existed but never read back, so a held scan
         # reopened from the queue looked verified whatever the two OCR passes

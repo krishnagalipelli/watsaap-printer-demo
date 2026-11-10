@@ -686,6 +686,9 @@ class DesktopWindow:
         self._check(scanned, "ocr_enabled", "Read documents printed as an image (OCR)")
         self._check(scanned, "ocr_silent_send",
                     "Send to numbers read by OCR without asking")
+        self._check(scanned, "ocr_drawn_send",
+                    "Send without asking when the printer drew the number "
+                    "as shapes (never a scan or photo)")
 
         receipts = self._group(body, "Printed receipts")
         self._check(
@@ -841,6 +844,7 @@ class DesktopWindow:
             "confirm_before_send": s.confirm_before_send,
             "ocr_enabled": s.ocr_enabled,
             "ocr_silent_send": s.ocr_silent_send,
+            "ocr_drawn_send": s.ocr_drawn_send,
             "keep_printed_pdfs": s.keep_printed_pdfs,
             "pdf_folder": s.pdf_folder,
         }
@@ -914,6 +918,7 @@ class DesktopWindow:
         s.confirm_before_send = bool(self.fields["confirm_before_send"].get())
         s.ocr_enabled = bool(self.fields["ocr_enabled"].get())
         s.ocr_silent_send = bool(self.fields["ocr_silent_send"].get())
+        s.ocr_drawn_send = bool(self.fields["ocr_drawn_send"].get())
 
         keep = bool(self.fields["keep_printed_pdfs"].get())
         folder = self.fields["pdf_folder"].get().strip()

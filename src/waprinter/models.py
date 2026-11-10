@@ -53,6 +53,11 @@ class PhoneCandidate:
     # Read by OCR rather than from a text layer. A misread digit here means a
     # different person, so the gate treats these differently.
     from_ocr: bool = False
+    # Read by OCR, but off digits the page draws as sharp vector shapes rather
+    # than a scan or photo. Microsoft Print To PDF draws some programs' text
+    # this way -- the chit software's receipts among them -- so the number is
+    # as crisp as printed text and only lacks the text layer. See the gate.
+    drawn: bool = False
 
 
 @dataclass
@@ -70,7 +75,16 @@ class ExtractedFields:
     # labels that would tell them apart are pre-printed, so they are not in the
     # PDF's text layer at all.
     amount_words: str | None = None
+    # The payment as the member reads it: "Cash", or "Cheque No. 351768 dated
+    # 31/10/2026, SBI-PDPL" when the receipt carries the payment's own number.
+    # The whole line rather than the bare word, so the templates already
+    # approved with a payment mode variable carry the number without a new
+    # approval from Meta.
     payment_mode: str | None = None
+    # Its two parts, for a template that wants them apart: "Cheque" and
+    # "351768". Never a recipient, however much the number looks like one.
+    payment_method: str | None = None
+    payment_reference: str | None = None
     # Which kind of paperwork this is -- "removal_notice", "removal_letter",
     # "receipt" for a positively identified receipt; None when unknown. Decides which template it goes
     # out under, so a member is never sent the receipt wording over a notice.
@@ -110,6 +124,10 @@ class ExtractedFields:
             "total_amount": self.total_amount or "",
             "amount_words": self.amount_words or "",
             "payment_mode": self.payment_mode or "",
+            # A job stored before the method was kept apart has the bare word
+            # in payment_mode, which is the method.
+            "payment_method": self.payment_method or self.payment_mode or "",
+            "payment_reference": self.payment_reference or "",
             # Taught fields last, so a taught value is what a template gets
             # even where its name matches a built-in one.
             **{k: v or "" for k, v in self.extra.items()},

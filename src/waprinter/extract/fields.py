@@ -11,7 +11,9 @@ pairs are read from *rows* rather than lines, because software routinely emits
 
 from __future__ import annotations
 
+import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..models import ExtractedFields
@@ -22,9 +24,12 @@ from .phone import (
     apply_ocr_verification,
     default_profile,
     find_candidates,
+    phone_spans,
     scan_numbers,
 )
 from .profile import DocumentProfile
+
+log = logging.getLogger(__name__)
 
 MONEY = re.compile(r"(?:₹|rs\.?|inr)?\s*(\d[\d,]*(?:\.\d{1,2})?)", re.IGNORECASE)
 
@@ -142,6 +147,151 @@ def _payment_mode(doc: pdf_text.Document, profile: DocumentProfile) -> str | Non
     return None
 
 
+# What a receipt calls the number of the payment itself. A chit receipt
+# prints "Cheque Number 351768 / dated 31/10/2026 of Bank / SBI-PDPL" for a
+# cheque and "Transaction Number / 048669201016 dated 06/10/2026 / Through
+# ONLINE-UPI" for an online payment. A bare "Ref No." is left out on purpose:
+# on an invoice that is the buyer's order, not how they paid.
+_REFERENCE_LABEL = re.compile(
+    r"\b(cheque|chq|dd|demand\s+draft|transaction|txn|utr)\s*"
+    r"(?:number|no\b\.?|id\b|#)\s*[:\-–#.]?",
+    re.IGNORECASE,
+)
+# The number itself, on the label's row or the one below it. A digit is
+# required, so a word that happens to follow the label is never taken.
+_REFERENCE_VALUE = re.compile(r"\s*([A-Za-z0-9]*\d[A-Za-z0-9]*)")
+_PAID_ON = re.compile(
+    r"\bdated\s+(\d{1,2}[-/.](?:\d{1,2}|[A-Za-z]{3,9})[-/.](?:\d{4}|\d{2}))\b",
+    re.IGNORECASE,
+)
+# The bank is the first word after "of Bank", whether on the same row or the
+# next. Capitals only, no spaces: "SBI-PDPL", "HDFC". A scan sometimes loses
+# that line altogether, and then the row after it -- "*Cheques accepted ..."
+# or "For SRINIDHI ..." -- must not be read as the bank.
+_BANK = re.compile(r"(?i:\bof\s+bank\b)\s*[:\-]?\s*([A-Z][A-Z0-9&.\-]{1,24})(?=\s|$)")
+# Instruments with a number of their own, as opposed to an online transfer.
+_PAPER = {"cheque": "Cheque", "chq": "Cheque", "dd": "DD", "demand draft": "DD"}
+# How many rows the payment box spans below its first line.
+_PAYMENT_BOX_ROWS = 3
+
+
+@dataclass
+class PaymentReference:
+    number: str
+    paid_on: str | None = None
+    bank: str | None = None
+    paper: str | None = None   # "Cheque" or "DD" when the label says so
+
+
+def _payment_reference(doc: pdf_text.Document) -> PaymentReference | None:
+    """The cheque or transaction number the payment was made with.
+
+    Only ever a value for the message. It never takes part in choosing the
+    recipient: a twelve-digit UPI number beginning 91 reads as a mobile, and
+    phone.py keeps it out of the candidates for exactly that reason.
+    """
+    rows = [row.text for row in doc.rows]
+    for i, text in enumerate(rows):
+        label = _REFERENCE_LABEL.search(text)
+        if not label:
+            continue
+        box = "\n".join([text[label.start():], *rows[i + 1 : i + _PAYMENT_BOX_ROWS]])
+        after = box[label.end() - label.start():]
+        value = _REFERENCE_VALUE.match(after)
+        if not value or not 4 <= len(value.group(1)) <= 30:
+            continue
+        paid_on = _PAID_ON.search(box)
+        bank = _BANK.search(box)
+        return PaymentReference(
+            number=value.group(1),
+            paid_on=paid_on.group(1) if paid_on else None,
+            bank=bank.group(1) if bank else None,
+            paper=_PAPER.get(re.sub(r"\s+", " ", label.group(1).lower())),
+        )
+    return None
+
+
+def payment_details(method: str | None, reference: PaymentReference | None) -> str | None:
+    """The payment as one line of a message.
+
+    "Cheque No. 351768 dated 31/10/2026, SBI-PDPL", "UPI Transaction No.
+    048669201016 dated 06/10/2026", or just "Cash". One line, because it
+    fills the payment mode variable of a template Meta has already approved,
+    and so needs no new approval to reach the member.
+    """
+    if reference is None:
+        return method
+    if reference.paper:
+        text = f"{method or reference.paper} No. {reference.number}"
+    elif method:
+        text = f"{method} Transaction No. {reference.number}"
+    else:
+        text = f"Transaction No. {reference.number}"
+    if reference.paid_on:
+        text += f" dated {reference.paid_on}"
+    if reference.bank:
+        text += f", {reference.bank}"
+    return text
+
+
+# How much of an OCR-read number's width must be covered by shapes drawn
+# inside it before it counts as printed rather than scanned. The client's
+# counter draws each digit as one filled outline and covers 85% (the gaps
+# between digits are the rest); a scan or photo covers nothing.
+_DRAWN_COVERAGE = 0.7
+
+
+def mark_drawn_numbers(pdf_path: Path, candidates) -> None:
+    """Flag the OCR-read numbers whose digits the page draws as shapes.
+
+    Some printer drivers -- Microsoft Print To PDF with the client's chit
+    software -- turn every letter into a filled vector outline. The page has no
+    text layer, so it is read by OCR like a scan, but it is not a scan: the
+    digits are as sharp as type. Only shapes lying wholly inside the number's
+    box count, and plain rectangles never do, so a table border or a shaded
+    cell under a scanned number cannot pass for printed digits.
+    """
+    import fitz
+
+    pending = [c for c in candidates if c.from_ocr]
+    if not pending:
+        return
+    try:
+        with fitz.open(pdf_path) as pdf:
+            for candidate in pending:
+                # Candidate pages count from 1, as the page reader numbers them.
+                candidate.drawn = _drawn_at(pdf[candidate.page - 1], candidate.bbox)
+                if candidate.drawn:
+                    candidate.reasons.append("digits are drawn as shapes, not scanned")
+    except Exception:
+        # Telling printed from scanned only ever lets a number through; a
+        # failure here leaves it held as a scan, which is the safe side.
+        log.exception("could not inspect the drawing of %s", pdf_path)
+
+
+def _drawn_at(page, bbox) -> bool:
+    import fitz
+
+    box = fitz.Rect(bbox)
+    if box.is_empty or box.width <= 0:
+        return False
+    grown = box + (-2, -2, 2, 2)
+    spans = []
+    for drawing in page.get_drawings():
+        if drawing.get("fill") is None or not grown.contains(drawing["rect"]):
+            continue
+        if all(item[0] in ("re", "qu") for item in drawing["items"]):
+            continue  # a box, not a glyph
+        spans.append((drawing["rect"].x0, drawing["rect"].x1))
+    covered, reached = 0.0, box.x0
+    for x0, x1 in sorted(spans):
+        x0, x1 = max(x0, reached), min(x1, box.x1)
+        if x1 > x0:
+            covered += x1 - x0
+            reached = x1
+    return covered / box.width >= _DRAWN_COVERAGE
+
+
 def _mode_beside_label(doc: pdf_text.Document, profile: DocumentProfile) -> str | None:
     """The mode printed in the box to the right of its label.
 
@@ -219,19 +369,60 @@ def _document_date(doc: pdf_text.Document, profile: DocumentProfile) -> str | No
     return None
 
 
+# Ten or more digits with no comma or decimal point is a phone number, a
+# landline or an account number. No receipt prints a rupee amount that way.
+_NOT_AN_AMOUNT = re.compile(r"^\d{10,}$")
+
+
+def _figures_after(text: str, label_end: int) -> list[str]:
+    """The amounts printed after a label on its row, phone numbers left out.
+
+    OCR of a scanned chit receipt runs "an amount of Rupees", the member's
+    name and "Mobile: 9876543210" together as one row. Read from the whole
+    row, the figure furthest right was the mobile number, and the member was
+    told they had paid ₹9876543210. Figures to the left of the label are
+    border specks or another column's values, never the labelled amount.
+    """
+    tail = text[label_end:]
+    for start, end in reversed(phone_spans(tail)):
+        tail = tail[:start] + " " * (end - start) + tail[end:]
+    return [a for a in MONEY.findall(tail) if not _NOT_AN_AMOUNT.match(a)]
+
+
 def _total_amount(doc: pdf_text.Document, profile: DocumentProfile) -> str | None:
     best_rank, best_value = 0, None
+    # Most specific label first, so a "Grand Total" row is ranked as one
+    # rather than stopping at the "total" inside it.
+    labels = sorted(profile.amount_label_res, key=lambda pair: pair[1], reverse=True)
     for row in doc.rows:
-        for pattern, rank in profile.amount_label_res:
-            if not pattern.search(row.text):
+        for pattern, rank in labels:
+            match = pattern.search(row.text)
+            if not match:
                 continue
             if rank >= best_rank:
-                amounts = MONEY.findall(row.text)
+                amounts = _figures_after(row.text, match.end())
                 if amounts:
                     # The figure furthest right on a totals row is the total.
                     best_rank, best_value = rank, amounts[-1]
             break
     return best_value
+
+
+def _settled_total(labelled: str | None, from_words: str | None) -> str | None:
+    """The total, preferring the words when the two disagree.
+
+    The amount in words names exactly one figure; a label on a scan can sit
+    beside a sub-total, a charge or an OCR misread. Where they agree the
+    labelled figure is kept, because it is printed the way the office writes
+    money ("18,450.00").
+    """
+    if labelled and from_words:
+        try:
+            if float(labelled.replace(",", "")) != float(from_words):
+                return from_words
+        except ValueError:
+            return from_words
+    return labelled or from_words
 
 
 def _anchor_tail(text: str, profile: DocumentProfile) -> str | None:
@@ -391,6 +582,11 @@ def extract_fields(
 
     candidates = find_candidates(doc, excluded_numbers, country_code, profile)
     words = _amount_words(doc, profile)
+    reference = _payment_reference(doc)
+    # A scan puts specks in front of "Cheque Number", and the mode reader,
+    # which wants the word at the start of its line, misses it. The label
+    # found with the number says the same thing.
+    method = _payment_mode(doc, profile) or (reference.paper if reference else None)
 
     # Any page OCR read gets the second pass, whether or not it held a
     # number. It used to run only for an OCR'd number, so a scan with none --
@@ -400,6 +596,7 @@ def extract_fields(
     if ocr and doc.used_ocr:
         verification = pdf_text.read(pdf_path, ocr=ocr, ocr_dpi=ocr.verify_dpi)
         apply_ocr_verification(candidates, scan_numbers(verification, country_code))
+        mark_drawn_numbers(pdf_path, candidates)
         # The title gets the same treatment as the number, and for a stronger
         # reason. A misread number sends the right words to the wrong person,
         # which the recipient can see is not for them. A misread title sends
@@ -418,9 +615,13 @@ def extract_fields(
         invoice_number=_document_number(doc, profile),
         customer_name=_customer_name(doc, profile),
         invoice_date=_document_date(doc, profile),
-        total_amount=_total_amount(doc, profile) or amount_from_words(words or ""),
+        total_amount=_settled_total(
+            _total_amount(doc, profile), amount_from_words(words or "")
+        ),
         amount_words=words,
-        payment_mode=_payment_mode(doc, profile),
+        payment_mode=payment_details(method, reference),
+        payment_method=method,
+        payment_reference=reference.number if reference else None,
         document_kind=kind.name if kind else None,
         document_kind_verified=kind_verified,
         classification_error=classification_error,
