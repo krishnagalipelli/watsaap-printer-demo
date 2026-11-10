@@ -1418,10 +1418,18 @@ def test_tab_reveals_controls_below_scrolling_page(interaction_panel):
         entry.pack(fill="x", pady=5)
         entries.append(entry)
     interaction_panel.update()
-    _key(entries[-2], "<Tab>")
     last = entries[-1]
     canvas = inner.master
-    assert last.focus_get() == last
+    assert last.winfo_rooty() + last.winfo_height() > canvas.winfo_rooty() + canvas.winfo_height(), (
+        "the last field must start below the visible page, or this proves nothing")
+    # Tab is two steps: Tk picks the next field, and focus arriving there is
+    # what scrolls the page. They are checked apart because a Windows build
+    # machine may refuse real keyboard focus to a background test window --
+    # the same test passed and then failed twice on one runner image with no
+    # change to the code it covers.
+    assert entries[-2].tk_focusNext() == last
+    last.event_generate("<FocusIn>")
+    interaction_panel.update()
     assert last.winfo_rooty() >= canvas.winfo_rooty()
     assert last.winfo_rooty() + last.winfo_height() <= canvas.winfo_rooty() + canvas.winfo_height() + 1
 
