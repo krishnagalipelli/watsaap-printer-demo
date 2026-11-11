@@ -377,6 +377,14 @@ class DocumentProfile:
                     self.payment_mode_numbered_re, self.payment_mode_through_re)
         if any(p.match(line) for line in text.splitlines() for p in patterns):
             return True
+        # A cheque or draft with its number written in is a payment wherever
+        # the line starts. OCR of a receipt the printer draws as shapes puts
+        # specks of the box's border in front of it ("Ww)   Cheque Number
+        # 351768"), and every cheque receipt like that was held as a document
+        # of unknown type. The figures are required, so a letter asking for a
+        # cheque is still not one.
+        if self.payment_paper_numbered_re.search(text):
+            return True
         # In some printer drivers the amount in a neighbouring column heads
         # the visual row. Its separate payment cell still reads "Through ONLINE-UPI".
         if isinstance(document, str):
@@ -512,6 +520,12 @@ class DocumentProfile:
         # one was given: a form can print "Cheque Number :" with nothing after.
         self.payment_mode_numbered_re = re.compile(
             rf"^\s*({_alt(self.payment_modes)})\s+(?:number|no\.?|#)\s*[:\-–]?\s*\d",
+            re.IGNORECASE,
+        )
+        # The same cheque cell anywhere on its line, for _says_how_paid.
+        self.payment_paper_numbered_re = re.compile(
+            r"\b(?:cheque|chq|dd|demand\s+draft)\s+(?:number|no\b\.?|#)"
+            r"\s*[:\-–#.]?\s*\d{4,}",
             re.IGNORECASE,
         )
         # An online payment is not labelled at all on a chit receipt: the cell

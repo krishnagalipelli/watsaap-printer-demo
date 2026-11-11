@@ -73,6 +73,41 @@ class TestRecognisingTheDocument:
         assert "Date: 06-Oct-26" in job.message_preview
 
 
+class TestAChequeReceiptReadByOcr:
+    """A cheque receipt the printer draws as shapes has no "Received from"
+    on it, so what says it is a receipt is its number, the amount in words
+    and the cheque. OCR puts specks of the box's border in front of "Cheque
+    Number", and every such receipt was held as an unknown type.
+    """
+
+    ROWS = [
+        "Receipt No   CHQ4834/26   Date:   06-Nov-26   Towards   SPT27E-4",
+        "Sri/Smt/M/s . ANITHA RAMESH   Mobile: 9876543210",
+        "Rupees Two Thousand Only",
+    ]
+
+    @pytest.mark.parametrize("cheque", [
+        "Cheque Number   351768",
+        "Ww)   Cheque Number   351768",
+        "| Chq No. 351768",
+        "2,000.00   DD Number 351768",
+    ])
+    def test_it_is_a_receipt_wherever_the_cheque_line_starts(self, cheque):
+        from waprinter.extract.profile import DocumentProfile
+
+        text = "\n".join([*self.ROWS, cheque, "dated 31/10/2026 of Bank"])
+        assert DocumentProfile().kind_of(text).name == "receipt"
+
+    @pytest.mark.parametrize("line", [
+        "Please pay the dues by cheque number to be quoted on the back",
+        "Ww)   Cheque Number :",
+    ])
+    def test_a_cheque_with_no_number_is_not_a_payment(self, line):
+        from waprinter.extract.profile import DocumentProfile
+
+        assert DocumentProfile().kind_of("\n".join([*self.ROWS, line])) is None
+
+
 class TestSendingItUnderTheRightTemplate:
     def test_all_three_reach_the_sender_with_separate_templates(self, link_pipeline, receipt, notice, letter):
         from waprinter.models import SendResult, JobStatus
