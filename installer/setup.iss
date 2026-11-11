@@ -253,20 +253,52 @@ begin
   Result := '';
 end;
 
+// What provision.ps1 wrote about why it failed, or a fallback when it could
+// not write anything.
+function PrinterFailureReason: String;
+var
+  Reason: AnsiString;
+begin
+  if LoadStringFromFile(ExpandConstant('{#DataDir}\logs\provision-error.txt'), Reason) then
+    Result := Trim(String(Reason))
+  else
+    Result := '';
+  if Result = '' then
+    Result := 'Printer setup stopped without saying why.';
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
+  Details: String;
 begin
   if CurStep = ssPostInstall then
   begin
     // [Run] ignores a program's failure exit code. A failed printer creation
     // must be visible before setup offers to launch an apparently ready app.
+    // It used to be a RaiseException with one fixed sentence: the counter saw
+    // "Runtime error (at 18:851)" and a hint about Microsoft Print to PDF
+    // whatever had actually gone wrong. Now the script's own reason is shown,
+    // with the log beside it; the files are installed either way, and an
+    // existing queue from an earlier version usually still works.
     if not Exec(PowerShellPath,
       '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\provision.ps1') + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-      RaiseException('Could not start printer setup. Check PowerShell is available and run setup again.');
-    if ResultCode <> 0 then
-      RaiseException('The printer could not be created. Check that Microsoft Print to PDF is enabled, then run setup again.');
+    begin
+      Details := 'Could not start printer setup: ' + SysErrorMessage(ResultCode) +
+        #13#10#13#10 + 'Check that Windows PowerShell is available, then run setup again.';
+      Log(Details);
+      SuppressibleMsgBox(Details, mbError, MB_OK, IDOK);
+    end
+    else if ResultCode <> 0 then
+    begin
+      Details := 'The "WhatsApp Printer" queue could not be set up.' + #13#10#13#10 +
+        PrinterFailureReason + #13#10#13#10 +
+        'Fix that and run setup again. The full log is in' + #13#10 +
+        ExpandConstant('{#DataDir}\logs\provision.log');
+      Log(Details);
+      SuppressibleMsgBox(Details, mbError, MB_OK, IDOK);
+    end;
   end;
 end;
 

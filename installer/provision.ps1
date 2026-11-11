@@ -29,6 +29,13 @@
     filename. With one port, two prints in quick succession would collide; the
     agent round-robins across these and moves each file out as it lands.
 
+    Windows 10 and 11 normally use the PrintManagement cmdlets (Get-Printer,
+    Add-Printer). Those sit on a WMI provider in root\StandardCimv2 that can be
+    unregistered on an otherwise healthy machine -- every cmdlet then fails with
+    "Invalid namespace" while printing itself works. This first re-registers the
+    provider from Windows' own MOF, and if that does not bring it back, builds
+    the PDF queue by the Windows 7 route instead, which uses neither.
+
     If the XPS Document Writer has been turned off on a Windows 7 machine, no
     printer can be created and this falls back to PDF folder capture: the agent
     reads any PDF exported into the spool folder.
@@ -46,10 +53,18 @@ param(
     [string] $PrinterName = 'WhatsApp Printer',
     [string] $SpoolPath   = 'C:\ProgramData\WAPrinter\spool',
     [int]    $PortCount   = 4,
+    [string] $LogFolder   = 'C:\ProgramData\WAPrinter\logs',
     [switch] $Uninstall
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Setup runs this hidden, so whatever it printed was lost and a failure reached
+# the counter as one fixed sentence that named the wrong cause. Everything goes
+# to provision.log, and the reason for a failure to provision-error.txt, which
+# setup reads back and shows.
+$LogFile   = Join-Path $LogFolder 'provision.log'
+$ErrorFile = Join-Path $LogFolder 'provision-error.txt'
 
 # Windows 7 and 8 report 6.x. Everything that differs between the two queues
 # hangs off this one test.
@@ -70,13 +85,58 @@ function Get-PortPaths {
     1..$PortCount | ForEach-Object { Join-Path $SpoolPath "job$_.$PortExtension" }
 }
 
+function Get-WmiDriverName {
+    param([string] $Like)
+
+    # Win32_PrinterDriver names read "Microsoft Print To PDF,4,Windows x64".
+    # Asked through root\cimv2, so it answers even when the PrintManagement
+    # provider does not.
+    $drivers = @(Get-WmiObject -Class Win32_PrinterDriver -ErrorAction SilentlyContinue |
+        ForEach-Object { ($_.Name -split ',')[0] })
+    return ($drivers | Where-Object { $_ -like $Like } | Select-Object -First 1)
+}
+
 function Get-XpsDriverName {
     # Windows 7 calls it "Microsoft XPS Document Writer"; 8 and later ship a v4
     # driver under a longer name. Ask the spooler rather than hardcoding either.
-    $drivers = @(Get-WmiObject -Class Win32_PrinterDriver -ErrorAction SilentlyContinue |
-        ForEach-Object { ($_.Name -split ',')[0] })
-    return ($drivers | Where-Object { $_ -like 'Microsoft XPS Document Writer*' } |
-        Select-Object -First 1)
+    return (Get-WmiDriverName -Like 'Microsoft XPS Document Writer*')
+}
+
+function Test-PrintManagement {
+    # Get-Printer with -ErrorAction SilentlyContinue returns nothing both when
+    # there is no such printer and when the provider is missing, which is how
+    # a broken provider read as "Microsoft Print To PDF is not present".
+    try {
+        Get-Printer -ErrorAction Stop | Out-Null
+        return $true
+    } catch {
+        Write-Warning "The PrintManagement cmdlets do not work here ($_)"
+        return $false
+    }
+}
+
+function Repair-PrintManagement {
+    # Re-registers the provider from the MOF Windows itself ships. It changes
+    # nothing else, and is the documented fix for "Invalid namespace" from
+    # Get-Printer.
+    $wbem = Join-Path $env:SystemRoot 'System32\wbem'
+    $mof  = Join-Path $wbem 'PrintManagementProvider.mof'
+    if (-not (Test-Path $mof)) {
+        Write-Warning "$mof is missing, so the provider cannot be re-registered."
+        return $false
+    }
+    Write-Host "Re-registering the PrintManagement provider from $mof"
+    try {
+        & (Join-Path $wbem 'mofcomp.exe') $mof 2>&1 | ForEach-Object { Write-Host "  $_" }
+        $mfl = Join-Path $wbem (Join-Path ([Globalization.CultureInfo]::CurrentUICulture.Name) 'PrintManagementProvider.mfl')
+        if (Test-Path $mfl) {
+            & (Join-Path $wbem 'mofcomp.exe') $mfl 2>&1 | ForEach-Object { Write-Host "  $_" }
+        }
+    } catch {
+        Write-Warning "mofcomp failed: $_"
+        return $false
+    }
+    return (Test-PrintManagement)
 }
 
 function Add-SpoolerType {
@@ -239,7 +299,7 @@ function New-LegacyPrinter {
 
     throw ("The queue '$PrinterName' could not be created on driver '$Driver' " +
            "and port '$Port'. Check that the Print Spooler service is running " +
-           "and that the XPS Document Writer is installed.")
+           "and that the driver is installed.")
 }
 
 function Install-LegacyQueue {
@@ -253,6 +313,27 @@ function Install-LegacyQueue {
         Write-Host "PDF folder capture ready instead: $SpoolPath"
         return
     }
+    Install-ClassicQueue -Driver $driver
+}
+
+function Install-ClassicPdfQueue {
+    # Windows 10 and 11 whose PrintManagement provider is broken: the same PDF
+    # queue as Install-ModernQueue, made the way Windows 7 makes one.
+    $driver = Get-WmiDriverName -Like $PdfDriver
+    if (-not $driver) {
+        throw ("The driver '$PdfDriver' is not installed. Turn on 'Microsoft " +
+               "Print to PDF' in Windows Features (optionalfeatures.exe) and run " +
+               "setup again.")
+    }
+    Install-ClassicQueue -Driver $driver
+}
+
+function Install-ClassicQueue {
+    # Ports through the Local Port monitor, the queue through Win32_Printer:
+    # neither needs the PrintManagement cmdlets.
+    param([string] $Driver)
+
+    $driver = $Driver
     Write-Host "Using the inbox driver '$driver'"
 
     $ports = @(Get-PortPaths)
@@ -272,7 +353,9 @@ function Install-LegacyQueue {
     }
 
     $existing = Get-WmiObject -Class Win32_Printer -Filter "Name='$PrinterName'" -ErrorAction SilentlyContinue
-    if ($existing) {
+    if ($existing -and $existing.DriverName -eq $driver -and $existing.PortName -eq $ports[0]) {
+        Write-Host "Printer '$PrinterName' is already set up on $($ports[0])"
+    } elseif ($existing) {
         Write-Host "Printer '$PrinterName' already exists; repointing it."
         $existing.DriverName = $driver
         $existing.PortName   = $ports[0]
@@ -282,15 +365,100 @@ function Install-LegacyQueue {
         New-LegacyPrinter -Driver $driver -Port $ports[0]
     }
 
+    if (-not $Legacy) { Enable-JobTitleLog }
+
     Write-Host ''
     Write-Host "Done. '$PrinterName' is now in the Windows print dialog." -ForegroundColor Green
 }
 
-function Install-ModernQueue {
-    if (-not (Get-PrinterDriver -Name $PdfDriver -ErrorAction SilentlyContinue)) {
-        throw "The inbox driver '$PdfDriver' is not present. Enable the " +
-              "'Microsoft Print to PDF' Windows feature and re-run."
+function Enable-JobTitleLog {
+    Write-Host 'Enabling the PrintService operational log (for job titles)'
+    try {
+        wevtutil sl Microsoft-Windows-PrintService/Operational /enabled:true | Out-Null
+    } catch {
+        Write-Warning "Could not enable the PrintService log: $_"
+        Write-Warning 'Capture still works; jobs will just have no document title.'
     }
+}
+
+function Start-Spooler {
+    # Every route below goes through the spooler. Stopped, the driver check
+    # finds nothing and setup blamed Microsoft Print to PDF for it.
+    $service = Get-Service -Name Spooler
+    if ($service.Status -eq 'Running') { return }
+    $mode = (Get-WmiObject -Class Win32_Service -Filter "Name='Spooler'").StartMode
+    if ($mode -eq 'Disabled') {
+        throw ("The Print Spooler service is disabled, so no printer can be " +
+               "added. Set it to Automatic in services.msc and run setup again.")
+    }
+    Write-Host "The Print Spooler is $($service.Status); starting it"
+    Start-Service -Name Spooler
+    for ($attempt = 1; $attempt -le 15; $attempt++) {
+        if ((Get-Service -Name Spooler).Status -eq 'Running') { Start-Sleep -Seconds 2; return }
+        Start-Sleep -Seconds 1
+    }
+    throw 'The Print Spooler service would not start. Restart Windows and run setup again.'
+}
+
+function Install-PdfDriver {
+    if (Get-PrinterDriver -Name $PdfDriver -ErrorAction SilentlyContinue) { return }
+
+    # The driver package stays in the driver store when the queue that used
+    # it is deleted, so adding it back is quick and usually all that is needed.
+    Write-Host "The driver '$PdfDriver' is not installed; adding it from the driver store"
+    try { Add-PrinterDriver -Name $PdfDriver } catch { Write-Warning "Add-PrinterDriver: $_" }
+    if (Get-PrinterDriver -Name $PdfDriver -ErrorAction SilentlyContinue) { return }
+
+    Write-Host "Turning on the 'Microsoft Print to PDF' Windows feature"
+    try {
+        Enable-WindowsOptionalFeature -Online -FeatureName 'Printing-PrintToPDFServices-Features' `
+            -All -NoRestart | Out-Null
+    } catch {
+        Write-Warning "Enable-WindowsOptionalFeature: $_"
+    }
+    if (Get-PrinterDriver -Name $PdfDriver -ErrorAction SilentlyContinue) { return }
+
+    throw ("The driver '$PdfDriver' is not installed and could not be added. Turn " +
+           "on 'Microsoft Print to PDF' in Windows Features (optionalfeatures.exe) " +
+           "and run setup again.")
+}
+
+function Clear-QueuedJobs {
+    $jobs = @(Get-PrintJob -PrinterName $PrinterName -ErrorAction SilentlyContinue)
+    if (-not $jobs.Count) { return }
+    Write-Warning ("Removing $($jobs.Count) print job(s) stuck in '$PrinterName'; " +
+                   'print those receipts again once setup finishes.')
+    foreach ($job in $jobs) {
+        try { Remove-PrintJob -InputObject $job } catch { Write-Warning "Remove-PrintJob: $_" }
+    }
+    Start-Sleep -Seconds 2
+}
+
+function Reset-ModernPrinter {
+    param([string] $Port)
+
+    # Installing over an earlier version lands here. A queue holding a job the
+    # spooler cannot finish refuses to change port or driver, so clear it and
+    # try again, and as a last resort build the queue afresh.
+    try {
+        Set-Printer -Name $PrinterName -PortName $Port -DriverName $PdfDriver
+        return
+    } catch {
+        Write-Warning "Could not repoint '$PrinterName' ($_)"
+    }
+    Clear-QueuedJobs
+    try {
+        Set-Printer -Name $PrinterName -PortName $Port -DriverName $PdfDriver
+        return
+    } catch {
+        Write-Warning "Still could not repoint it ($_); creating it again"
+    }
+    Remove-Printer -Name $PrinterName
+    Add-Printer -Name $PrinterName -DriverName $PdfDriver -PortName $Port
+}
+
+function Install-ModernQueue {
+    Install-PdfDriver
 
     $ports = @(Get-PortPaths)
     foreach ($port in $ports) {
@@ -302,37 +470,51 @@ function Install-ModernQueue {
         }
     }
 
-    if (Get-Printer -Name $PrinterName -ErrorAction SilentlyContinue) {
-        Write-Host "Printer '$PrinterName' already exists; repointing it."
-        Set-Printer -Name $PrinterName -PortName $ports[0] -DriverName $PdfDriver
-    } else {
+    $printer = Get-Printer -Name $PrinterName -ErrorAction SilentlyContinue
+    if (-not $printer) {
         Write-Host "Creating printer '$PrinterName'"
         Add-Printer -Name $PrinterName -DriverName $PdfDriver -PortName $ports[0]
+    } elseif ($printer.DriverName -eq $PdfDriver -and $printer.PortName -eq $ports[0]) {
+        # The usual upgrade. Touching a queue that is already right only gives
+        # it a chance to fail.
+        Write-Host "Printer '$PrinterName' is already set up on $($ports[0])"
+    } else {
+        Write-Host ("Printer '$PrinterName' is on '$($printer.DriverName)' / " +
+                    "'$($printer.PortName)'; repointing it.")
+        Reset-ModernPrinter -Port $ports[0]
     }
 
     # Print directly rather than holding jobs in the queue, so files reach the
     # spool folder as soon as rendering finishes.
-    Set-PrintConfiguration -PrinterName $PrinterName -PaperSize A4 -ErrorAction SilentlyContinue
-    Set-Printer -Name $PrinterName -KeepPrintedJobs $false -ErrorAction SilentlyContinue
-
-    Write-Host 'Enabling the PrintService operational log (for job titles)'
-    try {
-        wevtutil sl Microsoft-Windows-PrintService/Operational /enabled:true | Out-Null
-    } catch {
-        Write-Warning "Could not enable the PrintService log: $_"
-        Write-Warning 'Capture still works; jobs will just have no document title.'
+    # Preferences only: the queue works without them, so neither is a reason
+    # to fail setup. A CIM error is terminating whatever -ErrorAction says.
+    try { Set-PrintConfiguration -PrinterName $PrinterName -PaperSize A4 } catch {
+        Write-Warning "Could not set A4 paper: $_"
     }
+    try { Set-Printer -Name $PrinterName -KeepPrintedJobs $false } catch {
+        Write-Warning "Could not turn off keeping printed jobs: $_"
+    }
+
+    Enable-JobTitleLog
 
     Write-Host ''
     Write-Host "Done. '$PrinterName' is now in the Windows print dialog." -ForegroundColor Green
 }
 
 function Install-WhatsAppPrinter {
+    Start-Spooler
     New-SpoolFolder
-    if ($Legacy) { Install-LegacyQueue } else { Install-ModernQueue }
+    if ($Legacy) {
+        Install-LegacyQueue
+    } elseif ((Test-PrintManagement) -or (Repair-PrintManagement)) {
+        Install-ModernQueue
+    } else {
+        Write-Warning 'Creating the queue without the PrintManagement cmdlets.'
+        Install-ClassicPdfQueue
+    }
 }
 
-function Uninstall-LegacyQueue {
+function Uninstall-ClassicQueue {
     $existing = Get-WmiObject -Class Win32_Printer -Filter "Name='$PrinterName'" -ErrorAction SilentlyContinue
     if ($existing) {
         Write-Host "Removing printer '$PrinterName'"
@@ -365,7 +547,7 @@ function Uninstall-ModernQueue {
 }
 
 function Uninstall-WhatsAppPrinter {
-    if ($Legacy) { Uninstall-LegacyQueue } else { Uninstall-ModernQueue }
+    if ($Legacy -or -not (Test-PrintManagement)) { Uninstall-ClassicQueue } else { Uninstall-ModernQueue }
 
     Write-Host ''
     Write-Host 'Printer removed.' -ForegroundColor Green
@@ -373,5 +555,28 @@ function Uninstall-WhatsAppPrinter {
     Write-Host 'Delete C:\ProgramData\WAPrinter by hand if you want them gone.'
 }
 
-Assert-Administrator
-if ($Uninstall) { Uninstall-WhatsAppPrinter } else { Install-WhatsAppPrinter }
+$transcribing = $false
+try {
+    New-Item -ItemType Directory -Path $LogFolder -Force | Out-Null
+    Remove-Item -Path $ErrorFile -Force -ErrorAction SilentlyContinue
+    Start-Transcript -Path $LogFile -Append -Force | Out-Null
+    $transcribing = $true
+} catch {
+    Write-Warning "No log this time: $_"
+}
+
+$exitCode = 0
+try {
+    Assert-Administrator
+    if ($Uninstall) { Uninstall-WhatsAppPrinter } else { Install-WhatsAppPrinter }
+} catch {
+    $exitCode = 1
+    $reason = "$($_.Exception.Message)".Trim()
+    Write-Host "FAILED: $reason" -ForegroundColor Red
+    Write-Host ($_.InvocationInfo.PositionMessage)
+    # ASCII: setup reads this back as a plain string.
+    try { Set-Content -Path $ErrorFile -Value $reason -Encoding ASCII } catch { }
+}
+
+if ($transcribing) { try { Stop-Transcript | Out-Null } catch { } }
+exit $exitCode
