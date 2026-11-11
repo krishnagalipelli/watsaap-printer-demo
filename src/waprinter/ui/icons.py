@@ -131,11 +131,13 @@ def logo(master: tk.Misc, width: int) -> tk.PhotoImage | str:
 
             source = fitz.Pixmap(str(ASSETS / "logo.png"))
             wide = min(key[2], source.width)
-            scaled = fitz.Pixmap(source, wide, round(wide * source.height / source.width))
-            # A str, not bytes: tkinter hands bytes to Tk as a byte array,
-            # which an older Tk may read as raw image data rather than base64.
-            # Suspected cause of a blank logo on the Python 3.8 (Windows 7)
-            # build; the logo test reports the real error if it is not.
+            # The clip is passed even though it is None: PyMuPDF 1.24.11, the
+            # last with a 32-bit Python 3.8 wheel and so the one the Windows 7
+            # build ships, unpacks a three-argument call as if it were four
+            # and raises, which left that build without a logo.
+            scaled = fitz.Pixmap(
+                source, wide, round(wide * source.height / source.width), None
+            )
             data = base64.b64encode(scaled.tobytes("png")).decode("ascii")
             _cache[key] = tk.PhotoImage(master=master, data=data)
         except Exception:
