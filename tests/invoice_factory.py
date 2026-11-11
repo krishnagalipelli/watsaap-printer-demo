@@ -126,8 +126,10 @@ def build_chit_receipt(spec: ChitReceiptSpec, out_path: Path) -> Path:
         text(name_x + 62, 170, spec.member_name)
     else:
         text(name_x, 170, f"{spec.member_label} {spec.member_name}")
-    if spec.member_phone:
-        text(LEFT + 240, 170, f"{spec.phone_label}   {spec.member_phone}")
+    # None leaves the row out; "" prints the label with nothing after it, as the
+    # client's software does for a member with no mobile on file.
+    if spec.member_phone is not None:
+        text(LEFT + 240, 170, f"{spec.phone_label}   {spec.member_phone}".rstrip())
 
     if spec.preprinted_wording:
         text(LEFT, 188, "an amount of Rupees")

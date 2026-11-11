@@ -66,6 +66,14 @@ class TestChitFundReceipt:
         assert "9000012345" not in name
         assert "Mobile" not in name
 
+    def test_an_empty_mobile_label_is_not_part_of_the_name(self, receipt):
+        # A member with no mobile on file still gets "Mobile :" printed beside
+        # the name, with nothing after it. The trailing colon was trimmed
+        # before labels were looked for, so the member was "ANITHA RAMESH
+        # Mobile".
+        fields = extract_fields(receipt(ChitReceiptSpec(member_phone="")))
+        assert fields.customer_name == "ANITHA RAMESH"
+
     def test_a_receipt_with_no_mobile_yields_no_recipient(self, receipt):
         fields = extract_fields(receipt(ChitReceiptSpec(member_phone=None)))
         high = [c for c in fields.candidates if c.confidence is Confidence.HIGH]

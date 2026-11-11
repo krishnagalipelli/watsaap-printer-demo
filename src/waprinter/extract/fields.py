@@ -551,8 +551,13 @@ def _trim_at_next_label(text: str, profile: DocumentProfile) -> str:
     colon. On a two-column invoice the "Bill To" row also holds
     "Invoice No: INV-2291" from the right-hand column, and without both of
     those the invoice number was returned as the customer's name.
+
+    Only the front is trimmed before looking. A member with no mobile on file
+    still has "Mobile :" printed beside their name; trimming the colon off the
+    end left a bare "Mobile" that no longer read as a label, and the member was
+    greeted as "SABERA Mobile".
     """
-    cleaned = text.strip(" .:-–\t")
+    cleaned = text.lstrip(" .:-–\t").rstrip()
     cut = len(cleaned)
     for label in (*profile.phone_labels, *profile.not_phone_labels):
         m = re.search(
