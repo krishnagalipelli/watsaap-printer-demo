@@ -285,8 +285,9 @@ begin
       '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\provision.ps1') + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     begin
-      Details := 'Could not start printer setup: ' + SysErrorMessage(ResultCode) +
-        #13#10#13#10 + 'Check that Windows PowerShell is available, then run setup again.';
+      // No line may start with "#": the preprocessor reads it as a directive.
+      Details := 'Could not start printer setup: ' + SysErrorMessage(ResultCode) + #13#10#13#10 +
+        'Check that Windows PowerShell is available, then run setup again.';
       Log(Details);
       SuppressibleMsgBox(Details, mbError, MB_OK, IDOK);
     end
