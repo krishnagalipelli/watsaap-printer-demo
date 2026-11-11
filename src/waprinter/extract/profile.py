@@ -359,7 +359,19 @@ class DocumentProfile:
         # the same shape heads other paperwork. So a number not ending CR has
         # to come with how it was paid: a dues letter with a reference and a
         # sum in words must not be thanked for a payment.
+        #
+        # Or the form itself says the number is a receipt's. A receipt the
+        # printer draws as shapes is read by OCR, and OCR reads the whole
+        # printed form, labels included: "Receipt No   CHQ4551/26". That label
+        # is on every one of these receipts and comes back the same on both
+        # OCR passes, where how it was paid does not -- the cheque number
+        # lands at the far end of its row ("Cheque Number   dated 31/10/2026
+        # of Bank   351768") and "Cash" can be missed altogether -- so every
+        # cheque and online receipt printed that way was held as a document
+        # of unknown type. The label has to be followed by a number of the
+        # form's own shape, so "receipt no." in a sentence is not one.
         numbered = (re.search(r"\b[A-Z]{0,2}CR\d{1,8}/\d{2,4}\b", text, re.I)
+                    or self.receipt_number_label_re.search(text)
                     or (any(p.search(text) for p in self.document_number_pattern_res)
                         and self._says_how_paid(text, document)))
         chit = (numbered
@@ -520,6 +532,13 @@ class DocumentProfile:
         # one was given: a form can print "Cheque Number :" with nothing after.
         self.payment_mode_numbered_re = re.compile(
             rf"^\s*({_alt(self.payment_modes)})\s+(?:number|no\.?|#)\s*[:\-–]?\s*\d",
+            re.IGNORECASE,
+        )
+        # The form's own label on a receipt's number, for kind_of: "Receipt
+        # No   CHQ4551/26", as OCR reads a receipt the printer draws as shapes.
+        self.receipt_number_label_re = re.compile(
+            r"\b(?:receipt|rcpt)\s*(?:no\b\.?|number|#)\s*[:\-–#.]?\s*"
+            r"[A-Z]{2,6}\d{1,8}/\d{2,4}\b",
             re.IGNORECASE,
         )
         # The same cheque cell anywhere on its line, for _says_how_paid.

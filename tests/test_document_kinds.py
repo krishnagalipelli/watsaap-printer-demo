@@ -21,6 +21,7 @@ from invoice_factory import (
     build_removal_letter,
     build_removal_notice,
 )
+from conftest import needs_tesseract
 
 
 @pytest.fixture
@@ -80,8 +81,10 @@ class TestAChequeReceiptReadByOcr:
     Number", and every such receipt was held as an unknown type.
     """
 
+    # The number without the form's "Receipt No" label, which is enough on
+    # its own (TestAReceiptTheFormLabelsAsOne). These are about the cheque.
     ROWS = [
-        "Receipt No   CHQ4834/26   Date:   06-Nov-26   Towards   SPT27E-4",
+        "CHQ4834/26   Date:   06-Nov-26   Towards   SPT27E-4",
         "Sri/Smt/M/s . ANITHA RAMESH   Mobile: 9876543210",
         "Rupees Two Thousand Only",
     ]
@@ -106,6 +109,198 @@ class TestAChequeReceiptReadByOcr:
         from waprinter.extract.profile import DocumentProfile
 
         assert DocumentProfile().kind_of("\n".join([*self.ROWS, line])) is None
+
+
+class TestAReceiptTheFormLabelsAsOne:
+    """What OCR reads of a cheque receipt the printer draws as shapes, as
+    taken from a real Srinidhi receipt redrawn that way (names changed).
+
+    OCR reads the whole printed form, labels included. The cheque number
+    lands at the far end of its row, so neither "Cheque Number 351768" nor a
+    line opening with the mode is there, and the receipt was held as a
+    document of unknown type. "Receipt No" in front of the number is.
+    """
+
+    ROWS = [
+        "Receipt No   CHQ4551/26   Date   31-Oct-26   Towards   SPT26E-27",
+        "'@)   Received from   Sri/Smt/M/s . ANITHA RAMESH   Mobile:   9876543210",
+        "Rupees Two Thousand Only",
+        ")   Mode of Paviniens   Cheque Number   dated 31/10/2026 of Bank   351768",
+        "USERID:   ashok   Cashier/Receiving Clerk",
+    ]
+
+    def test_it_is_a_receipt(self):
+        from waprinter.extract.profile import DocumentProfile
+
+        assert DocumentProfile().kind_of("\n".join(self.ROWS)).name == "receipt"
+
+    @pytest.mark.parametrize("label", [
+        "Receipt No   UPI88/26", "Receipt No.: SKCHQ12/26", "RECEIPT NUMBER CHQ4551/2026",
+    ])
+    def test_whatever_the_number_starts_with(self, label):
+        from waprinter.extract.profile import DocumentProfile
+
+        rows = [label, *self.ROWS[1:]]
+        assert DocumentProfile().kind_of("\n".join(rows)).name == "receipt"
+
+    @pytest.mark.parametrize("first", [
+        # A reference in a sentence, with nothing of the form's shape after it.
+        "Please quote your receipt no. when you write to us",
+        "Receipt No   pending",
+    ])
+    def test_the_label_alone_is_not_enough(self, first):
+        from waprinter.extract.profile import DocumentProfile
+
+        rows = [first, *self.ROWS[1:3], "USERID:   ashok"]
+        assert DocumentProfile().kind_of("\n".join(rows)) is None
+
+    def test_a_notice_quoting_a_receipt_is_still_not_a_receipt(self):
+        from waprinter.extract.profile import DocumentProfile
+
+        rows = ["REMOVAL NOTICE", "To,", "ANITHA RAMESH",
+                "Your last payment, Receipt No CHQ4551/26, Rupees Two Thousand Only"]
+        assert DocumentProfile().kind_of("\n".join(rows)).name == "removal_notice"
+        assert DocumentProfile().kind_of("\n".join(rows[1:])) is None
+
+    def test_without_the_amount_in_words_it_is_not_a_receipt(self):
+        from waprinter.extract.profile import DocumentProfile
+
+        rows = [self.ROWS[0], self.ROWS[1], self.ROWS[4]]
+        assert DocumentProfile().kind_of("\n".join(rows)) is None
+
+
+@needs_tesseract
+class TestAChequeReceiptDrawnAsShapesIsSent:
+    """End to end: the factory's cheque receipt, redrawn as shapes the way
+    Microsoft Print To PDF delivers the chit software's receipts."""
+
+    def test_it_is_recognised_on_both_ocr_passes(self, link_pipeline, tmp_path):
+        import fitz
+
+        source = build_chit_receipt(ChitReceiptSpec(
+            receipt_number="CHQ4551/26",
+            receipt_date="31-Oct-26",
+            payment_mode="Cheque Number 351768\ndated 31/10/2026 of Bank\nSBI-PDPL",
+        ), tmp_path / "cheque.pdf")
+        with fitz.open(source) as pdf:
+            svg = pdf[0].get_svg_image(text_as_path=True)
+        with fitz.open("svg", svg.encode()) as picture:
+            shaped = fitz.open("pdf", picture.convert_to_pdf())
+        drawn = tmp_path / "cheque-shapes.pdf"
+        shaped.save(drawn)
+        shaped.close()
+
+        job = link_pipeline.process_document(drawn)[0]
+
+        assert job.fields.used_ocr
+        assert job.fields.document_kind == "receipt", job.hold_reason
+        assert job.fields.document_kind_verified, job.hold_reason
+        assert "could not be identified" not in (job.hold_reason or "")
+        assert "351768" in (job.fields.payment_mode or ""), job.fields.payment_mode
+
+
+class TestTheChequeNumberLaterOnItsRow:
+    """OCR of a drawn cheque receipt reads the box as one row in whatever
+    order the shapes come, so the number is not straight after its label."""
+
+    @staticmethod
+    def read(tmp_path, *cells):
+        import fitz
+
+        from waprinter.extract import pdf_text
+
+        pdf = fitz.open()
+        page = pdf.new_page()
+        for x, words in cells:
+            page.insert_text((x, 300), words, fontsize=10)
+        path = tmp_path / "row.pdf"
+        pdf.save(path)
+        pdf.close()
+        return pdf_text.read(path)
+
+    def test_the_number_after_the_cheque_date(self, tmp_path):
+        from waprinter.extract.fields import _payment_reference
+
+        doc = self.read(tmp_path, (40, "Cheque Number"), (160, "dated 31/10/2026 of Bank"),
+                        (360, "351768"))
+        reference = _payment_reference(doc)
+        assert reference.number == "351768"
+        assert reference.paper == "Cheque"
+        assert reference.paid_on == "31/10/2026"
+
+    @pytest.mark.parametrize("cells", [
+        # Two figures: which one is the cheque is a guess, so neither.
+        [(40, "Cheque Number"), (160, "dated 31/10/2026"), (300, "351768"), (400, "2,018.00 4417")],
+        # A mobile number is never a cheque number.
+        [(40, "Cheque Number"), (160, "Mobile: 9876543210")],
+        # Only the date.
+        [(40, "Cheque Number"), (160, "dated 31/10/2026 of Bank")],
+    ])
+    def test_nothing_is_guessed(self, tmp_path, cells):
+        from waprinter.extract.fields import _payment_reference
+
+        assert _payment_reference(self.read(tmp_path, *cells)) is None
+
+
+@needs_tesseract
+class TestHowItWasPaidFromTheSecondRead:
+    """The first OCR read of a drawn cash receipt can lose "Cash" altogether,
+    where the second, at a higher resolution, reads it. The receipt message
+    needs the mode, so every such receipt was held for it."""
+
+    @pytest.fixture
+    def drawn_cash(self, tmp_path):
+        import fitz
+
+        source = build_chit_receipt(ChitReceiptSpec(), tmp_path / "cash.pdf")
+        with fitz.open(source) as pdf:
+            svg = pdf[0].get_svg_image(text_as_path=True)
+        with fitz.open("svg", svg.encode()) as picture:
+            shaped = fitz.open("pdf", picture.convert_to_pdf())
+        drawn = tmp_path / "cash-shapes.pdf"
+        shaped.save(drawn)
+        shaped.close()
+        return drawn
+
+    @staticmethod
+    def first_read_loses(monkeypatch, word):
+        from waprinter.extract import fields, pdf_text
+
+        real = pdf_text.read
+
+        def read(path, ocr=None, ocr_dpi=None):
+            doc = real(path, ocr=ocr, ocr_dpi=ocr_dpi)
+            if ocr_dpi is None:
+                for page in doc.pages:
+                    page.lines = [l for l in page.lines if l.text.strip().lower() != word]
+            return doc
+
+        monkeypatch.setattr(fields.pdf_text, "read", read)
+
+    def test_the_mode_comes_from_the_second_read(self, drawn_cash, monkeypatch):
+        from waprinter.config import Settings
+        from waprinter.extract import extract_fields
+
+        self.first_read_loses(monkeypatch, "cash")
+        fields = extract_fields(drawn_cash, ocr=Settings().ocr())
+        assert fields.used_ocr
+        assert fields.payment_mode == "Cash"
+
+    def test_what_the_first_read_found_is_kept(self, drawn_cash, monkeypatch):
+        from waprinter.config import Settings
+        from waprinter.extract import extract_fields, fields as module
+
+        seen = []
+        real = module._payment_mode
+
+        def counted(doc, profile):
+            seen.append(doc)
+            return real(doc, profile)
+
+        monkeypatch.setattr(module, "_payment_mode", counted)
+        fields = extract_fields(drawn_cash, ocr=Settings().ocr())
+        assert fields.payment_mode == "Cash"
+        assert len(seen) == 1, "the second read was consulted when nothing was missing"
 
 
 class TestSendingItUnderTheRightTemplate:

@@ -198,17 +198,40 @@ def _payment_reference(doc: pdf_text.Document) -> PaymentReference | None:
         box = "\n".join([text[label.start():], *rows[i + 1 : i + _PAYMENT_BOX_ROWS]])
         after = box[label.end() - label.start():]
         value = _REFERENCE_VALUE.match(after)
-        if not value or not 4 <= len(value.group(1)) <= 30:
+        number = value.group(1) if value else ""
+        if not 4 <= len(number) <= 30:
+            number = _number_later_on_the_row(text[label.end():])
+        if not number:
             continue
         paid_on = _PAID_ON.search(box)
         bank = _BANK.search(box)
         return PaymentReference(
-            number=value.group(1),
+            number=number,
             paid_on=paid_on.group(1) if paid_on else None,
             bank=bank.group(1) if bank else None,
             paper=_PAPER.get(re.sub(r"\s+", " ", label.group(1).lower())),
         )
     return None
+
+
+# A number standing on its own: not the tail of a date, a figure or a word.
+_STANDALONE_NUMBER = re.compile(r"(?<![\w/.,\-])(\d{4,30})(?![\w/.,\-])")
+
+
+def _number_later_on_the_row(rest: str) -> str:
+    """The payment's number when it is not printed straight after its label.
+
+    OCR of a receipt the printer draws as shapes reads the cheque box as one
+    row, in whatever order the shapes come: "Cheque Number   dated 31/10/2026
+    of Bank   351768". The number is the figure on that row once the date of
+    the cheque is taken out -- never one from the rows below it, where the
+    amounts are, and never a mobile number.
+    """
+    rest = _PAID_ON.sub(" ", rest)
+    for start, end in reversed(phone_spans(rest)):
+        rest = rest[:start] + " " * (end - start) + rest[end:]
+    found = _STANDALONE_NUMBER.findall(rest)
+    return found[0] if len(found) == 1 else ""
 
 
 def payment_details(method: str | None, reference: PaymentReference | None) -> str | None:
@@ -597,6 +620,18 @@ def extract_fields(
         verification = pdf_text.read(pdf_path, ocr=ocr, ocr_dpi=ocr.verify_dpi)
         apply_ocr_verification(candidates, scan_numbers(verification, country_code))
         mark_drawn_numbers(pdf_path, candidates)
+        # How the member paid, from the second read when the first found
+        # nothing. On a receipt the printer draws as shapes the first read
+        # can lose "Cash" altogether, or the cheque number, and the receipt
+        # message needs the payment mode: every cash and cheque receipt
+        # printed that way was held for it. Only ever to fill a gap -- never
+        # to replace what the first read found -- and never for the
+        # recipient, which the two reads still have to agree on.
+        if reference is None:
+            reference = _payment_reference(verification)
+        if method is None:
+            method = _payment_mode(verification, profile) or (
+                reference.paper if reference else None)
         # The title gets the same treatment as the number, and for a stronger
         # reason. A misread number sends the right words to the wrong person,
         # which the recipient can see is not for them. A misread title sends
