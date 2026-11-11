@@ -301,7 +301,7 @@ class TeachWindow(tk.Toplevel):
         page = self._fitz[index]
         matrix = fitz.Matrix(ZOOM, ZOOM)
         pixmap = page.get_pixmap(matrix=matrix)
-        self._image = tk.PhotoImage(data=base64.b64encode(pixmap.tobytes("png")))
+        self._image = tk.PhotoImage(data=base64.b64encode(pixmap.tobytes("png")).decode("ascii"))
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor="nw", image=self._image)
         self.canvas.configure(scrollregion=(0, 0, pixmap.width, pixmap.height))

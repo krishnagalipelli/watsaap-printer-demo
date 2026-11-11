@@ -85,7 +85,7 @@ def _draw(master: tk.Misc, name: str, colour: str, pixels: int, before: int,
         with fitz.open(stream=svg.encode("utf-8"), filetype="svg") as doc:
             scale = pixels / 24
             pixmap = doc[0].get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=True)
-            data = base64.b64encode(pixmap.tobytes("png"))
+            data = base64.b64encode(pixmap.tobytes("png")).decode("ascii")
         return tk.PhotoImage(master=master, data=data)
     except Exception:
         log.debug("could not draw the %s icon", name, exc_info=True)
@@ -132,7 +132,11 @@ def logo(master: tk.Misc, width: int) -> tk.PhotoImage | str:
             source = fitz.Pixmap(str(ASSETS / "logo.png"))
             wide = min(key[2], source.width)
             scaled = fitz.Pixmap(source, wide, round(wide * source.height / source.width))
-            data = base64.b64encode(scaled.tobytes("png"))
+            # A str, not bytes: tkinter hands bytes to Tk as a byte array,
+            # which an older Tk may read as raw image data rather than base64.
+            # Suspected cause of a blank logo on the Python 3.8 (Windows 7)
+            # build; the logo test reports the real error if it is not.
+            data = base64.b64encode(scaled.tobytes("png")).decode("ascii")
             _cache[key] = tk.PhotoImage(master=master, data=data)
         except Exception:
             log.debug("could not draw the logo", exc_info=True)

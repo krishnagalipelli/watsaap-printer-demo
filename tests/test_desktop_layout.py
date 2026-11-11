@@ -1564,13 +1564,20 @@ class TestTheLogo:
         assert kind == 1
         assert {16, 20, 24, 32, 40, 48, 64, 256} <= sizes
 
-    def test_the_side_bar_shows_the_logo_at_its_width(self, window):
+    def test_the_side_bar_shows_the_logo_at_its_width(self, window, caplog):
+        import logging
         from tkinter import ttk
 
         from waprinter.ui import desktop, icons, theme
 
         image = icons.logo(window.root, desktop.SIDEBAR_WIDTH - 34)
-        assert image, "the logo could not be drawn"
+        if not image:
+            # The failure is cached and only logged at debug: draw it again
+            # with the log captured, so the run says why.
+            icons._cache.clear()
+            with caplog.at_level(logging.DEBUG, logger=icons.log.name):
+                icons.logo(window.root, desktop.SIDEBAR_WIDTH - 34)
+            pytest.fail("the logo could not be drawn:\n" + caplog.text)
         expected = theme.px(window.root, desktop.SIDEBAR_WIDTH - 34)
         assert abs(image.width() - expected) <= 1
         labels = [w for w in _descendants(window.root)
