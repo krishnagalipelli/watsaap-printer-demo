@@ -69,6 +69,7 @@ class Runner:
         self.watcher = SpoolWatcher(
             spool=self.paths.spool,
             inbox=self.paths.inbox,
+            staging=self.paths.claimed,
             on_job=self._handle,
             operation_lock=self.pipeline.operation_lock,
             on_unreadable=self._handle_unreadable,

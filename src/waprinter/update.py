@@ -226,8 +226,24 @@ def download(release: Release, client: httpx.Client | None = None) -> Path:
     return target
 
 
+# Tells setup to start the app again when it has finished. Setup stops the
+# running copy before it replaces the files, and nothing brought it back: the
+# entry that starts the app after an install by hand is skipped when setup is
+# silent, and /RESTARTAPPLICATIONS only restarts programs registered with the
+# Windows Restart Manager, which this one is not. So a counter that updated
+# itself stopped capturing prints until somebody next signed in. Passed only
+# from here, so a silent install pushed by an engineer still starts nothing.
+RELAUNCH_ARGUMENT = "/RELAUNCH=1"
+
+
 def install(installer: Path) -> None:
-    """Wait for installation; the caller excludes document work throughout."""
+    """Wait for installation; the caller excludes document work throughout.
+
+    Started as it is, not elevated: setup asks Windows for administrator
+    rights itself, and it needs to have been started as the signed-in user
+    for the relaunch to happen in that user's session rather than the
+    administrator's.
+    """
     if sys.platform != "win32":
         raise RuntimeError("Updates can only be installed on Windows.")
     process = subprocess.Popen(
@@ -237,6 +253,7 @@ def install(installer: Path) -> None:
             "/SUPPRESSMSGBOXES",
             "/NORESTART",
             "/RESTARTAPPLICATIONS",
+            RELAUNCH_ARGUMENT,
         ],
         close_fds=True,
     )

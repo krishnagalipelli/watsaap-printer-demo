@@ -430,7 +430,8 @@ the updater checks again after download and excludes new work until the installe
 exits. If a document is busy, use Check for updates again when it finishes.
 The installer asks for administrator rights because it creates a printer queue,
 so on a standard user account Windows shows that prompt rather than installing
-unattended.
+unattended. Setup stops the running app to replace its files, and starts it
+again, hidden, when the update was the app's own (`/RELAUNCH=1`).
 The database is brought up to the current shape when it is opened, because
 `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists — a
 column added in a release once never reached a single installed machine, and
@@ -484,7 +485,9 @@ Existing licence files still work. Updates are covered for one year by default.
 Pass `--updates-until` for a different end date. The issuer records the licence
 in `issued.csv` beside the signing key.
 
-Without a licence a counter works for a 14-day trial. After that, prints are
+Without a licence a counter works for a 14-day trial, counted from the day
+setup first ran on that computer (kept in the registry, so deleting files in
+the data folder does not begin another). After that, prints are
 still captured, read and kept, but held with "no licence" instead of sent;
 once a licence is in, they are sent from Needs attention. Test mode is never
 held.
@@ -548,7 +551,7 @@ to `logs/dry_run.jsonl`, but nothing is sent.
 | [`update.py`](src/waprinter/update.py) | Version check, verified download, silent install |
 | [`licence.py`](src/waprinter/licence.py) | Machine code, signed licence check, trial, AMC update cut-off |
 | [`tools/issue_licence.py`](tools/issue_licence.py) | Signs licences; runs on the issuing machine only |
-| [`capture/watcher.py`](src/waprinter/capture/watcher.py) | Drains the spool folder; waits for the format's end marker before claiming a file |
+| [`capture/watcher.py`](src/waprinter/capture/watcher.py) | Drains the spool folder; waits for the format's end marker before claiming a file, then stages it so the port is free while the document is read and sent |
 | [`capture/xps.py`](src/waprinter/capture/xps.py) | Converts what the Windows 7 XPS queue writes into the PDF everything else reads |
 | [`extract/split.py`](src/waprinter/extract/split.py) | Splits a batch print into one job per receipt |
 | [`archive.py`](src/waprinter/archive.py) | Files a copy of every printed receipt where the office can find it |

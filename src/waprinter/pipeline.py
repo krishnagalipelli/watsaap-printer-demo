@@ -12,6 +12,7 @@ import logging
 import functools
 import threading
 import uuid
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -65,6 +66,9 @@ class Pipeline:
         # Reentrant because process_document() calls process() for each part.
         self.operation_lock = threading.RLock()
         self.update_lock = threading.Lock()
+        # The last document read as a type someone chose, and what it was
+        # read with. See fields_for_kind.
+        self._kind_read: tuple | None = None
         # What the shared files looked like when we last read them.
         self._stamps: dict[str, bytes | None] = {
             "settings": self._stamp(paths().settings),
@@ -243,7 +247,22 @@ class Pipeline:
         selected = next((k for k in self.profile.all_kinds if k.name == document_kind), None)
         if selected is None:
             raise ValueError("Choose a known document type before sending.")
-        fields = extract_fields(pdf_path, profile=self.profile.for_kind(selected),
+        # Choosing a type in Needs attention reads the document for the
+        # preview, and pressing Send read it again for the message. On a
+        # scan each read is two OCR passes, so one held scan was put through
+        # OCR six times. The second read is the first one, as long as the
+        # file and everything it was read with are the same.
+        read_with = self._read_with(pdf_path, selected.name)
+        remembered = self._kind_read
+        if (
+            read_with is not None
+            and remembered is not None
+            and remembered[0] == read_with
+            and remembered[1] is self.profile
+        ):
+            return deepcopy(remembered[2])
+        profile = self.profile
+        fields = extract_fields(pdf_path, profile=profile.for_kind(selected),
                                 ocr=self.settings.ocr(),
                                 country_code=self.settings.default_country_code,
                                 forced_kind=selected)
@@ -251,7 +270,25 @@ class Pipeline:
             raise ValueError(fields.ocr_error or "Document could not be read.")
         fields.document_kind_verified = True
         fields.classification_error = ""
+        if read_with is not None:
+            self._kind_read = (read_with, profile, deepcopy(fields))
         return fields
+
+    def _read_with(self, pdf_path, kind_name: str) -> tuple | None:
+        """What a read of this file as this type depends on, or None if the
+        file cannot be looked at -- in which case nothing is remembered."""
+        try:
+            stat = Path(pdf_path).stat()
+        except OSError:
+            return None
+        return (
+            str(pdf_path),
+            stat.st_mtime_ns,
+            stat.st_size,
+            kind_name,
+            self.settings.ocr(),
+            self.settings.default_country_code,
+        )
 
     def template_for(self, fields) -> tuple[str, object | None]:
         """The approved template this document goes out under, and its name.

@@ -142,6 +142,132 @@ class TestWatcher:
         assert not watcher._sizes
 
 
+class TestThePortIsFreedWhileADocumentIsBeingSent:
+    """Every print lands on the same filename, so the port has to be emptied
+    whatever the app is doing with the print before it.
+
+    Freeing the port and sending the document used to be one thread. While a
+    receipt was uploading, the next print waited in the spool and the one
+    after that replaced it, with nothing to show a print had been lost.
+    """
+
+    def test_a_print_is_staged_without_being_processed(self, tmp_path):
+        spool, inbox = make_spool(tmp_path)
+        seen = []
+        watcher = SpoolWatcher(spool, inbox, seen.append, settle_seconds=0)
+        build(InvoiceSpec(), spool / "job1.pdf")
+
+        watcher.claim_finished()
+        staged = watcher.claim_finished()
+
+        assert len(staged) == 1 and staged[0].parent == watcher.staging
+        assert list(spool.glob("*.pdf")) == [], "the port was not freed"
+        assert seen == [] and list(inbox.glob("*.pdf")) == []
+
+    def test_the_port_is_freed_while_the_lock_is_held(self, tmp_path):
+        # The lock is what a send, and an update being installed, hold.
+        import threading
+
+        spool, inbox = make_spool(tmp_path)
+        lock = threading.RLock()
+        watcher = SpoolWatcher(spool, inbox, lambda _p: None, settle_seconds=0,
+                               operation_lock=lock)
+        build(InvoiceSpec(), spool / "job1.pdf")
+        held, release = threading.Event(), threading.Event()
+
+        def hold():
+            with lock:
+                held.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            assert held.wait(5)
+            watcher.claim_finished()
+            assert len(watcher.claim_finished()) == 1
+        finally:
+            release.set()
+            holder.join()
+
+    def test_three_prints_during_one_slow_send_are_all_captured(self, tmp_path):
+        import threading
+        import time
+
+        spool, inbox = make_spool(tmp_path)
+        seen = []
+        sending, finish = threading.Event(), threading.Event()
+
+        def slow_send(path):
+            seen.append(path)
+            sending.set()
+            assert finish.wait(10)
+
+        watcher = SpoolWatcher(spool, inbox, slow_send, poll_interval=0.01,
+                               settle_seconds=0)
+        thread = threading.Thread(target=watcher.run, daemon=True)
+        thread.start()
+        try:
+            build(InvoiceSpec(invoice_number="INV-1"), spool / "job1.pdf")
+            assert sending.wait(10), "the first print was never processed"
+            # The first is still being sent. Two more arrive on the same port,
+            # each only once the one before it has been moved out.
+            for number in ("INV-2", "INV-3"):
+                build(InvoiceSpec(invoice_number=number), spool / "job1.pdf")
+                deadline = time.monotonic() + 10
+                while (spool / "job1.pdf").exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert not (spool / "job1.pdf").exists(), (
+                    f"{number} was left in the spool behind the send")
+            assert len(seen) == 1
+            finish.set()
+            deadline = time.monotonic() + 10
+            while len(seen) < 3 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            finish.set()
+            watcher.stop()
+            thread.join(5)
+
+        assert len(seen) == 3
+        assert all(path.parent == inbox and path.exists() for path in seen)
+
+    def test_prints_staged_when_the_app_stopped_are_processed_on_the_next_start(
+        self, tmp_path
+    ):
+        spool, inbox = make_spool(tmp_path)
+        before = SpoolWatcher(spool, inbox, lambda _p: None, settle_seconds=0)
+        build(InvoiceSpec(), spool / "job1.pdf")
+        before.claim_finished()
+        assert before.claim_finished()
+        # ...and the app stops here, before the print was dealt with.
+
+        seen = []
+        after = SpoolWatcher(spool, inbox, seen.append, settle_seconds=0)
+        captured = after.process_staged()
+
+        assert len(captured) == 1 and seen == captured
+        assert captured[0].parent == inbox
+        assert list(after.staging.iterdir()) == []
+
+    def test_staged_prints_are_processed_in_the_order_they_were_printed(self, tmp_path):
+        import os
+
+        spool, inbox = make_spool(tmp_path)
+        seen = []
+        watcher = SpoolWatcher(spool, inbox, seen.append, settle_seconds=0)
+        watcher.staging.mkdir()
+        # Named against their print order, as two prints in one second can be.
+        first = build(InvoiceSpec(), watcher.staging / "20260101-090000-ffffffff.pdf")
+        second = build(InvoiceSpec(), watcher.staging / "20260101-090000-00000000.pdf")
+        os.utime(first, (1_000_000, 1_000_000))
+        os.utime(second, (1_000_001, 1_000_001))
+
+        watcher.process_staged()
+
+        assert [p.name for p in seen] == [first.name, second.name]
+
+
 class TestWindows7CapturesXps:
     """Windows 7 has no PDF driver, so its port writes XPS instead.
 

@@ -20,6 +20,20 @@ Polling rather than filesystem events: the spool folder holds at most a handful
 of files, a 500 ms poll is imperceptible next to the time Windows takes to
 render a print job, and polling does not miss events on redirected or network
 profiles the way change notifications can.
+
+Freeing the port and dealing with the document are two separate jobs, on two
+threads. They used to be one: the thread that moved a finished file out of the
+spool then read it, ran OCR over it and uploaded it before it looked at the
+spool again. A send on a poor connection takes a minute or more, and the port
+writes every print to the same filename, so the second receipt printed in that
+minute waited in the spool and the third replaced it. Nothing recorded that a
+print had been lost, because nothing had ever seen it.
+
+So a finished file is first moved into a staging folder, which takes
+milliseconds and waits for nothing, and a second thread works through that
+folder in the order the prints were made. The staging folder is on disk rather
+than in memory on purpose: whatever is in it when the app stops -- a crash, a
+power cut, an update -- is still there, and is processed, when it next starts.
 """
 
 from __future__ import annotations
@@ -44,6 +58,10 @@ EOF_TAIL_BYTES = 2048
 # What a port may write. The driver decides which: PDF on Windows 10 and later,
 # XPS on Windows 7.
 CAPTURED_SUFFIXES = {".pdf"} | xps.SUFFIXES
+# Where finished prints wait to be processed, beside the inbox.
+STAGING_FOLDER = "claimed"
+# How often the processing thread looks at the staging folder unprompted.
+STAGED_RECHECK_SECONDS = 2.0
 
 
 def is_complete(path: Path) -> bool:
@@ -74,7 +92,7 @@ def is_complete(path: Path) -> bool:
 
 
 def claim(path: Path, inbox: Path) -> Path | None:
-    """Move a finished spool file into the inbox under a unique name.
+    """Move a finished spool file into `inbox` under a unique name.
 
     The rename doubles as the readiness test: on Windows it fails with a sharing
     violation while the spooler still holds the handle, so a file that moves is
@@ -106,9 +124,13 @@ class SpoolWatcher:
         settle_seconds: float = SETTLE_SECONDS,
         operation_lock=None,
         on_unreadable: Callable[[Path, str], None] | None = None,
+        staging: Path | None = None,
     ):
         self.spool = spool
         self.inbox = inbox
+        # Where a finished print waits its turn. Beside the inbox, so the move
+        # out of it is a rename on the same volume.
+        self.staging = staging or inbox.parent / STAGING_FOLDER
         self.on_job = on_job
         # Called with the claimed file and the reason when a print cannot be
         # turned into a PDF, so it is recorded rather than only logged.
@@ -118,35 +140,133 @@ class SpoolWatcher:
         self._sizes: dict[Path, tuple[int, float]] = {}
         self._running = False
         self.operation_lock = operation_lock or threading.RLock()
+        # Set when something new is staged, so it is picked up at once rather
+        # than on the processing thread's next look.
+        self._staged = threading.Event()
 
     def stop(self) -> None:
         self._running = False
+        self._staged.set()
 
     def run(self) -> None:
-        """Loop until stop() is called. Intended to run on its own thread."""
+        """Loop until stop() is called. Intended to run on its own thread.
+
+        This thread only ever frees the port. Documents are dealt with on a
+        second thread, started here, so nothing that takes time -- OCR, an
+        upload, an update being installed -- can leave a finished print in
+        the spool to be overwritten by the next one.
+        """
         self._running = True
         self.spool.mkdir(parents=True, exist_ok=True)
         self.inbox.mkdir(parents=True, exist_ok=True)
         log.info("watching %s", self.spool)
 
+        threading.Thread(
+            target=self._process_loop, name="documents", daemon=True
+        ).start()
+
         while self._running:
             try:
-                self.drain_once()
+                if self.claim_finished():
+                    self._staged.set()
             except Exception:
                 # A bad job must never take the service down; the next poll
                 # continues with whatever else is waiting.
                 log.exception("spool poll failed")
             time.sleep(self.poll_interval)
 
-    def drain_once(self) -> list[Path]:
-        # The updater shares this lock. Acquire before claiming a spool file,
-        # so an installation cannot strand a claimed, not-yet-recorded PDF.
-        with self.operation_lock:
-            return self._drain_once()
+    def _process_loop(self) -> None:
+        while self._running:
+            # Cleared before the look, not after it: a print staged while
+            # this pass is busy then wakes the next one straight away.
+            self._staged.clear()
+            try:
+                self.process_staged()
+            except Exception:
+                log.exception("could not process the staged prints")
+            # The timeout is for what no claim announces: prints left from
+            # the last run, and a file that could not be moved a moment ago.
+            self._staged.wait(STAGED_RECHECK_SECONDS)
 
-    def _drain_once(self) -> list[Path]:
-        """One pass over the spool folder. Returns the jobs handed off."""
+    def drain_once(self) -> list[Path]:
+        """Free the ports and deal with what they held, in one call.
+
+        For anything that drives the watcher by hand. Both halves run under
+        the lock the updater shares, so nothing here starts while an
+        installation is under way.
+        """
+        with self.operation_lock:
+            self.claim_finished()
+            return self.process_staged()
+
+    def process_staged(self) -> list[Path]:
+        """Hand every staged print to the pipeline, oldest first.
+
+        The lock is taken for each document rather than for the pass, so an
+        update or a settings change can get in between two receipts of a long
+        run instead of waiting for all of it.
+        """
         captured: list[Path] = []
+        waiting = self._staged_files()
+        if waiting:
+            self.inbox.mkdir(parents=True, exist_ok=True)
+        for staged in waiting:
+            with self.operation_lock:
+                claimed = self.inbox / staged.name
+                try:
+                    os.replace(staged, claimed)
+                except OSError as exc:
+                    # Held open by a scanner, or already taken. Still staged,
+                    # so the next pass tries again.
+                    log.debug("could not take %s yet: %s", staged, exc)
+                    continue
+                if xps.is_xps(claimed):
+                    try:
+                        claimed = xps.to_pdf(claimed)
+                    except Exception as exc:
+                        # Leave it in the inbox to be looked at, and say so
+                        # where the operator looks. A log line alone was the
+                        # only trace, and nothing on any screen said a print
+                        # had been lost.
+                        log.exception("could not convert %s", claimed)
+                        if self.on_unreadable is not None:
+                            try:
+                                self.on_unreadable(claimed, str(exc))
+                            except Exception:
+                                log.exception("could not record %s", claimed)
+                        continue
+                captured.append(claimed)
+                log.info("captured %s", claimed.name)
+                try:
+                    self.on_job(claimed)
+                except Exception:
+                    log.exception("pipeline failed for %s", claimed)
+        return captured
+
+    def _staged_files(self) -> list[Path]:
+        """What is waiting, in the order it was printed."""
+        try:
+            waiting = [p for p in self.staging.iterdir()
+                       if p.suffix.lower() in CAPTURED_SUFFIXES]
+        except OSError:
+            return []  # nothing has been staged yet
+
+        def printed(path: Path) -> tuple[float, str]:
+            # A rename keeps the time the spooler finished writing, which is
+            # finer than the second in the name.
+            try:
+                return (path.stat().st_mtime, path.name)
+            except OSError:
+                return (0.0, path.name)
+
+        return sorted(waiting, key=printed)
+
+    def claim_finished(self) -> list[Path]:
+        """One pass over the spool folder. Returns what was moved to staging.
+
+        Takes no lock and waits for nothing, which is the point of it.
+        """
+        staged: list[Path] = []
         now = time.monotonic()
 
         for path in sorted(p for p in self.spool.glob("*")
@@ -166,35 +286,16 @@ class SpoolWatcher:
             if now - previous[1] < self.settle_seconds:
                 continue
 
-            claimed = claim(path, self.inbox)
+            claimed = claim(path, self.staging)
             if claimed is None:
                 continue
 
             self._sizes.pop(path, None)
-            if xps.is_xps(claimed):
-                try:
-                    claimed = xps.to_pdf(claimed)
-                except Exception as exc:
-                    # Leave it in the inbox to be looked at, and say so where
-                    # the operator looks. A log line alone was the only trace,
-                    # and nothing on any screen said a print had been lost.
-                    log.exception("could not convert %s", claimed)
-                    if self.on_unreadable is not None:
-                        try:
-                            self.on_unreadable(claimed, str(exc))
-                        except Exception:
-                            log.exception("could not record %s", claimed)
-                    continue
-            captured.append(claimed)
-            log.info("captured %s", claimed.name)
-            try:
-                self.on_job(claimed)
-            except Exception:
-                log.exception("pipeline failed for %s", claimed)
+            staged.append(claimed)
 
         # Forget files that have gone away.
         for known in list(self._sizes):
             if not known.exists():
                 self._sizes.pop(known, None)
 
-        return captured
+        return staged

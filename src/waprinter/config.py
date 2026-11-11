@@ -117,6 +117,15 @@ class Paths:
         return self.root / "inbox"
 
     @property
+    def claimed(self) -> Path:
+        """Finished prints moved out of the spool, waiting to be processed.
+
+        On disk rather than in memory, so a print that was waiting when the
+        app stopped is still here when it starts again.
+        """
+        return self.root / "claimed"
+
+    @property
     def archive(self) -> Path:
         return self.root / "archive"
 
@@ -147,7 +156,7 @@ class Paths:
         return self.root / "samples"
 
     def ensure(self) -> None:
-        for p in (self.spool, self.inbox, self.archive, self.logs):
+        for p in (self.spool, self.claimed, self.inbox, self.archive, self.logs):
             p.mkdir(parents=True, exist_ok=True)
 
 

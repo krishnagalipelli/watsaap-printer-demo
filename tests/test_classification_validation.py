@@ -215,3 +215,63 @@ def test_validation_uses_ocr_settings_for_scanned_samples(sample_set, monkeypatc
                                  replace(profile, field_rules={}), Settings())
     assert report.passed
     assert calls and calls[0].enabled
+
+
+class TestChoosingATypeReadsTheDocumentOnce:
+    """Choosing a type in Needs attention reads the document for the preview,
+    and Send read it again for the message. On a scan each read is two OCR
+    passes, so the second read is now the first one -- while nothing it
+    depends on has changed."""
+
+    @pytest.fixture
+    def reads(self, monkeypatch):
+        import waprinter.extract as extract
+
+        made = []
+        real = extract.extract_fields
+
+        def counted(*args, **kwargs):
+            made.append(kwargs.get("forced_kind"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(extract, "extract_fields", counted)
+        return made
+
+    @pytest.fixture
+    def notice(self, link_pipeline, tmp_path):
+        return link_pipeline.process(pdf(tmp_path / 'other.pdf', [
+            'UNREADABLE HEADING', 'To, RAVI KUMAR', 'Mobile: 9876543210',
+            'Receipt No: RN-731', 'Date: 12/05/2026'])).pdf_path
+
+    def test_the_preview_and_the_send_share_one_read(self, link_pipeline, notice, reads):
+        first = link_pipeline.fields_for_kind(notice, 'removal_notice')
+        again = link_pipeline.fields_for_kind(notice, 'removal_notice')
+        assert len(reads) == 1
+        assert again.customer_name == first.customer_name == 'RAVI KUMAR'
+
+    def test_what_a_caller_changes_does_not_reach_the_next_one(self, link_pipeline, notice):
+        first = link_pipeline.fields_for_kind(notice, 'removal_notice')
+        first.customer_name = 'SOMEONE ELSE'
+        first.extra['note'] = 'x'
+        again = link_pipeline.fields_for_kind(notice, 'removal_notice')
+        assert again.customer_name == 'RAVI KUMAR' and 'note' not in again.extra
+
+    def test_another_type_is_read_afresh(self, link_pipeline, notice, reads):
+        link_pipeline.fields_for_kind(notice, 'removal_notice')
+        link_pipeline.fields_for_kind(notice, 'removal_letter')
+        assert len(reads) == 2
+
+    def test_a_changed_file_is_read_afresh(self, link_pipeline, notice, reads, tmp_path):
+        link_pipeline.fields_for_kind(notice, 'removal_notice')
+        replacement = pdf(tmp_path / 'new.pdf', [
+            'UNREADABLE HEADING', 'To, SUNITA DEVI BHARADWAJ', 'Mobile: 9876543210',
+            'Receipt No: RN-900', 'Date: 13/05/2026'])
+        notice.write_bytes(replacement.read_bytes())
+        assert link_pipeline.fields_for_kind(notice, 'removal_notice').customer_name == 'SUNITA DEVI BHARADWAJ'
+        assert len(reads) == 2
+
+    def test_newly_taught_rules_are_read_afresh(self, link_pipeline, notice, reads):
+        link_pipeline.fields_for_kind(notice, 'removal_notice')
+        link_pipeline.reload_profile(force=True)
+        link_pipeline.fields_for_kind(notice, 'removal_notice')
+        assert len(reads) == 2

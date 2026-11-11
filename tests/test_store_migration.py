@@ -306,3 +306,25 @@ class TestInterruptedSends:
         assert pipeline.recover_interrupted() == []
         for status in (JobStatus.SENT, JobStatus.HELD, JobStatus.FAILED):
             assert pipeline.store.get(str(status)).status is status
+
+
+class TestCountingSendsDoesNotSlowWithAge:
+    """The volume rails ask "how many were sent since..." twice per print,
+    and the window asks on every refresh. With only the status index that
+    read every sent job there had ever been."""
+
+    @staticmethod
+    def _plan(store: Store) -> str:
+        rows = store.conn.execute(
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM jobs WHERE status = ? AND sent_at >= ?",
+            ("sent", "2026-01-01T00:00:00"),
+        ).fetchall()
+        return " ".join(str(row[3]) for row in rows)
+
+    def test_a_new_database_counts_by_status_and_time(self, tmp_path):
+        store = Store(tmp_path / "jobs.db")
+        assert "idx_jobs_status_sent" in self._plan(store)
+
+    def test_an_old_database_gains_the_index_when_it_is_opened(self, old_database):
+        store = Store(old_database)
+        assert "idx_jobs_status_sent" in self._plan(store)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import httpx
 import pytest
@@ -296,3 +297,41 @@ class TestAgentIntegration:
 
         message = agent.check_updates()
         assert "being sent" in message
+
+
+class TestTheAppComesBackAfterUpdatingItself:
+    """Setup stops the running copy before replacing its files. The entry that
+    starts the app after an install by hand is skipped when setup is silent,
+    so a counter that updated itself captured nothing until the next logon."""
+
+    def test_the_updater_asks_setup_to_start_the_app_again(self, monkeypatch):
+        from unittest.mock import Mock
+
+        started = []
+        process = Mock()
+        process.wait.return_value = 0
+
+        def popen(arguments, **_kwargs):
+            started.append(arguments)
+            return process
+
+        monkeypatch.setattr(update.sys, "platform", "win32")
+        monkeypatch.setattr(update.subprocess, "Popen", popen)
+        update.install(Path("setup.exe"))
+
+        assert update.RELAUNCH_ARGUMENT in started[0]
+        assert "/VERYSILENT" in started[0]
+
+    def test_setup_has_an_entry_that_answers_it(self):
+        # The two halves live in different languages; this keeps them in step.
+        script = (Path(__file__).parents[1] / "installer" / "setup.iss").read_text(
+            encoding="utf-8"
+        )
+        name, _, value = update.RELAUNCH_ARGUMENT.lstrip("/").partition("=")
+        assert "{param:%s|0}') = '%s'" % (name, value) in script
+        relaunch = [
+            line for line in script.splitlines()
+            if "skipifnotsilent" in line and "Check: RelaunchRequested" in line
+        ]
+        assert len(relaunch) == 1
+        assert "runasoriginaluser" in relaunch[0]

@@ -416,20 +416,67 @@ def _installed(machine: str) -> tuple[Licence | None, str]:
     return licence, ""
 
 
+_INSTALL_KEY = r"SOFTWARE\WAPrinter"
+_INSTALL_VALUE = "InstalledOn"
+
+
+def _installed_on() -> date | None:
+    """The day setup first ran on this computer, or None if it did not say.
+
+    Setup writes it under HKEY_LOCAL_MACHINE, once, and leaves it there when
+    the app is uninstalled. Only an administrator can change it, which is
+    what the record in the data folder lacks: every account can write there,
+    and deleting that one file used to start the trial again. Both registry
+    views are read because the Windows 7 build is a 32-bit setup and writes
+    to the other one.
+    """
+    if sys.platform != "win32":
+        return None
+    import winreg
+
+    found = []
+    for view in ("KEY_WOW64_64KEY", "KEY_WOW64_32KEY"):
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                _INSTALL_KEY,
+                0,
+                winreg.KEY_READ | getattr(winreg, view, 0),
+            ) as key:
+                found.append(
+                    date.fromisoformat(str(winreg.QueryValueEx(key, _INSTALL_VALUE)[0]).strip())
+                )
+        except (OSError, ValueError):
+            continue
+    return min(found) if found else None
+
+
 def _trial_started(today: date) -> date | None:
-    """When this install first ran, recorded the first time anyone asks."""
+    """When this install first ran, recorded the first time anyone asks.
+
+    The earlier of the record here and the day setup wrote down, so removing
+    the record does not buy another trial: it is written again from setup's
+    date rather than from today.
+    """
     path = paths().root / _TRIAL_FILE
     try:
-        return date.fromisoformat(path.read_text(encoding="utf-8").strip())
+        installed = _installed_on()
+    except Exception:
+        log.exception("could not read the install date")
+        installed = None
+    try:
+        recorded = date.fromisoformat(path.read_text(encoding="utf-8").strip())
+        return min(recorded, installed) if installed else recorded
     except FileNotFoundError:
         pass
     except (OSError, ValueError) as exc:
         # Someone has been at the file. Not a fresh trial.
         log.warning("trial record unreadable (%s); treating the trial as over", exc)
         return None
+    started = min(installed, today) if installed else today
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, today.isoformat())
-    return today
+    atomic_write_text(path, started.isoformat())
+    return started
 
 
 def status(today: date | None = None) -> Status:

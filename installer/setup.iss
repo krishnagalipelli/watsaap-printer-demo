@@ -20,7 +20,7 @@
 #endif
 
 #define AppName        "WhatsApp Printer"
-#define AppVersion     "2.0.5"
+#define AppVersion     "2.0.6"
 #define AppPublisher   "Sunrise Software"
 #define DataDir        "C:\ProgramData\WAPrinter"
 
@@ -152,6 +152,12 @@ Name: "desktopicon"; Description: "Put a shortcut on the desktop"; \
     GroupDescription: "Shortcuts"
 
 [Registry]
+; The day this computer was first set up, which is what the trial counts
+; from. Here rather than only in the data folder because every account can
+; write there, and deleting the record started the trial again. Written once
+; and never removed, so neither an upgrade nor a reinstall moves it.
+Root: HKLM; Subkey: "SOFTWARE\WAPrinter"; ValueType: string; ValueName: "InstalledOn"; \
+    ValueData: "{code:InstallDay}"; Flags: createvalueifdoesntexist
 ; Point the agent at the bundled tessdata, so OCR works without Tesseract being
 ; on PATH.
 #if OcrEnabled
@@ -165,13 +171,21 @@ Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environmen
 ; Start the agent now so the first print works without a reboot.
 Filename: "{app}\waprinter-agent.exe"; Parameters: "--activate"; Description: "Start {#AppName}"; \
     Flags: postinstall nowait skipifsilent runasoriginaluser
+; After the app has updated itself. PrepareToInstall stops the running copy,
+; and the entry above is skipped when setup is silent, so nothing started it
+; again and the counter captured no prints until the next logon. Only when
+; the app asked for it (update.py passes /RELAUNCH=1): a silent install pushed
+; by an engineer starts nothing, as before. Hidden, as at logon, and as the
+; signed-in user rather than the administrator who approved the prompt.
+Filename: "{app}\waprinter-agent.exe"; Parameters: "--hidden"; \
+    Flags: nowait skipifnotsilent runasoriginaluser; Check: RelaunchRequested
 
 
 [UninstallRun]
 ; Stop the agent before pulling the printer out from under it.
-Filename: "taskkill.exe"; Parameters: "/F /IM waprinter-agent.exe"; \
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM waprinter-agent.exe"; \
     Flags: runhidden; RunOnceId: "StopAgent"
-Filename: "powershell.exe"; \
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
     Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\provision.ps1"" -Uninstall"; \
     Flags: runhidden waituntilterminated; RunOnceId: "RemovePrinter"
 
@@ -184,6 +198,24 @@ function GetProcAddress(Module: LongWord; ProcName: AnsiString): LongWord;
 function IsLegacyWindows: Boolean;
 begin
   Result := GetWindowsVersion < $0A000000;
+end;
+
+function InstallDay(Param: String): String;
+begin
+  // ISO form, as licence.py reads it: 2026-11-11.
+  Result := GetDateTimeString('yyyy/mm/dd', '-', ':');
+end;
+
+// Named in full, like taskkill below. A bare name is looked for in other
+// folders before System32, and setup runs these as an administrator.
+function PowerShellPath: String;
+begin
+  Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+end;
+
+function RelaunchRequested: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
 end;
 
 function InitializeSetup: Boolean;
@@ -229,7 +261,7 @@ begin
   begin
     // [Run] ignores a program's failure exit code. A failed printer creation
     // must be visible before setup offers to launch an apparently ready app.
-    if not Exec('powershell.exe',
+    if not Exec(PowerShellPath,
       '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\provision.ps1') + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
       RaiseException('Could not start printer setup. Check PowerShell is available and run setup again.');

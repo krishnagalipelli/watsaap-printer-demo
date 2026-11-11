@@ -1154,7 +1154,7 @@ class DesktopWindow:
         dialog.transient(self.root)
         ttk.Label(dialog, text="Open the PDF, choose its type, then review the message.",
                   padding=12).pack(anchor="w")
-        ttk.Button(dialog, text="Open PDF", command=lambda: webbrowser.open(job.pdf_path.resolve().as_uri())).pack()
+        ttk.Button(dialog, text="Open PDF", command=lambda: self.open_pdf(job.id)).pack()
         kinds = list(dict.fromkeys(k.name for k in self.pipeline.profile.all_kinds))
         selected = tk.StringVar()
         box = ttk.Combobox(dialog, values=kinds, textvariable=selected, state="readonly")
@@ -1225,7 +1225,12 @@ class DesktopWindow:
                 "WhatsApp Printer", "That PDF is no longer on disk.", parent=self.root
             )
             return
-        webbrowser.open(job.pdf_path.as_uri())
+        from ..send.link import open_document
+
+        try:
+            open_document(job.pdf_path)
+        except ValueError as exc:
+            messagebox.showerror("WhatsApp Printer", str(exc), parent=self.root)
 
     def open_whatsapp(self, job_id: str) -> bool:
         """Open the member's chat with the message already typed.
@@ -1398,7 +1403,15 @@ class DesktopWindow:
 
     def _refresh(self) -> None:
         try:
-            self.refresh()
+            if self.root.winfo_viewable():
+                self.refresh()
+            else:
+                # Closed to the corner or minimised, which is how the app
+                # spends most of the day. Redrawing pages nobody can see cost
+                # a token decryption, a licence check and a dozen queries
+                # every two seconds. Settings written by the CLI still have
+                # to be noticed, because the next print is sent with them.
+                self.pipeline.reload_if_changed()
         except Exception:
             log.exception("refresh failed")
         self.root.after(REFRESH_MS, self._refresh)
@@ -1409,6 +1422,12 @@ class DesktopWindow:
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
+        # The pages were not kept up to date while hidden; do not make the
+        # operator wait for the timer to see today's counts.
+        try:
+            self.refresh()
+        except Exception:
+            log.exception("refresh failed")
 
     def hide(self) -> None:
         """Closing the window must not stop prints being captured."""

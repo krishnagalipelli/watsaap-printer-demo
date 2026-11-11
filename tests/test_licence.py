@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 from invoice_factory import ChitReceiptSpec, build_chit_receipt
@@ -253,3 +254,59 @@ class TestTools:
                                    "--licensee", "Branch 4", "-o", str(out)]) == 0
         assert lic.install(out.read_text()).licensee == "Branch 4"
         assert "Branch 4" in (key.parent / "issued.csv").read_text()
+
+
+class TestTheTrialCannotBeStartedAgain:
+    """The record of when the trial began sits in the data folder, where
+    every account can write. Deleting it used to begin another fourteen days.
+    Setup now writes the day it first ran where only an administrator can."""
+
+    def test_deleting_the_record_does_not_begin_another_trial(self, monkeypatch):
+        installed = date(2026, 1, 1)
+        monkeypatch.setattr(lic, "_installed_on", lambda: installed)
+        assert lic.status(installed).can_send
+        later = installed + timedelta(days=30)
+        assert not lic.status(later).can_send
+
+        (paths().root / "trial-started.txt").unlink()
+
+        state = lic.status(later)
+        assert not state.can_send
+        assert state.trial_ends == installed + timedelta(days=lic.TRIAL_DAYS)
+
+    def test_a_record_edited_to_a_later_day_is_not_believed(self, monkeypatch):
+        installed = date(2026, 1, 1)
+        monkeypatch.setattr(lic, "_installed_on", lambda: installed)
+        later = installed + timedelta(days=30)
+        paths().root.mkdir(parents=True, exist_ok=True)
+        (paths().root / "trial-started.txt").write_text(later.isoformat())
+        assert not lic.status(later).can_send
+
+    def test_an_install_older_than_this_check_keeps_its_own_date(self, monkeypatch):
+        # Upgrading writes today's date for a counter that has run for months.
+        started = date(2026, 1, 1)
+        paths().root.mkdir(parents=True, exist_ok=True)
+        (paths().root / "trial-started.txt").write_text(started.isoformat())
+        monkeypatch.setattr(lic, "_installed_on", lambda: started + timedelta(days=200))
+        state = lic.status(started + timedelta(days=3))
+        assert state.trial_ends == started + timedelta(days=lic.TRIAL_DAYS)
+
+    def test_a_fault_reading_the_install_date_does_not_stop_the_trial(self, monkeypatch):
+        def broken():
+            raise OSError("registry unavailable")
+
+        monkeypatch.setattr(lic, "_installed_on", broken)
+        assert lic.status(date(2026, 1, 1)).can_send
+
+    def test_setup_writes_the_date_the_app_reads(self):
+        script = (Path(__file__).parents[1] / "installer" / "setup.iss").read_text(
+            encoding="utf-8"
+        )
+        assert 'Subkey: "%s"' % lic._INSTALL_KEY in script
+        assert 'ValueName: "%s"' % lic._INSTALL_VALUE in script
+        # The entry is the line naming the value and the one it continues onto.
+        lines = script.splitlines()
+        at = next(i for i, line in enumerate(lines)
+                  if 'ValueName: "%s"' % lic._INSTALL_VALUE in line)
+        entry = " ".join(lines[at:at + 2])
+        assert "createvalueifdoesntexist" in entry and "uninsdelete" not in entry

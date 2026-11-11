@@ -253,3 +253,54 @@ class TestAutoOpen:
         opened = link_pipeline.hand_off(job.id)
         _tone, _headline, detail = describe(opened)
         assert "Ctrl+V" in detail
+
+
+class TestOnlyDocumentsAndChatsAreHandedToTheShell:
+    """The link and the file path are read back from the job database, which
+    every account on the computer can write to, and the shell runs whatever it
+    is given. A row edited to name a program must not start that program for
+    whoever clicks View PDF or Open WhatsApp."""
+
+    @pytest.mark.parametrize("url", [
+        r"C:\Users\Public\run-me.exe",
+        "file:///C:/Users/Public/run-me.exe",
+        "https://wa.me.example.test/919000012345",
+        "http://wa.me/919000012345",
+    ])
+    def test_a_link_that_is_not_a_whatsapp_chat_is_not_opened(self, url, monkeypatch):
+        from waprinter.send import link
+
+        opened = []
+        monkeypatch.setattr(link.subprocess, "Popen", lambda *a, **k: opened.append(a))
+        with pytest.raises(ValueError, match="not a WhatsApp link"):
+            link.open_chat(url)
+        assert opened == []
+
+    @pytest.mark.parametrize("name", ["run-me.exe", "receipt.pdf.lnk", "receipt.bat", "receipt"])
+    def test_a_file_that_is_not_a_printed_document_is_not_opened(
+        self, name, tmp_path, monkeypatch
+    ):
+        import webbrowser
+
+        from waprinter.send import link
+
+        opened = []
+        monkeypatch.setattr(webbrowser, "open", opened.append)
+        target = tmp_path / name
+        target.write_bytes(b"MZ")
+        with pytest.raises(ValueError, match="not a printed document"):
+            link.open_document(target)
+        assert opened == []
+
+    @pytest.mark.parametrize("name", ["20260907-113601-fee7f6b4.pdf", "JOB1.XPS"])
+    def test_a_captured_print_still_opens(self, name, tmp_path, monkeypatch):
+        import webbrowser
+
+        from waprinter.send import link
+
+        opened = []
+        monkeypatch.setattr(webbrowser, "open", opened.append)
+        target = tmp_path / name
+        target.write_bytes(b"%PDF-")
+        link.open_document(target)
+        assert opened == [target.resolve().as_uri()]

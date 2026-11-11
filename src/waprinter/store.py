@@ -50,6 +50,11 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status     ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created    ON jobs(created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_dedupe     ON jobs(dedupe_key, sent_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_recipient  ON jobs(recipient);
+-- "How many were sent since..." is asked twice for every print (the volume
+-- rails) and on every refresh of the window. With only the status index
+-- that read every sent job there has ever been, so it slowed with the age
+-- of the install: 16 ms a time after a year's prints, and under 0.1 with this.
+CREATE INDEX IF NOT EXISTS idx_jobs_status_sent ON jobs(status, sent_at);
 
 -- Append-only trail of every state change, for support and dispute handling.
 CREATE TABLE IF NOT EXISTS events (
@@ -327,9 +332,13 @@ class Store:
     @_locked
     def status_counts(self, since: datetime) -> dict[str, int]:
         """How many jobs landed in each status since `since`."""
+        # "+status" keeps SQLite off the status index. It chose that index to
+        # get the groups in order for free, and paid for it by reading every
+        # job ever recorded to find today's: 14 ms after a year's prints,
+        # where finding today's by created_at and then grouping takes 0.05.
         rows = self.conn.execute(
             "SELECT status, COUNT(*) AS n FROM jobs WHERE created_at >= ? "
-            "GROUP BY status",
+            "GROUP BY +status",
             (since.isoformat(),),
         ).fetchall()
         return {row["status"]: int(row["n"]) for row in rows}

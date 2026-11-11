@@ -337,6 +337,36 @@ def test_a_batch_print_does_not_open_a_chat_per_receipt(window, monkeypatch):
         window.refresh()
 
 
+def test_a_hidden_window_is_not_redrawn_but_still_notices_new_settings(window, monkeypatch):
+    """Closed to the corner is how the app spends the day. Redrawing pages
+    nobody can see cost a token decryption, a licence check and a dozen
+    queries every two seconds; what the CLI writes must still be picked up,
+    because the next print is sent with it."""
+    drawn, reloaded = [], []
+    monkeypatch.setattr(window, "refresh", lambda: drawn.append(1))
+    monkeypatch.setattr(window.pipeline, "reload_if_changed", lambda: reloaded.append(1))
+    # Each call re-arms the timer; do not leave extra ones running.
+    monkeypatch.setattr(window.root, "after", lambda *a, **k: None)
+    try:
+        window.root.withdraw()
+        window.root.update()
+        window._refresh()
+        assert drawn == [] and reloaded == [1]
+    finally:
+        window.root.deiconify()
+        window.root.update()
+
+    window._refresh()
+    assert drawn == [1], "a visible window must still be kept up to date"
+
+
+def test_showing_the_window_brings_it_up_to_date_at_once(window, monkeypatch):
+    drawn = []
+    monkeypatch.setattr(window, "refresh", lambda: drawn.append(1))
+    window.show()
+    assert drawn == [1]
+
+
 @pytest.fixture
 def sync_tasks(monkeypatch):
     """Run setup's background work inline, so a test can see its result."""

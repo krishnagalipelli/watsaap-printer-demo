@@ -47,8 +47,20 @@ def chat_url(recipient: str, message: str) -> str:
     return f"{BASE}{number}?text={quote(text, safe='')}"
 
 
+# What a captured print can be. Anything else is not a document this app made.
+DOCUMENT_SUFFIXES = {".pdf", ".xps", ".oxps"}
+
+
 def open_chat(url: str) -> None:
-    """Hand the link to the operating system."""
+    """Hand the link to the operating system.
+
+    Only a link this module could have made. The link is read back from the
+    job database, which every account on the computer can write to, and the
+    shell runs whatever it is handed: a row edited to hold a program's path
+    would have started that program for whoever clicked Open WhatsApp.
+    """
+    if not str(url).startswith(BASE):
+        raise ValueError("This document's WhatsApp link is not a WhatsApp link, so it was not opened.")
     if sys.platform == "win32":
         import os
 
@@ -57,6 +69,20 @@ def open_chat(url: str) -> None:
         subprocess.Popen(["open", url])
     else:
         subprocess.Popen(["xdg-open", url])
+
+
+def open_document(path: Path) -> None:
+    """Show a captured print in whatever the computer opens documents with.
+
+    The path comes from the job database too, so the same rule as open_chat:
+    a PDF or an XPS is opened by its viewer, and nothing else is handed over.
+    """
+    path = Path(path)
+    if path.suffix.lower() not in DOCUMENT_SUFFIXES:
+        raise ValueError(f"{path.name} is not a printed document, so it was not opened.")
+    import webbrowser
+
+    webbrowser.open(path.resolve().as_uri())
 
 
 def copy_file_to_clipboard(path: Path) -> bool:
