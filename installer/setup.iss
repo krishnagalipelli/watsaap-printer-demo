@@ -231,7 +231,7 @@ end;
 procedure CurPageChanged(CurPageID: Integer);
 begin
   if (CurPageID = wpFinished) and IsLegacyWindows then
-    WizardForm.FinishedLabel.Caption := 'The "WhatsApp Printer" queue has been added. In your billing software choose File > Print and pick it, and the receipt is read and sent as normal. On this version of Windows the queue is built on the Microsoft XPS Document Writer, because there is no inbox PDF driver before Windows 10; the app converts each job as it arrives, so there is nothing different to do. If the printer is missing from the print dialog, turn on the "XPS Services" Windows feature and run setup again — until then, exporting a PDF into the folder on the desktop shortcut still works. Open Setup > Try it to check a sample before enabling live sends.';
+    WizardForm.FinishedLabel.Caption := 'The "WhatsApp Printer" queue has been added. In your billing software choose File > Print and pick it, and the receipt is read and sent as normal. On this version of Windows the queue is built on the Microsoft XPS Document Writer, because there is no inbox PDF driver before Windows 10; the app converts each job as it arrives, so there is nothing different to do. If your billing software saves bills as PDFs, you can instead save each one into the "WhatsApp PDF folder" shortcut on the desktop: it is sent the same way, with the same notification. That folder also works if the printer asks where to save, or is missing from the print dialog (turn on the "XPS Services" Windows feature and run setup again to add it). Open Setup > Try it to check a sample before enabling live sends.';
 end;
 
 // Closing the window only hides the app: it keeps running to catch the next

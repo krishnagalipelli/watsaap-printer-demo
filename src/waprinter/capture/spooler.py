@@ -12,11 +12,13 @@ it. If it is unavailable, capture still works — jobs just show no title.
 
 from __future__ import annotations
 
+import getpass
 import logging
 import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -113,6 +115,26 @@ def latest_job() -> SpoolJobInfo:
     """Best guess at the job we just captured. Empty when unavailable."""
     jobs = recent_jobs()
     return jobs[0] if jobs else SpoolJobInfo()
+
+
+def job_info(captured: Path) -> SpoolJobInfo:
+    """What is known about a captured file: its print job, or its saved name.
+
+    A PDF saved into the spool folder never went through the spooler, so the
+    latest print job is somebody else's document -- and its title would become
+    this one's attachment name. Use the name it was saved under, and the person
+    signed in here, who is the one who saved it.
+    """
+    from .watcher import saved_name
+
+    name = saved_name(captured)
+    if name is None:
+        return latest_job()
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = None
+    return SpoolJobInfo(document=name, user=user)
 
 
 def printer_installed(name: str = PRINTER_NAME) -> bool | None:

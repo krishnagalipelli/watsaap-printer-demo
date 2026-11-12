@@ -8,7 +8,7 @@ import sys
 import threading
 from pathlib import Path
 
-from .capture.spooler import latest_job
+from .capture.spooler import job_info
 from .capture.watcher import SpoolWatcher
 from .config import Settings, paths
 from .pipeline import Pipeline, build_default
@@ -78,7 +78,8 @@ class Runner:
 
     def _handle(self, pdf_path: Path) -> None:
         """Process one captured PDF."""
-        info = latest_job()  # empty off Windows, or if the log is disabled
+        # Empty off Windows, or if the log is disabled.
+        info = job_info(pdf_path)
         jobs = self.pipeline.process_document(
             pdf_path,
             doc_title=info.document,
@@ -93,7 +94,7 @@ class Runner:
             )
 
     def _handle_unreadable(self, path: Path, reason: str) -> None:
-        info = latest_job()
+        info = job_info(path)
         job = self.pipeline.record_unreadable_capture(
             path, reason, doc_title=info.document, windows_user=info.user
         )

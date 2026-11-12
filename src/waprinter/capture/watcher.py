@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import threading
 import uuid
@@ -58,6 +59,16 @@ EOF_TAIL_BYTES = 2048
 # What a port may write. The driver decides which: PDF on Windows 10 and later,
 # XPS on Windows 7.
 CAPTURED_SUFFIXES = {".pdf"} | xps.SUFFIXES
+# What the printer's ports are called: job1.pdf … job4.pdf, or .xps on Windows
+# 7. Anything else in the spool folder was saved there by a person -- on
+# Windows 7 that is a supported way to send, from billing software that exports
+# PDFs -- and its name is the only title it has.
+PORT_STEM = re.compile(r"job\d+", re.IGNORECASE)
+# Separates the unique part of a claimed name from the name the file was saved
+# under. Never produced by the timestamp-and-hex prefix, so the first one found
+# is always this one.
+SAVED_NAME_MARK = "~"
+SAVED_NAME_LIMIT = 80
 # Where finished prints wait to be processed, beside the inbox.
 STAGING_FOLDER = "claimed"
 # How often the processing thread looks at the staging folder unprompted.
@@ -102,14 +113,31 @@ def claim(path: Path, inbox: Path) -> Path | None:
         return None
 
     inbox.mkdir(parents=True, exist_ok=True)
-    target = inbox / (f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-                      f"{path.suffix.lower()}")
+    unique = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    if not PORT_STEM.fullmatch(path.stem):
+        # Saved, not printed: carry the name along, since no print job will
+        # say what this document was. Without it the title came from whatever
+        # had last been printed, and that became the attachment's name.
+        unique += SAVED_NAME_MARK + path.stem[:SAVED_NAME_LIMIT]
+    target = inbox / f"{unique}{path.suffix.lower()}"
     try:
         os.replace(path, target)
     except OSError as exc:
         log.debug("could not claim %s yet: %s", path, exc)
         return None
     return target
+
+
+def saved_name(path: Path) -> str | None:
+    """The name a person saved this file under, or None for a print.
+
+    Works on the claimed file at every later step -- staged, in the inbox,
+    converted from XPS -- because each keeps the stem.
+    """
+    _, mark, name = path.stem.partition(SAVED_NAME_MARK)
+    if not mark:
+        return None
+    return name.strip() or None
 
 
 class SpoolWatcher:

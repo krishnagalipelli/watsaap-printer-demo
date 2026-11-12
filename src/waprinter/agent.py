@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import housekeeping, update
-from .capture.spooler import latest_job
+from .capture.spooler import job_info
 from .capture.watcher import SpoolWatcher
 from .config import Settings, paths
 from .instance import SingleInstance
@@ -72,7 +72,7 @@ class Agent:
         """Runs on the watcher thread. Must not create widgets."""
         self._busy.set()
         try:
-            info = latest_job()
+            info = job_info(pdf_path)
             jobs = self.pipeline.process_document(
                 pdf_path,
                 doc_title=info.document,
@@ -91,7 +91,7 @@ class Agent:
 
     def _handle_unreadable(self, path: Path, reason: str) -> None:
         """Runs on the watcher thread: a print that could not be converted."""
-        info = latest_job()
+        info = job_info(path)
         job = self.pipeline.record_unreadable_capture(
             path, reason, doc_title=info.document, windows_user=info.user
         )

@@ -12,7 +12,8 @@ import pytest
 from invoice_factory import InvoiceSpec, build, build_xps
 
 from waprinter.capture import xps
-from waprinter.capture.watcher import SpoolWatcher, claim, is_complete
+from waprinter.capture.spooler import job_info
+from waprinter.capture.watcher import SpoolWatcher, claim, is_complete, saved_name
 
 
 def make_spool(tmp_path):
@@ -422,3 +423,56 @@ class TestXpsConversion:
         with pytest.raises(ValueError):
             xps.to_pdf(source)
         assert source.exists(), "the original must be left to look at"
+
+
+class TestSavedIntoTheFolder:
+    """Windows 7: billing software that exports PDFs saves them into the spool.
+
+    Nothing in the print log describes such a file, so its saved name is the
+    only title it has -- and the title becomes the attachment's name.
+    """
+
+    def test_a_print_carries_no_saved_name(self, tmp_path):
+        spool, inbox = make_spool(tmp_path)
+        claimed = claim(build(InvoiceSpec(), spool / "job3.pdf"), inbox)
+        assert saved_name(claimed) is None
+
+    def test_a_saved_pdf_keeps_its_name(self, tmp_path):
+        spool, inbox = make_spool(tmp_path)
+        claimed = claim(build(InvoiceSpec(), spool / "Bill 1042.pdf"), inbox)
+        assert saved_name(claimed) == "Bill 1042"
+
+    def test_two_saves_under_one_name_do_not_collide(self, tmp_path):
+        spool, inbox = make_spool(tmp_path)
+        first = claim(build(InvoiceSpec(), spool / "bill.pdf"), inbox)
+        second = claim(build(InvoiceSpec(), spool / "bill.pdf"), inbox)
+        assert first != second
+        assert saved_name(first) == saved_name(second) == "bill"
+
+    def test_the_name_survives_the_watcher_and_conversion(self, tmp_path):
+        spool, inbox = make_spool(tmp_path)
+        build(InvoiceSpec(), spool / "Receipt 77.pdf")
+        build_xps(spool / "Receipt 78.xps")
+        seen = []
+        watcher = SpoolWatcher(spool, inbox, seen.append, settle_seconds=0)
+        watcher.claim_finished()
+        watcher.drain_once()
+
+        assert sorted(saved_name(p) for p in seen) == ["Receipt 77", "Receipt 78"]
+        assert all(p.suffix == ".pdf" for p in seen)
+
+    def test_a_saved_pdf_is_titled_by_its_name_not_the_last_print(
+        self, tmp_path, monkeypatch
+    ):
+        from waprinter.capture import spooler
+
+        monkeypatch.setattr(
+            spooler, "latest_job",
+            lambda: spooler.SpoolJobInfo(document="someone else's print"),
+        )
+        spool, inbox = make_spool(tmp_path)
+        saved = claim(build(InvoiceSpec(), spool / "Bill 1042.pdf"), inbox)
+        printed = claim(build(InvoiceSpec(), spool / "job1.pdf"), inbox)
+
+        assert job_info(saved).document == "Bill 1042"
+        assert job_info(printed).document == "someone else's print"

@@ -314,32 +314,29 @@ class DesktopWindow:
         if sys.platform == "win32" and sys.getwindowsversion().major < 10:
             from ..capture.spooler import PRINTER_NAME, printer_installed
             from ..config import paths
-            # Windows 7 gets a real queue built on the inbox XPS driver. Only
-            # when that driver has been turned off does the machine fall back
-            # to reading the spool folder, and only then is the operator asked
-            # to do anything different. None means we could not tell, so say
-            # both rather than send them to the folder for nothing.
+            # Windows 7 has two ways in. The queue is built on the inbox XPS
+            # driver, which on some machines asks where to save every print;
+            # and billing software that saves PDFs can save them straight into
+            # the spool folder, which the watcher reads like any print. Both
+            # end in the same send and the same notification. The folder is
+            # always offered: it is the way that works when the printer asks.
+            # None means we could not tell whether the queue exists.
             has_printer = printer_installed()
+            folder_way = ("save each bill as a PDF into the WhatsApp PDF folder "
+                          f"(shortcut on the desktop, {paths().spool}). The app "
+                          "sends it and moves it out of the folder.")
             if has_printer is not False:
                 capture = theme.card(page, "How to send", padding=14)
-                capture.pack(fill="x", pady=(16, 0))
-                text = f'Print to "{PRINTER_NAME}" from your billing software.'
-                if has_printer is None:
-                    text += ("\n\nIf it is not in the print dialog, export a PDF into "
-                             f"{paths().spool} instead.")
-                theme.autowrap(ttk.Label(capture, text=text, justify="left")).pack(fill="x")
+                text = (f'Print to "{PRINTER_NAME}" from your billing software.'
+                        "\n\nOr, if your billing software saves PDFs, " + folder_way)
             else:
                 capture = theme.card(page, "PDF folder capture", padding=14)
-                capture.pack(fill="x", pady=(16, 0))
-                theme.autowrap(ttk.Label(
-                    capture,
-                    text=(f'"{PRINTER_NAME}" is not installed, so export each document '
-                          f"as a PDF into {paths().spool} instead.\nUse a new filename "
-                          "each time. The app reads and moves it automatically."),
-                    justify="left")).pack(fill="x")
-                ttk.Button(capture, text="Open PDF folder",
-                           command=lambda: webbrowser.open(paths().spool.as_uri())).pack(
-                    anchor="w", pady=(6, 0))
+                text = (f'"{PRINTER_NAME}" is not installed, so ' + folder_way)
+            capture.pack(fill="x", pady=(16, 0))
+            theme.autowrap(ttk.Label(capture, text=text, justify="left")).pack(fill="x")
+            ttk.Button(capture, text="Open PDF folder",
+                       command=lambda: webbrowser.open(paths().spool.as_uri())).pack(
+                anchor="w", pady=(6, 0))
 
         self.activity_box = ttk.Frame(page)
         self.activity_box.pack(fill="x", pady=(30, 0))
