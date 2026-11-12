@@ -20,6 +20,10 @@ on:
         description: "Also build the Windows 7 installer (no counter runs Windows 7 today)"
         type: boolean
         default: false
+      build_x64:
+        description: "Build the Windows 10/11 installer (untick with the box above for a Windows 7-only run)"
+        type: boolean
+        default: true
 
 # Read-only by default. Only the job that attaches the installer to a release
 # gets to write, and only to contents. Third-party actions are pinned to a
@@ -30,6 +34,10 @@ permissions:
 
 jobs:
   build:
+    # Always on a push, pull request or tag. A manual run can leave it out to
+    # build only the Windows 7 installer; the release then refuses to publish,
+    # because it requires this job to succeed.
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_x64 }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
