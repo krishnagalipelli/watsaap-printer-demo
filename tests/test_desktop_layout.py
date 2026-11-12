@@ -350,12 +350,17 @@ def test_a_hidden_window_is_not_redrawn_but_still_notices_new_settings(window, m
     try:
         window.root.withdraw()
         window.root.update()
+        # A refresh timer armed before the patch can fire inside update() on a
+        # slow runner (it did on the 32-bit 3.8 one); count only our call.
+        drawn.clear()
+        reloaded.clear()
         window._refresh()
         assert drawn == [] and reloaded == [1]
     finally:
         window.root.deiconify()
         window.root.update()
 
+    drawn.clear()
     window._refresh()
     assert drawn == [1], "a visible window must still be kept up to date"
 
